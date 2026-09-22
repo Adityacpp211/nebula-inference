@@ -1,0 +1,22 @@
+# Normalize line endings: the repo is developed on Windows and runs on Linux.
+# A CRLF in a shell script inside a container fails with an unhelpful error.
+* text=auto eol=lf
+
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+*.sh        text eol=lf
+Makefile    text eol=lf
+Dockerfile* text eol=lf
+
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.gguf binary
+*.pdf  binary
+
+# Generated files: collapsed in diffs, still reviewed by CI drift checks.
+packages/api/gen/**        linguist-generated=true
+dashboard/src/lib/api/**   linguist-generated=true
+deploy/kubernetes/**       linguist-generated=true

@@ -1,0 +1,52 @@
+# Build output
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Go
+vendor/
+coverage.out
+coverage.html
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Node / dashboard
+node_modules/
+dashboard/dist/
+*.tsbuildinfo
+
+# Local development
+.env
+.env.*
+!.env.example
+*.local.yaml
+kubeconfig*
+/tmp/
+.DS_Store
+
+# Model artifacts — never committed. Large, and the registry is the store.
+*.gguf
+*.safetensors
+*.bin
+/models/
+
+# Editors
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.shared.json
+
+# Secrets — belt and braces; these should never exist in the tree at all
+*.pem
+*.key
+!**/testdata/**/*.key
+secrets.yaml
+values-local.yaml
