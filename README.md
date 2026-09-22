@@ -128,17 +128,44 @@ All twenty-four: [docs/architecture-decisions/](docs/architecture-decisions/).
 
 | Document | Contents |
 |----------|----------|
-| [architecture.md](docs/architecture.md) | Design axioms, components, service boundaries, request path, control loops, event flows, failure-mode expectations, observability, cost model |
+| [architecture.md](docs/architecture.md) | Design axioms, components, service boundaries, request path, control loops, event flows, failure-mode expectations, cost model, non-goals |
+| [components.md](docs/components.md) | Every component as responsibility / inputs / outputs / dependencies / failure modes / scaling — and what must **not** be a separate microservice |
+| [diagrams.md](docs/diagrams.md) | System, component, request, deployment, model-registration, failure/recovery, ER, Kubernetes, and dependency-graph diagrams |
 | [data-model.md](docs/data-model.md) | PostgreSQL schema, constraints, immutability triggers, partitioning, row-level security, migration policy |
 | [api.md](docs/api.md) | OpenAI-compatible surface, control API, internal worker contract, `InferenceRuntime` interface, CLI contract |
+| [events.md](docs/events.md) | NATS subject catalogue, per-event schemas, delivery semantics, consumer contracts, schema evolution |
+| [security-boundaries.md](docs/security-boundaries.md) | Trust zones, boundary contracts, identity and credentials, authorization, tenant isolation, threat table |
+| [observability.md](docs/observability.md) | Telemetry pipeline, metric catalogue with cardinality budget, span model, log schema, correlation path, SLOs and alerts |
 | [deployment-architecture.md](docs/deployment-architecture.md) | Namespaces, RBAC, NetworkPolicy, probes, artifact storage, Helm layout, kind topology, GPU optionality, CI |
 | [repository-structure.md](docs/repository-structure.md) | Monorepo layout, module strategy, dependency rules, conventions |
 | [roadmap.md](docs/roadmap.md) | Phases 0–18 with deliverables, tests, and exit criteria |
 | [risk-register.md](docs/risk-register.md) | Twenty scored risks with mitigations and residuals |
-| [architecture-decisions/](docs/architecture-decisions/) | ADRs |
+| [architecture-decisions/](docs/architecture-decisions/) | ADR index (24) plus the six load-bearing ones in full |
 
 Written during implementation: `development.md`, `deployment.md`, `model-runtime.md`,
-`observability.md`, `security.md`, `reliability.md`.
+`reliability.md`, and `security.md` (the operational threat model extending
+[security-boundaries.md](docs/security-boundaries.md)).
+
+### Design deliverable map
+
+| # | Deliverable | Where |
+|---|-------------|-------|
+| 1 | System architecture diagram | [diagrams.md §1](docs/diagrams.md#1-system-architecture) · text version [architecture.md §5](docs/architecture.md#5-architecture-diagram) |
+| 2 | Component diagram | [diagrams.md §2](docs/diagrams.md#2-component-diagram) |
+| 3 | Request lifecycle | [diagrams.md §3](docs/diagrams.md#3-request-lifecycle) · rules [architecture.md §6](docs/architecture.md#6-the-request-path) |
+| 4 | Deployment lifecycle | [diagrams.md §4](docs/diagrams.md#4-deployment-lifecycle) |
+| 5 | Model registration lifecycle | [diagrams.md §5](docs/diagrams.md#5-model-registration-lifecycle) |
+| 6 | Failure / recovery flows | [diagrams.md §6](docs/diagrams.md#6-failure-and-recovery-flows) · per-component [components.md §7](docs/components.md#7-failure-mode-summary) |
+| 7 | Database ER diagram | [diagrams.md §7](docs/diagrams.md#7-database-er-diagram) · DDL [data-model.md](docs/data-model.md) |
+| 8 | Kubernetes architecture | [diagrams.md §8](docs/diagrams.md#8-kubernetes-architecture) · detail [deployment-architecture.md](docs/deployment-architecture.md) |
+| 9 | Service dependency graph | [diagrams.md §9](docs/diagrams.md#9-service-dependency-graph) |
+| 10 | API contract | [api.md](docs/api.md) |
+| 11 | Event / message definitions | [events.md](docs/events.md) |
+| 12 | Security boundaries | [security-boundaries.md](docs/security-boundaries.md) |
+| 13 | Observability architecture | [observability.md](docs/observability.md) |
+| 14 | ADR list | [architecture-decisions/](docs/architecture-decisions/) |
+| 15 | Phased implementation plan | [roadmap.md](docs/roadmap.md) |
+| + | Per-component spec and the not-a-microservice analysis | [components.md](docs/components.md) |
 
 ## Capability status
 

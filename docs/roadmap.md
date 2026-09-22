@@ -228,8 +228,11 @@ with `Retry-After`.
 - End-to-end trace: gateway → router → queue → dispatch → worker → runtime, with the documented span
   names and attributes.
 - Grafana dashboards as committed JSON (Fleet Overview, Deployment Detail, Request Path, Queue &
-  Autoscaling, Rollouts, Cost) and alert rules.
-- `docs/observability.md`.
+  Autoscaling, Rollouts & Experiments, Cost, Nodes & GPU) and the alert rules from
+  [observability.md §7](./observability.md#7-slos-and-alerts).
+- Exemplars wired on histograms, so a Prometheus bucket links to a Tempo trace.
+- `docs/observability.md` extended with runbook links; the architecture, metric catalogue, span model,
+  and cardinality budget it already specifies are the contract this phase implements.
 
 **Tests:** a metrics contract test asserting every documented metric exists with the documented labels
 (so a rename cannot silently break a dashboard); a trace test asserting the full span tree for one
@@ -396,7 +399,9 @@ the measurement method, so the numbers can be reproduced and challenged.
 verification tests for every table; audit-log coverage assertion (every mutating endpoint writes one);
 secret handling review; TLS/mTLS wiring; `NetworkPolicy` completeness test (a pod that should not
 reach PostgreSQL is *proved* unable to); input-size and prompt-size limits; dependency and image
-scanning gates; `docs/security.md` with the threat model.
+scanning gates; `docs/security.md` — the operational threat model and hardening checklist extending
+[security-boundaries.md](./security-boundaries.md), whose boundary contracts, identity model, and
+threat table are the design this phase verifies.
 
 **Tests:** authz matrix test (every endpoint × every role × in-org/out-of-org); a negative RBAC suite;
 a secret-leak scan over logs, traces, and API responses in the e2e run; rate-limit bypass attempts.
