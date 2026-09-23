@@ -53,17 +53,25 @@ Linux; `scripts/preflight.sh` + `preflight.ps1` that verify versions and print w
 
 ---
 
-## Phase 1 — Repository, configuration, database, migrations
+## Phase 1 — Repository, configuration, database, migrations ✅
+
+**Status: complete.** 8 migrations, 5 Go packages, 2 binaries, 94 tests (68 unit, 26 integration).
+Two decisions taken during implementation are recorded as
+[ADR-0025](./architecture-decisions/0025-own-the-migration-runner.md) (own the migration runner) and
+[ADR-0026](./architecture-decisions/README.md#adr-0026) (`packages/httpx`).
 
 **Deliverables**
 
 - Repository skeleton exactly as [repository-structure.md](./repository-structure.md); `go.mod`;
   Makefile; `.golangci.yml`; `.gitattributes`; CI workflow running build + lint + test.
 - `packages/config` — layered loader, validation with full error lists, redaction, `NEBULA_ENV` rules.
-- `packages/telemetry` — `slog` JSON setup, OTel init, Prometheus registry, shared `/livez`,
-  `/readyz`, `/healthz`, `/metrics` handlers. Every later service gets these for free, which is how
-  "every service must have a health endpoint" stops depending on discipline.
-- `packages/db` — pgx pool, transaction helpers, RLS session setter, schema-version assertion.
+- `packages/telemetry` — `slog` JSON setup with the documented field schema, correlation context
+  (request ID, W3C trace context, org), and shared `/livez`, `/readyz`, `/healthz` handlers with a
+  dependency-checker registry. Every later service gets these for free, which is how "every service
+  must have a health endpoint" stops depending on discipline. `/metrics` and OTel tracing: Phase 8.
+- `packages/httpx` — error envelope, middleware chain, graceful server with the drain sequence.
+- `packages/db` — pgx pool with session settings, transaction helpers, RLS session setter,
+  schema-version assertion, health checker, the migration runner, and row types for the whole schema.
 - `migrations/000001…` — the full schema from [data-model.md](./data-model.md), including enums,
   constraints, partitions for `requests`/`audit_logs`, the immutability triggers, RLS policies, the
   three roles, and seed data.
@@ -73,8 +81,18 @@ Linux; `scripts/preflight.sh` + `preflight.ps1` that verify versions and print w
 (the test that matters — a policy nobody verified is a policy that does not work); constraint tests
 proving a ready `model_version` cannot be mutated and route weights cannot sum to anything but 100.
 
-**Exit:** empty database → migrated schema with seed data; `psql` inspection matches the documented
-model; CI green.
+**Exit (met).** Empty database → migrated schema with seed data; `make migrate-cycle` walks up, down to
+empty and up again; the integration suite verifies RLS isolation, the model-version immutability
+trigger, the deferred route-weight constraint, append-only grants, partition routing and concurrent
+migration locking against a real PostgreSQL 16.
+
+**Deferred from this phase, with reasons.** Prometheus metrics and the `/metrics` endpoint move to
+Phase 8 alongside the metric catalogue and cardinality budget, rather than shipping a registry with
+nothing registered; OpenTelemetry tracing likewise, though the log schema already carries `trace_id`
+and `span_id` parsed from W3C `traceparent` with the standard library, so correlation works today and
+the SDK slots in without changing the contract. Development seeding (`NEBULA_DEV_SEED`) is validated
+and gated but does nothing yet: it creates an API key, and key generation arrives with
+`packages/auth` in Phase 2.
 
 ---
 

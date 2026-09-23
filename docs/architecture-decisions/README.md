@@ -39,7 +39,9 @@ Status values: `Proposed` · `Accepted` · `Rejected` · `Superseded` · `Deprec
 | [0022](#adr-0022) | Tenant isolation enforced twice: query scoping and row-level security | Accepted | 0 |
 | [0023](#adr-0023) | UUIDv7 primary keys, generated in the application | Accepted | 0 |
 | [0024](#adr-0024) | The dashboard talks only to the gateway | Accepted | 0 |
-| 0025+ | reserved — written in the phase that makes the decision | — | — |
+| [0025](./0025-own-the-migration-runner.md) | Own the migration runner rather than adopting a migration library | Accepted | 1 |
+| [0026](#adr-0026) | Shared HTTP primitives live in `packages/httpx` | Accepted | 1 |
+| 0027+ | reserved — written in the phase that makes the decision | — | — |
 
 ADRs 0001, 0003, 0004, 0005, and 0006 have full files because their reasoning is long and they are the
 ones a reviewer is most likely to challenge. The rest are recorded below in full-enough form to be
@@ -498,3 +500,37 @@ does auth, rate limiting, and proxying).
 **Consequences.** The gateway needs a bounded metrics-query endpoint with injected label matchers,
 query cost limits, and a small allowlist of query shapes — deliberately not an arbitrary PromQL
 passthrough, which would be an injection surface.
+
+---
+
+<a id="adr-0026"></a>
+### ADR-0026 — Shared HTTP primitives live in `packages/httpx`
+
+**Decision.** The error envelope, the middleware chain (request ID, trace, logging, panic recovery,
+body limit, API version) and the HTTP server with its drain sequence live in `packages/httpx`, not in
+each service's `internal/` directory as the Phase 0 repository layout implied.
+
+**Why.** Two of these are part of the public contract rather than an implementation detail: the error
+envelope shape and the `X-Request-Id` behaviour are documented in [api.md §1](../api.md#1-conventions)
+and clients depend on them. A second implementation in another service would eventually disagree with
+the first, and the disagreement would be visible to users as two different error shapes from one API.
+
+The drain sequence is the other reason. Failing readiness, waiting for EndpointSlice propagation, then
+shutting down gracefully is easy to get subtly wrong and is the usual cause of "503s during a rolling
+deploy". It should be written once, tested once, and reused — which is what
+[axiom A4](../architecture.md#2-design-axioms) says about cross-cutting logic.
+
+Middleware **order** is also a correctness property, not a style choice: `Recover` must sit inside
+`RequestID` so a recovered panic still has a correlation identifier, and `AccessLog` must sit outside
+`Recover` so the resulting 500 is still logged. Phase 1 found both of these by test, and a shared
+package is where that ordering can be documented and locked in.
+
+**Rejected.** Per-service middleware (guarantees divergence in the contract clients see); a framework
+such as chi or echo (the stdlib `net/http` router has covered the routing needs since Go 1.22, and a
+framework would own the middleware contract this package exists to define); putting these in
+`packages/telemetry` (logging and probes are telemetry, but the error envelope and drain semantics are
+not, and merging them would make `telemetry` a grab bag).
+
+**Consequences.** One more shared package, and a change to the error envelope now affects every
+service at once — which is the point, and which is why the envelope has contract tests. Services keep
+their own `internal/server` for routing and handler wiring; only the cross-cutting pieces are shared.

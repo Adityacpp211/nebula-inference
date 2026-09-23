@@ -1,0 +1,40 @@
+# nebula-migrate
+#
+# Runs as a Helm pre-install and pre-upgrade hook Job that must complete before
+# application pods roll. Migrations are embedded in the binary, so this image
+# carries no SQL files and cannot drift from the code that asserts the schema
+# version at startup.
+
+FROM golang:1.24-alpine AS build
+
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath \
+      -ldflags "-s -w \
+        -X github.com/adityasatwar321/nebula/packages/version.Version=${VERSION} \
+        -X github.com/adityasatwar321/nebula/packages/version.Commit=${COMMIT} \
+        -X github.com/adityasatwar321/nebula/packages/version.BuildTime=${BUILD_TIME}" \
+      -o /out/nebula-migrate ./cmd/nebula-migrate
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=build /out/nebula-migrate /usr/local/bin/nebula-migrate
+
+USER 65532:65532
+
+ENTRYPOINT ["/usr/local/bin/nebula-migrate"]
+CMD ["up"]

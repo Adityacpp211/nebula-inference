@@ -19,14 +19,29 @@ for chunk in client.chat.completions.create(
 
 ---
 
-> ## Project status — Phase 0 (design)
+> ## Project status — Phase 1 complete
 >
-> **This repository currently contains architecture and design documents only. No implementation code
-> exists yet.** The commands above describe the system being built, not one you can run today.
+> **The foundation is working and tested; there is no inference yet.** The `nebula deploy` commands
+> above describe the finished system, not what runs today.
 >
-> Implementation begins at [Phase 1](docs/roadmap.md#phase-1--repository-configuration-database-migrations)
-> after design review. This section is updated at the end of every phase with what is actually
-> working — see [Capability status](#capability-status).
+> What works now: the PostgreSQL schema with its constraints, triggers and row-level security; an
+> embedded migration runner with checksum drift detection; the layered configuration system; JSON
+> structured logging with request-ID and trace correlation; and a control-plane binary serving
+> liveness, readiness and health endpoints.
+>
+> Next: [Phase 2](docs/roadmap.md#phase-2--control-plane-and-model-registry) — the control-plane API
+> and model registry. See [Capability status](#capability-status).
+
+## Running it today
+
+```bash
+make preflight        # check the toolchain
+make db-up            # PostgreSQL 16 in Docker
+make migrate-up       # apply the schema
+make test             # unit tests
+make test-integration # tests against the real database
+make run-controlplane # then: curl localhost:8082/healthz
+```
 
 ---
 
@@ -175,7 +190,7 @@ checkout.
 | Capability | Status | Phase |
 |------------|--------|-------|
 | Architecture, data model, API contracts, ADRs | ✅ designed | 0 |
-| Schema, migrations, config, telemetry primitives | ⬜ not started | 1 |
+| Schema, migrations, config, logging, request IDs, health endpoints | ✅ **working** | 1 |
 | Control plane, model registry, artifact store | ⬜ not started | 2 |
 | Runtime abstraction, llama.cpp + mock runtimes | ⬜ not started | 3 |
 | Gateway, OpenAI-compatible API, streaming | ⬜ not started | 4 |

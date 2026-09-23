@@ -1,0 +1,55 @@
+# Local development dependencies.
+#
+# Phase 1 needs PostgreSQL and nothing else. Redis and NATS are added by the
+# phases that first use them (Phase 4 and Phase 6 respectively) rather than
+# running here unused, because a dependency nobody exercises is a dependency
+# nobody notices breaking.
+#
+# Credentials here are deliberately well known. Config validation refuses them
+# when NEBULA_ENV=production, so this file cannot become a production install.
+
+name: nebula
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nebula-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nebula
+      POSTGRES_PASSWORD: nebula
+      POSTGRES_DB: nebula
+      # Faster startup for a throwaway database; never use for real data.
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/dev-postgres-init.sh:/docker-entrypoint-initdb.d/10-nebula.sh:ro
+    healthcheck:
+      # Waits for the server to accept connections AND for the database to exist.
+      test: ["CMD-SHELL", "pg_isready -U nebula -d nebula -q"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    command:
+      - postgres
+      # Development-only durability trade-offs: a corrupted throwaway database
+      # costs nothing, and this makes the test suite noticeably faster.
+      - -c
+      - fsync=off
+      - -c
+      - full_page_writes=off
+      - -c
+      - synchronous_commit=off
+      # Enough connections for the app, the migrator and a parallel test run.
+      - -c
+      - max_connections=100
+      # Log slow statements so a bad query is visible during development.
+      - -c
+      - log_min_duration_statement=200
+
+volumes:
+  postgres-data:
+    driver: local

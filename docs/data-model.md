@@ -3,9 +3,11 @@
 **Status:** Phase 0 design. DDL below is the design contract; the authoritative artifacts will be
 the migration files under `migrations/` created in Phase 1.
 
-PostgreSQL 16+. Accessed from Go via `pgx` with `sqlc`-generated query code. Migrations via
-`golang-migrate`, forward-only in CI, with a reversible `down` required for every migration so local
-development can rewind.
+PostgreSQL 16+. Accessed from Go via `pgx` with `sqlc`-generated query code. Migrations are applied by
+NEBULA's own runner in `packages/db/migrate`, forward-only in CI, with a reversible `down` required for
+every migration so local development can rewind. The runner is in-repo rather than a library so that it
+can verify the checksum of already-applied migrations
+([ADR-0025](./architecture-decisions/0025-own-the-migration-runner.md)).
 
 ---
 
@@ -706,12 +708,16 @@ Three database roles:
 ## 10. Migration policy
 
 - Every schema change is a numbered pair (`000007_add_route_targets.up.sql` / `.down.sql`).
-  Hand-written; no auto-generated diffs.
+  Hand-written; no auto-generated diffs. Both halves are **mandatory**: the runner refuses to load a
+  migration set where any version is missing one.
+- Applied migrations are checksummed. Editing a migration that has already run is detected on the next
+  run instead of silently diverging environments ([ADR-0025](./architecture-decisions/0025-own-the-migration-runner.md)).
 - **Expand/contract** for anything touching a live column: add nullable → backfill in batches →
   start writing both → switch reads → drop old, in separate releases. No single migration both adds
   a NOT NULL column and backfills it.
 - `CREATE INDEX CONCURRENTLY` for any table that could be large, which means the migration runner
-  must run those outside a transaction — handled explicitly, not discovered in production.
+  must run those outside a transaction — handled explicitly with the `-- nebula:no-transaction`
+  directive, not discovered in production.
 - Migrations run as a Kubernetes `Job` (Helm pre-install/pre-upgrade hook) that must complete before
   new application pods roll. Application code asserts the expected schema version at startup and
   refuses to serve on mismatch.

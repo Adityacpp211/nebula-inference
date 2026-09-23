@@ -1,0 +1,115 @@
+# golangci-lint configuration for NEBULA.
+#
+# The linter set is chosen to catch the mistakes that actually hurt an
+# infrastructure service: ignored errors, leaked resources, contexts without
+# deadlines, and unchecked type assertions. Style preferences that a formatter
+# can settle are left to gofmt.
+
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    # correctness
+    - errcheck        # an ignored error is a bug waiting for production
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - errorlint       # %w and errors.Is/As used correctly
+    - bodyclose       # an unclosed response body leaks a connection
+    - rowserrcheck    # rows.Err() after iterating, or errors are silently dropped
+    - sqlclosecheck
+    - contextcheck    # context must be propagated, not replaced with Background
+    - noctx           # no HTTP request without a context
+    - nilerr
+    - makezero
+    - durationcheck
+    - bidichk
+
+    # security
+    - gosec
+
+    # clarity
+    - revive
+    - misspell
+    - unconvert
+    - wastedassign
+    - prealloc
+    - copyloopvar
+    - sloglint        # structured logging used consistently
+
+    # hygiene
+    - goconst
+    - gocritic
+
+settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: false
+    # A deliberate discard is written as `_ = f()`, which is greppable in review.
+
+  govet:
+    enable-all: true
+    disable:
+      - fieldalignment  # readability of a config struct beats a few bytes
+
+  gosec:
+    excludes:
+      - G104  # duplicates errcheck
+
+  revive:
+    rules:
+      - name: exported
+        arguments: [checkPrivateReceivers, disableStutteringCheck]
+      - name: package-comments
+      - name: indent-error-flow
+      - name: errorf
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: time-naming
+      - name: var-naming
+      - name: unreachable-code
+      - name: redefines-builtin-id
+
+  sloglint:
+    no-mixed-args: true
+    kv-only: false
+    attr-only: true       # slog.String(...) rather than loose key/value pairs
+    static-msg: false
+    no-raw-keys: false
+    context: scope
+
+  gocritic:
+    enabled-tags: [diagnostic, style, performance]
+    disabled-checks:
+      - hugeParam
+      - rangeValCopy
+
+  goconst:
+    min-len: 4
+    min-occurrences: 4
+    ignore-tests: true
+
+exclusions:
+  generated: lax
+  rules:
+    # Tests may be long, may use magic numbers, and may ignore errors on
+    # deliberately-failing calls.
+    - path: _test\.go
+      linters: [goconst, gosec, errcheck, prealloc, contextcheck]
+
+    # Migrations are embedded SQL with a single exported symbol.
+    - path: migrations/
+      linters: [revive]
+
+formatters:
+  enable:
+    - gofmt
+  settings:
+    gofmt:
+      simplify: true

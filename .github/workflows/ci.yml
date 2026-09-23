@@ -1,0 +1,200 @@
+name: CI
+
+# The Phase 1 gate, run by a machine: build, lint, unit tests, and the real
+# database checks that cannot be faked (migrations up/down/up, row-level
+# security, immutability triggers, deferred constraints).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.24"
+
+jobs:
+  build:
+    name: build and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # so `git describe` can stamp a version
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: verify dependencies
+        run: |
+          go mod download
+          go mod verify
+
+      - name: formatting
+        run: make fmt-check
+
+      - name: vet
+        run: make vet
+
+      - name: build
+        run: make build
+
+      - name: unit tests (race detector, coverage)
+        run: make test
+
+      - name: upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 7
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.1
+          args: --timeout=5m
+
+  integration:
+    name: integration tests (PostgreSQL)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: nebula
+          POSTGRES_PASSWORD: nebula
+          POSTGRES_DB: nebula
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nebula"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: prepare the test database
+        env:
+          PGPASSWORD: nebula
+        run: |
+          # The suite creates and drops a database per test, so the role needs
+          # CREATEDB. Isolation per test is what keeps them parallel-safe.
+          psql -h 127.0.0.1 -U nebula -d nebula -c "ALTER ROLE nebula CREATEDB;"
+          psql -h 127.0.0.1 -U nebula -d nebula -c "SELECT version();"
+
+      - name: integration tests
+        env:
+          NEBULA_TEST_DATABASE_URL: postgres://nebula:nebula@127.0.0.1:5432/nebula?sslmode=disable
+        run: go test -race -count=1 ./tests/integration/...
+
+  migrations:
+    name: migration cycle (up, down, up)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: nebula
+          POSTGRES_PASSWORD: nebula
+          POSTGRES_DB: nebula
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nebula"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: build the migrator
+        run: make build
+
+      # A down migration that has never run is not a down migration.
+      - name: up, down to empty, up again
+        env:
+          NEBULA_DATABASE_URL: postgres://nebula:nebula@127.0.0.1:5432/nebula?sslmode=disable
+        run: |
+          set -euo pipefail
+          ./bin/nebula-migrate up
+          ./bin/nebula-migrate status
+          ./bin/nebula-migrate validate
+          ./bin/nebula-migrate down 99
+          ./bin/nebula-migrate up
+          ./bin/nebula-migrate version
+
+      # A down migration that leaves debris behind would collide with the next up.
+      - name: assert no tables survive a full teardown
+        env:
+          PGPASSWORD: nebula
+          NEBULA_DATABASE_URL: postgres://nebula:nebula@127.0.0.1:5432/nebula?sslmode=disable
+        run: |
+          set -euo pipefail
+          ./bin/nebula-migrate down 99
+          remaining=$(psql -h 127.0.0.1 -U nebula -d nebula -tAc \
+            "SELECT count(*) FROM information_schema.tables
+              WHERE table_schema='public' AND table_name <> 'schema_migrations'")
+          if [ "$remaining" != "0" ]; then
+            echo "$remaining table(s) survived the down migrations"
+            psql -h 127.0.0.1 -U nebula -d nebula -c "\dt"
+            exit 1
+          fi
+          echo "schema is clean after teardown"
+
+  docker:
+    name: container images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: build controlplane image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.controlplane
+          push: false
+          tags: nebula/controlplane:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: build migrate image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.migrate
+          push: false
+          tags: nebula/migrate:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

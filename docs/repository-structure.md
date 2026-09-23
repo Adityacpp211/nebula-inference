@@ -12,7 +12,7 @@ repositories with four release cadences.
 
 | Language | Layout | Reason |
 |----------|--------|--------|
-| Go | **One** module: `github.com/<owner>/nebula` — the owner is fixed in Phase 1, when the repository is created | Shared packages are the point of the monorepo. Multiple Go modules would mean `replace` directives in development and version pinning between services that ship together — cost with no benefit at this size. |
+| Go | **One** module: `github.com/adityasatwar321/nebula`, fixed in Phase 1 | Shared packages are the point of the monorepo. Multiple Go modules would mean `replace` directives in development and version pinning between services that ship together — cost with no benefit at this size. |
 | Python | One package per deployable under `workers/`, with `pyproject.toml` and a lockfile; runtimes are packages inside it | The worker is the only Python deployable. Runtime adapters are its plugins, not separate distributions. |
 | TypeScript | One npm workspace at `dashboard/` | Single frontend. A workspace leaves room for a future shared UI package without restructuring. |
 
@@ -65,8 +65,11 @@ nebula/
 │   ├── api/                        # openapi.yaml, worker.openapi.yaml, generated types, clients
 │   ├── auth/                       # key hashing, JWT, scopes, RBAC, auth context propagation
 │   ├── config/                     # layered loader, validation, redaction
-│   ├── db/                         # pgx pool, sqlc output, tx helpers, RLS session, migrations runner
-│   ├── telemetry/                  # slog setup, OTel init, metric registry, probe handlers
+│   ├── db/                         # pgx pool, sqlc output, tx helpers, RLS session
+│   │   ├── migrate/                # the migration runner (ADR-0025)
+│   │   └── models/                 # row types mirroring the schema
+│   ├── telemetry/                  # slog setup, correlation context, W3C trace, probe handlers
+│   ├── httpx/                      # error envelope, middleware chain, server with drain (ADR-0026)
 │   ├── queue/                      # bounded priority deadline queue + metrics
 │   ├── routing/                    # EndpointSnapshot, strategies, policy composition, bucketing
 │   ├── reliability/                # retry classification, backoff+jitter, breaker, timeouts, drain
@@ -119,6 +122,7 @@ The brief's suggested tree is followed closely, with four deliberate differences
 | `services/router/` | `packages/routing/` (library), consumed by the gateway | A per-request network hop to a router service adds latency and a failure domain without adding capability; the routing *state* it would centralize is available to every gateway replica over NATS and informers. [ADR-0004](./architecture-decisions/0004-router-as-library.md) |
 | `services/scheduler/` | `packages/scheduler/` + the inventory reconciler in the controller | NEBULA does not bind pods. Placement is constraint generation plus capacity admission, which is a pure function plus a cache — not a service. [ADR-0005](./architecture-decisions/0005-cooperate-with-kubernetes.md) |
 | `services/inference-worker/` + `runtimes/` as siblings | `workers/inference/` with `runtimes/` **inside** it | Adapters are only ever loaded in the worker process. A sibling directory implies a distribution boundary that does not exist. |
+| (not listed) `packages/httpx/` | added | The error envelope and request-ID behaviour are part of the public API contract, and the drain sequence is easy to get wrong; both are written once rather than per service. [ADR-0026](./architecture-decisions/README.md#adr-0026) |
 | (not listed) `services/controller/` | added, separate from `controlplane` | The brief's control plane mixes an HTTP API with reconciliation loops. Those have different failure modes, cadences, and scaling needs; the API must stay responsive when reconciliation is backed up. [ADR-0021](./architecture-decisions/README.md#adr-0021) |
 
 `services/autoscaler/` is kept as its own service exactly as the brief has it, for the blast-radius
@@ -142,6 +146,8 @@ aspirations:
    That is what makes them unit-testable with table-driven tests and deterministic under simulated
    time, and it is the reason the tricky logic lives there rather than in a handler.
 6. `dashboard/src/lib/api/` is generated; a hand edit fails CI.
+7. `packages/db` is the only package permitted to import `pgx`. A service that needs data goes
+   through it, so connection handling, RLS session setup and the schema assertion have one home.
 
 ---
 
