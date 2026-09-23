@@ -33,6 +33,10 @@ import (
 	"github.com/adityasatwar321/nebula/packages/version"
 )
 
+// cmdDown is the one subcommand named in more than one place: the step-count
+// argument is consumed before flag parsing, and the switch dispatches on it.
+const cmdDown = "down"
+
 const serviceName = "nebula-migrate"
 
 func main() {
@@ -40,7 +44,7 @@ func main() {
 		if errors.Is(err, config.ErrHelpRequested) {
 			os.Exit(0)
 		}
-		fmt.Fprintf(os.Stderr, "%s: %v\n", serviceName, err)
+		_, _ = fmt.Fprintf(os.Stderr, "%s: %v\n", serviceName, err)
 		os.Exit(1)
 	}
 }
@@ -61,7 +65,7 @@ docs/deployment-architecture.md §9.`
 
 func run(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, usage())
+		_, _ = fmt.Fprintln(os.Stderr, usage())
 		return errors.New("no command given")
 	}
 	cmd, rest := args[0], args[1:]
@@ -70,9 +74,9 @@ func run(args []string) error {
 	case "-h", "--help", "help":
 		fmt.Println(usage())
 		return nil
-	case "up", "down", "status", "version", "validate":
+	case "up", cmdDown, "status", "version", "validate":
 	default:
-		fmt.Fprintln(os.Stderr, usage())
+		_, _ = fmt.Fprintln(os.Stderr, usage())
 		return fmt.Errorf("unknown command %q", cmd)
 	}
 
@@ -81,9 +85,9 @@ func run(args []string) error {
 	// Flags that are not the subcommand are passed through to the config loader;
 	// a positional step count for `down` is consumed here first.
 	steps := 1
-	var flagArgs []string
+	flagArgs := make([]string, 0, len(rest))
 	for _, a := range rest {
-		if cmd == "down" && len(a) > 0 && a[0] != '-' {
+		if cmd == cmdDown && a != "" && a[0] != '-' {
 			n, err := strconv.Atoi(a)
 			if err != nil || n < 1 {
 				return fmt.Errorf("down: step count must be a positive integer, got %q", a)
@@ -133,7 +137,7 @@ func run(args []string) error {
 		fmt.Printf("applied %d migration(s); schema is now at version %d\n", len(applied), runner.Target())
 		return nil
 
-	case "down":
+	case cmdDown:
 		reverted, err := runner.Down(ctx, steps)
 		if err != nil {
 			return err
@@ -155,7 +159,7 @@ func run(args []string) error {
 			return err
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "VERSION\tNAME\tSTATUS\tAPPLIED AT")
+		_, _ = fmt.Fprintln(w, "VERSION\tNAME\tSTATUS\tAPPLIED AT")
 		for _, s := range st {
 			status := "pending"
 			at := "-"
@@ -167,16 +171,16 @@ func run(args []string) error {
 				status = "applied"
 				at = s.AppliedAt.UTC().Format("2006-01-02 15:04:05Z")
 			}
-			fmt.Fprintf(w, "%06d\t%s\t%s\t%s\n", s.Version, s.Name, status, at)
+			_, _ = fmt.Fprintf(w, "%06d\t%s\t%s\t%s\n", s.Version, s.Name, status, at)
 		}
 		return w.Flush()
 
 	case "version":
-		current, any, err := runner.Version(ctx)
+		current, applied, err := runner.Version(ctx)
 		if err != nil {
 			return err
 		}
-		if !any {
+		if !applied {
 			fmt.Printf("no migrations applied; this binary carries up to version %d\n", runner.Target())
 			return nil
 		}

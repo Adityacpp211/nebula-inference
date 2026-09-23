@@ -9,6 +9,7 @@ package httpx
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -123,7 +124,12 @@ func ErrServiceUnavailable(message, reason string) *APIError {
 }
 
 // ErrPayloadTooLarge reports a body over the configured limit.
-func ErrPayloadTooLarge(limit int64) *APIError {
+//
+// The limit is deliberately not in the message: telling a caller the exact byte
+// ceiling invites probing right up to it, and the configured value is an operator's
+// business. It is a parameter because the middleware has it to hand and a future
+// response header may carry it.
+func ErrPayloadTooLarge(_ int64) *APIError {
 	return &APIError{
 		Status:  http.StatusRequestEntityTooLarge,
 		Message: "request body exceeds the configured limit",
@@ -137,8 +143,11 @@ func ErrPayloadTooLarge(limit int64) *APIError {
 // cause. Any non-APIError is treated as an internal error, so a raw error can
 // never leak its text to a client.
 func WriteError(w http.ResponseWriter, r *http.Request, err error, logger *slog.Logger) {
-	apiErr, ok := err.(*APIError)
-	if !ok {
+	// errors.As rather than a type assertion: a handler that wraps an APIError with
+	// context ("creating deployment: <400>") still gets its 400 rather than being
+	// flattened into a 500 with a useless message.
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
 		apiErr = ErrInternal(err)
 	}
 	apiErr.RequestID = telemetry.RequestID(r.Context())

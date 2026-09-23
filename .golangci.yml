@@ -4,6 +4,13 @@
 # infrastructure service: ignored errors, leaked resources, contexts without
 # deadlines, and unchecked type assertions. Style preferences that a formatter
 # can settle are left to gofmt.
+#
+# Structure note: in golangci-lint v2, `settings` and `exclusions` are keys
+# UNDER `linters`, not top level. Written at the top level they are silently
+# ignored, which is how a repository ends up believing it has configured revive
+# when it is running revive's defaults. Phase 2 found this the first time the
+# linter could actually be installed; `golangci-lint config verify` needs network
+# access, so the structure is documented here instead.
 
 version: "2"
 
@@ -47,65 +54,73 @@ linters:
     - goconst
     - gocritic
 
-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: false
-    # A deliberate discard is written as `_ = f()`, which is greppable in review.
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+      # A deliberate discard is written as `_ = f()`, which is greppable in review.
 
-  govet:
-    enable-all: true
-    disable:
-      - fieldalignment  # readability of a config struct beats a few bytes
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment  # readability of a config struct beats a few bytes
+        # `shadow` flags every `if err := f(); err != nil` nested inside a function
+        # that already has an `err`, which is the ordinary way to write Go and is not
+        # a bug: the inner binding is scoped to the statement. Enabling it produced
+        # ~60 findings, all of that shape, and nothing else. A check whose true
+        # positive rate is zero trains people to ignore the linter.
+        - shadow
 
-  gosec:
-    excludes:
-      - G104  # duplicates errcheck
+    gosec:
+      excludes:
+        - G104  # duplicates errcheck
 
-  revive:
+    revive:
+      rules:
+        - name: exported
+          arguments: [checkPrivateReceivers, disableStutteringCheck]
+        - name: package-comments
+        - name: indent-error-flow
+        - name: errorf
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: time-naming
+        - name: var-naming
+        - name: unreachable-code
+        - name: redefines-builtin-id
+        - name: unused-parameter
+
+    sloglint:
+      no-mixed-args: true
+      kv-only: false
+      attr-only: true       # slog.String(...) rather than loose key/value pairs
+      static-msg: false
+      no-raw-keys: false
+      context: scope
+
+    gocritic:
+      enabled-tags: [diagnostic, style, performance]
+      disabled-checks:
+        - hugeParam
+        - rangeValCopy
+
+    goconst:
+      min-len: 4
+      min-occurrences: 4
+      ignore-tests: true
+
+  exclusions:
+    generated: lax
     rules:
-      - name: exported
-        arguments: [checkPrivateReceivers, disableStutteringCheck]
-      - name: package-comments
-      - name: indent-error-flow
-      - name: errorf
-      - name: context-as-argument
-      - name: context-keys-type
-      - name: time-naming
-      - name: var-naming
-      - name: unreachable-code
-      - name: redefines-builtin-id
+      # Tests may be long, may use magic numbers, and may ignore errors on
+      # deliberately-failing calls. noctx is excluded because a test server's
+      # address is dialled directly; the production paths are still checked.
+      - path: _test\.go
+        linters: [goconst, gosec, errcheck, prealloc, contextcheck, noctx]
 
-  sloglint:
-    no-mixed-args: true
-    kv-only: false
-    attr-only: true       # slog.String(...) rather than loose key/value pairs
-    static-msg: false
-    no-raw-keys: false
-    context: scope
-
-  gocritic:
-    enabled-tags: [diagnostic, style, performance]
-    disabled-checks:
-      - hugeParam
-      - rangeValCopy
-
-  goconst:
-    min-len: 4
-    min-occurrences: 4
-    ignore-tests: true
-
-exclusions:
-  generated: lax
-  rules:
-    # Tests may be long, may use magic numbers, and may ignore errors on
-    # deliberately-failing calls.
-    - path: _test\.go
-      linters: [goconst, gosec, errcheck, prealloc, contextcheck]
-
-    # Migrations are embedded SQL with a single exported symbol.
-    - path: migrations/
-      linters: [revive]
+      # Migrations are embedded SQL with a single exported symbol.
+      - path: migrations/
+        linters: [revive]
 
 formatters:
   enable:

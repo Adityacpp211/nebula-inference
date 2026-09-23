@@ -19,18 +19,27 @@ for chunk in client.chat.completions.create(
 
 ---
 
-> ## Project status — Phase 1 complete
+> ## Project status — Phase 2 complete
 >
-> **The foundation is working and tested; there is no inference yet.** The `nebula deploy` commands
-> above describe the finished system, not what runs today.
+> **The control plane records and enforces desired state; there is still no inference and no
+> Kubernetes.** The `nebula deploy` commands above describe the finished system, not what runs today.
 >
 > What works now: the PostgreSQL schema with its constraints, triggers and row-level security; an
-> embedded migration runner with checksum drift detection; the layered configuration system; JSON
-> structured logging with request-ID and trace correlation; and a control-plane binary serving
-> liveness, readiness and health endpoints.
+> embedded migration runner with checksum drift detection; layered configuration; JSON structured
+> logging with request-ID and trace correlation; API-key authentication with scopes; the model
+> registry with immutable versions; deployment records with revision history; and the eight-state
+> deployment lifecycle, enforced by a database trigger and recorded as history that nothing can
+> rewrite ([ADR-0027](docs/architecture-decisions/0027-deployment-state-machine.md)).
 >
-> Next: [Phase 2](docs/roadmap.md#phase-2--control-plane-and-model-registry) — the control-plane API
-> and model registry. See [Capability status](#capability-status).
+> What this deliberately does NOT do: talk to Kubernetes. A deployment is a reconciled intent, so
+> `POST /v1/deployments` answers `202 Accepted`, `status.reconciled` stays `false`, and every response
+> describing unreconciled state says so in a `note` rather than letting a caller infer that pods are
+> starting. Artifact upload has no presigned target yet, and `finalize` compares the checksum the
+> client declared against the one it presents rather than hashing the bytes — reported as
+> `verification: declared_checksum`, not as verified.
+>
+> Next: [Phase 3](docs/roadmap.md#phase-3--runtime-abstraction-and-the-first-runtime) — the artifact
+> store and the first inference runtime. See [Capability status](#capability-status).
 
 ## Running it today
 
@@ -40,8 +49,50 @@ make db-up            # PostgreSQL 16 in Docker
 make migrate-up       # apply the schema
 make test             # unit tests
 make test-integration # tests against the real database
-make run-controlplane # then: curl localhost:8082/healthz
+make run-controlplane # seeds a dev org and prints an API key, once
 ```
+
+`run-controlplane` logs a line containing `api_key` on its first start. That key is
+shown once and cannot be recovered — the server stores an HMAC — so copy it, then:
+
+```bash
+KEY=nbk_...                                   # from the startup log
+BASE=http://localhost:8082
+curl -H "Authorization: Bearer $KEY" $BASE/v1/me
+curl $BASE/openapi.yaml                       # the contract, no credential needed
+
+# register a model and a version, then make it ready
+MODEL=$(curl -sX POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"name":"qwen2.5","task":"chat"}' $BASE/v1/models | jq -r .id)
+SUM=$(printf 'ab%.0s' {1..32})                # a placeholder digest; see the note below
+VERSION=$(curl -sX POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d "{\"version\":\"0.5b-q4\",\"format\":\"mock\",\"runtime\":\"mock\",
+       \"artifact_uri\":\"s3://nebula/$SUM\",\"size_bytes\":394000000,
+       \"checksum_sha256\":\"$SUM\",\"context_window\":32768}" \
+  $BASE/v1/models/$MODEL/versions | jq -r .id)
+curl -sX POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d "{\"checksum_sha256\":\"$SUM\"}" $BASE/v1/model-versions/$VERSION/finalize | jq .verification
+# → "declared_checksum": the two declarations agreed; the bytes were not read.
+
+# create a deployment (202, not 201) and walk its lifecycle
+DEP=$(curl -sX POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d "{\"name\":\"qwen-prod\",\"model_version_id\":\"$VERSION\",\"replicas\":2}" \
+  $BASE/v1/deployments | jq -r .id)
+curl -sX POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"from":"pending","to":"ready","reason":"ReplicasReady"}' \
+  $BASE/v1/deployments/$DEP/transition | jq .error.message
+# → "a deployment cannot move from pending to ready; from pending it may move to:
+#    failed, provisioning, stopping"  — the state machine, refusing in the database
+
+curl -s -H "Authorization: Bearer $KEY" $BASE/v1/deployments/$DEP/transitions | jq -r \
+  '.data[] | "\(.from_state // "-") -> \(.to_state)  \(.reason)"'
+curl -s -H "Authorization: Bearer $KEY" "$BASE/v1/audit-logs?limit=20" | jq -r '.data[].action'
+```
+
+The `mock` format and runtime are a declared development stub: the registry refuses
+them unless `NEBULA_DEV_MOCK_RUNTIME=true`, and always in production. The checksum
+above is a placeholder because nothing reads artifact bytes yet — `finalize` reports
+`verification: declared_checksum` rather than claiming otherwise.
 
 ---
 
@@ -191,7 +242,9 @@ checkout.
 |------------|--------|-------|
 | Architecture, data model, API contracts, ADRs | ✅ designed | 0 |
 | Schema, migrations, config, logging, request IDs, health endpoints | ✅ **working** | 1 |
-| Control plane, model registry, artifact store | ⬜ not started | 2 |
+| Tenants, users, API-key auth with scopes, audit trail | ✅ **working** | 2 |
+| Model registry, immutable versions, deployment records, state machine | ✅ **working** | 2 |
+| Artifact store: presigned upload, streaming checksum, GGUF metadata | ⬜ moved to 3 — needs object storage, which arrives with the worker | 3 |
 | Runtime abstraction, llama.cpp + mock runtimes | ⬜ not started | 3 |
 | Gateway, OpenAI-compatible API, streaming | ⬜ not started | 4 |
 | Deployment controller, Kubernetes integration, Helm | ⬜ not started | 5 |

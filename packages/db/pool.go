@@ -81,7 +81,7 @@ func Open(ctx context.Context, cfg config.DatabaseConfig, appName string, logger
 	}
 
 	if logger != nil {
-		logger.Info("database pool ready",
+		logger.InfoContext(ctx, "database pool ready",
 			slog.Int("max_conns", int(cfg.MaxConns)),
 			slog.Int("min_conns", int(cfg.MinConns)),
 			slog.Duration("statement_timeout", cfg.StatementTimeout.Duration()),

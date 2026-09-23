@@ -196,6 +196,26 @@ shared `packages/telemetry` handler rather than reimplemented six times.
 Used by the CLI and dashboard, served by `nebula-controlplane`, reached through the gateway. All
 paths are org-scoped by the caller's credential; `org_id` is never a client-supplied parameter.
 
+> **What is served today (Phase 2).** This section describes the finished control API.
+> [`packages/api/openapi.yaml`](../packages/api/openapi.yaml) describes only what a handler actually
+> answers, is embedded in the binary and served at `/openapi.yaml`, and a test fails if the two
+> diverge from the mounted routes in either direction. A specification that documents unbuilt
+> endpoints trains clients to call them and turns a 404 into a support ticket, so the two files have
+> different jobs: this one is the design, that one is the contract.
+>
+> Implemented in Phase 2: models and versions (with `finalize`, `fail` and archive), deployments
+> (create, patch, scale, rollback, stop, start, status, revisions, transitions, and an admin-only
+> explicit transition), users, API keys, audit logs, `GET /v1/me`, and
+> `GET /v1/lifecycle/deployment-states` — the state machine as data, so a CLI or dashboard renders the
+> graph the database enforces instead of keeping its own copy.
+>
+> Not yet implemented: the inference surface (§2), routes, rollouts and experiments, usage, costs,
+> nodes, policies, pricing, and the `/replicas`, `/events`, `/metrics` and `/logs` sub-resources of a
+> deployment. Artifact upload has no presigned target: `upload` is `null` and `finalize` compares the
+> client-declared checksum with the one presented, reporting `verification: declared_checksum` rather
+> than claiming the bytes were read. Session tokens are refused with `unsupported_credential`; API
+> keys are the only accepted credential until the dashboard.
+
 ### Models and versions
 
 ```
@@ -339,6 +359,16 @@ GET /v1/api-keys  |  POST /v1/api-keys  |  DELETE /v1/api-keys/{id}
 GET /v1/policies/routing  |  GET /v1/policies/rate-limits
 GET /v1/pricing      |  POST /v1/pricing  (new immutable version)
 ```
+
+Two endpoints in this group exist beyond what the sketch above shows, both added in Phase 2:
+`POST /v1/model-versions/{id}/fail` records why a version could not be made ready, because "failed"
+with no cause is the state that makes an incident unexplainable an hour later; and
+`POST /v1/deployments/{id}/transition` performs an explicit state transition. The second is
+admin-scoped and audited, and exists for two reasons: during an incident desired state has to be
+correctable in a way that is *recorded* rather than a hand-written `UPDATE` that is not, and until the
+Phase 5 controller runs, nothing else advances an in-flight state. The transition is attributed to the
+calling credential in `deployment_state_transitions`, so a state a human set stays distinguishable
+from one a controller observed.
 
 `POST /v1/api-keys` returns the plaintext key exactly once:
 

@@ -50,6 +50,7 @@ type Config struct {
 	Log      LogConfig      `json:"log" yaml:"log"`
 	HTTP     HTTPConfig     `json:"http" yaml:"http"`
 	Database DatabaseConfig `json:"database" yaml:"database"`
+	Auth     AuthConfig     `json:"auth" yaml:"auth"`
 	Dev      DevConfig      `json:"dev" yaml:"dev"`
 
 	// service is set by the binary, never by configuration.
@@ -107,6 +108,25 @@ type DatabaseConfig struct {
 	// AssertSchemaVersion refuses to serve when the database schema is not the
 	// version this binary was built against. Leave this on.
 	AssertSchemaVersion bool `json:"assert_schema_version" yaml:"assert_schema_version" env:"NEBULA_DATABASE_ASSERT_SCHEMA_VERSION" default:"true"`
+}
+
+// AuthConfig holds credential-handling settings.
+type AuthConfig struct {
+	// KeyPepper is mixed into every API key hash. It lives only in the
+	// application's memory, so a database dump alone does not yield verifiable
+	// hashes (ADR-0011). Required by any service that authenticates callers;
+	// generate one with `openssl rand -base64 32`.
+	KeyPepper Secret `json:"key_pepper" yaml:"key_pepper" env:"NEBULA_AUTH_KEY_PEPPER"`
+
+	// KeyCacheTTL bounds how long a verified key stays cached in process.
+	//
+	// Revocation publishes an invalidation in Phase 4; until then this TTL is the
+	// whole guarantee, so it is kept short deliberately.
+	KeyCacheTTL Duration `json:"key_cache_ttl" yaml:"key_cache_ttl" env:"NEBULA_AUTH_KEY_CACHE_TTL" default:"30s"`
+
+	// KeyCacheSize bounds the cache so a flood of distinct prefixes cannot grow it
+	// without limit.
+	KeyCacheSize int `json:"key_cache_size" yaml:"key_cache_size" env:"NEBULA_AUTH_KEY_CACHE_SIZE" default:"4096"`
 }
 
 // DevConfig holds affordances that must never be enabled in production. Every

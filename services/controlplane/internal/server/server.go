@@ -1,18 +1,19 @@
 // Package server wires the control plane's HTTP surface.
 //
-// Phase 1 scope: probes only. The registry, deployment and routing endpoints
-// described in docs/api.md §4 arrive in Phase 2. Keeping the wiring here rather
-// than in main.go means Phase 2 adds handlers to an existing, tested skeleton
-// instead of restructuring the binary.
+// The wiring lives here rather than in main.go so the middleware chain and the
+// route table are testable without starting a process, and so each phase adds
+// handlers to an existing, tested skeleton instead of restructuring the binary.
 package server
 
 import (
 	"log/slog"
 	"net/http"
 
+	"github.com/adityasatwar321/nebula/packages/api"
 	"github.com/adityasatwar321/nebula/packages/config"
 	"github.com/adityasatwar321/nebula/packages/httpx"
 	"github.com/adityasatwar321/nebula/packages/telemetry"
+	cpapi "github.com/adityasatwar321/nebula/services/controlplane/internal/api"
 )
 
 // Options configures the HTTP handler.
@@ -20,6 +21,11 @@ type Options struct {
 	Config *config.Config
 	Logger *slog.Logger
 	Probes *telemetry.Probes
+
+	// API is the control-plane handler set. It may be nil, which mounts the probe
+	// endpoints and the specification alone — the shape a binary takes when it has
+	// a database but no credential pepper, and the shape the middleware tests use.
+	API *cpapi.API
 }
 
 // New builds the control plane's root handler.
@@ -40,9 +46,20 @@ type Options struct {
 //     AccessLog    observe the final status, including recovered panics
 //     Recover      convert a panic into a 500 in the standard envelope
 //     MaxBody      bound the request before a handler reads it
+//
+// Authentication is NOT in this chain. It is applied per route, because the probe
+// endpoints and the specification must be reachable without a credential: a
+// readiness probe cannot carry one, and a client cannot construct a valid request
+// without the contract.
 func New(opts Options) http.Handler {
 	mux := http.NewServeMux()
 	opts.Probes.Mount(mux)
+
+	mux.Handle(api.SpecPath, api.Handler())
+
+	if opts.API != nil {
+		opts.API.Mount(mux)
+	}
 
 	// Anything not explicitly routed is a 404 in the standard envelope, so the
 	// error shape is identical whether it came from a handler or from the router.

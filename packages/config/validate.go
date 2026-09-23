@@ -5,6 +5,7 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"time"
 )
 
 // FieldError is one problem with one configuration field.
@@ -108,6 +109,17 @@ func (c *Config) Validate() error {
 	v.AddIf(c.Database.ConnectTimeout.Duration() <= 0, "NEBULA_DATABASE_CONNECT_TIMEOUT", "must be positive")
 	v.AddIf(c.Database.StatementTimeout.Duration() <= 0, "NEBULA_DATABASE_STATEMENT_TIMEOUT", "must be positive")
 
+	// --- auth ---
+	// The pepper is optional at this layer because nebula-migrate does not
+	// authenticate anyone. A service that does calls RequireAuth() at startup.
+	if !c.Auth.KeyPepper.IsZero() && len(c.Auth.KeyPepper.Reveal()) < 32 {
+		v.Add("NEBULA_AUTH_KEY_PEPPER", "must be at least 32 bytes (generate with: openssl rand -base64 32)")
+	}
+	v.AddIf(c.Auth.KeyCacheTTL.Duration() <= 0, "NEBULA_AUTH_KEY_CACHE_TTL", "must be positive")
+	v.AddIf(c.Auth.KeyCacheTTL.Duration() > 5*time.Minute, "NEBULA_AUTH_KEY_CACHE_TTL",
+		"must not exceed 5m: until revocation invalidation exists, this TTL is the whole revocation guarantee")
+	v.AddIf(c.Auth.KeyCacheSize < 1, "NEBULA_AUTH_KEY_CACHE_SIZE", "must be at least 1")
+
 	// --- production gating -------------------------------------------------
 	// Every development affordance is a startup FAILURE in production, not a
 	// warning. See docs/architecture.md axiom A9 and risk R-17.
@@ -116,12 +128,16 @@ func (c *Config) Validate() error {
 		v.AddIf(c.Dev.MockRuntime, "NEBULA_DEV_MOCK_RUNTIME",
 			"must be false when NEBULA_ENV=production: the mock runtime is a declared development stub")
 		v.AddIf(c.Dev.DebugEndpoints, "NEBULA_DEV_DEBUG_ENDPOINTS", "must be false when NEBULA_ENV=production")
-		v.AddIf(strings.ToLower(c.Log.Format) != "json", "NEBULA_LOG_FORMAT",
+		v.AddIf(!strings.EqualFold(c.Log.Format, "json"), "NEBULA_LOG_FORMAT",
 			"must be json when NEBULA_ENV=production: text logs are not machine-parseable")
 		if cred, found := defaultCredential(c.Database.URL.Reveal()); found {
 			v.Add("NEBULA_DATABASE_URL",
 				"contains a well-known development credential (%s); refusing to start in production", cred)
 		}
+		v.AddIf(c.Auth.KeyPepper.IsZero(), "NEBULA_AUTH_KEY_PEPPER",
+			"is required when NEBULA_ENV=production")
+		v.AddIf(isDevPepper(c.Auth.KeyPepper.Reveal()), "NEBULA_AUTH_KEY_PEPPER",
+			"is the well-known development value; refusing to start in production")
 	}
 
 	if v.Len() > 0 {
@@ -139,6 +155,27 @@ func plausibleDSN(s string) bool {
 	}
 	// libpq keyword/value form, e.g. "host=localhost user=nebula dbname=nebula"
 	return strings.Contains(s, "=") && !strings.ContainsAny(s, "\n\r")
+}
+
+// DevPepper is the pepper used by docker-compose and `make run-controlplane`. It
+// is a named constant so config validation can refuse it in production rather
+// than hoping nobody copies the compose file.
+const DevPepper = "nebula-development-pepper-do-not-use-in-production"
+
+func isDevPepper(p string) bool { return p == DevPepper }
+
+// RequireAuth reports an error when the configuration lacks what a service that
+// authenticates callers needs. Called explicitly by such a service at startup, so
+// nebula-migrate does not have to carry a pepper it never uses.
+func (c *Config) RequireAuth() error {
+	if c.Auth.KeyPepper.IsZero() {
+		var v ValidationErrors
+		v.Add("NEBULA_AUTH_KEY_PEPPER",
+			"is required by %s: it is mixed into every API key hash "+
+				"(generate one with: openssl rand -base64 32)", c.service)
+		return &v
+	}
+	return nil
 }
 
 // defaultCredential detects credentials that ship in development compose files.

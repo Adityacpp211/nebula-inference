@@ -1,9 +1,10 @@
 // Command nebula-controlplane is NEBULA's admin API and the only writer of
 // desired state.
 //
-// Phase 1 scope: configuration, logging, request identity, a verified database
-// pool, and the three probe endpoints. It serves no business endpoints yet; those
-// arrive in Phase 2 (docs/roadmap.md).
+// Phase 2 scope: the model registry, credentials, and deployment records with
+// their state machine. It records desired state and never touches Kubernetes —
+// reconciliation arrives in Phase 5 (docs/roadmap.md), and every response that
+// describes unreconciled state says so.
 package main
 
 import (
@@ -23,7 +24,10 @@ import (
 	"github.com/adityasatwar321/nebula/packages/httpx"
 	"github.com/adityasatwar321/nebula/packages/telemetry"
 	"github.com/adityasatwar321/nebula/packages/version"
+	"github.com/adityasatwar321/nebula/services/controlplane/internal/api"
+	"github.com/adityasatwar321/nebula/services/controlplane/internal/seed"
 	"github.com/adityasatwar321/nebula/services/controlplane/internal/server"
+	"github.com/adityasatwar321/nebula/services/controlplane/internal/store"
 )
 
 const serviceName = "nebula-controlplane"
@@ -104,7 +108,31 @@ func run() error {
 		ExpectedSchema: expectedSchema,
 	})
 
-	handler := server.New(server.Options{Config: cfg, Logger: logger, Probes: probes})
+	st := store.New(pool)
+
+	// The API is built before the server so a missing or weak key pepper fails
+	// startup rather than every request.
+	cpAPI, err := api.New(cfg, logger, st)
+	if err != nil {
+		return err
+	}
+
+	if result, err := seed.Run(ctx, cfg, st, cpAPI.Hasher, logger); err != nil {
+		// A failed seed fails startup. The alternative is a developer debugging a
+		// 401 against fixtures that were never created.
+		return fmt.Errorf("seeding development fixtures: %w", err)
+	} else if result != nil {
+		logger.Info("development seed complete",
+			slog.String("org_id", result.OrgID),
+			slog.String("key_prefix", result.Prefix))
+	}
+
+	handler := server.New(server.Options{
+		Config: cfg,
+		Logger: logger,
+		Probes: probes,
+		API:    cpAPI,
+	})
 
 	srv := httpx.NewServer(httpx.ServerOptions{
 		Config:  cfg.HTTP,

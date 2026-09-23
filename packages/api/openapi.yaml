@@ -1,0 +1,1632 @@
+openapi: 3.1.0
+
+# NEBULA control API.
+#
+# Scope: this file documents what the control plane SERVES TODAY. It is not a
+# roadmap. Endpoints described in docs/api.md that no handler implements yet — the
+# inference surface, routes, rollouts, metrics, logs, replicas, nodes — are absent
+# deliberately: a specification that documents unbuilt endpoints trains clients to
+# call them and turns a 404 into a support ticket.
+#
+# A test (services/controlplane/internal/api/openapi_test.go) asserts in both
+# directions that every route this service mounts appears here and every path here
+# is mounted, so the two cannot drift.
+#
+# ADR-0018 commits to generating the Go server interfaces, the CLI client and the
+# dashboard's TypeScript types from this file. The Phase 2 handlers are
+# hand-written against it; TODO(NEB-131) tracks the generator.
+
+info:
+  title: NEBULA Control API
+  version: "1.0.0-phase2"
+  summary: Model registry, credentials and deployment lifecycle.
+  description: |
+    The control plane is the only writer of desired state. Everything here is
+    org-scoped by the caller's credential: `org_id` is never a parameter, in a
+    path, a query or a body.
+
+    **Deployments are reconciled intent.** A successful `POST /v1/deployments`
+    returns `202 Accepted` and records desired state in PostgreSQL. The Kubernetes
+    controller that acts on it arrives in Phase 5, so in this build
+    `status.reconciled` is always `false` and `status.observed_generation` is
+    always `0`. Responses that describe unreconciled state carry a `note` saying
+    so, rather than leaving a caller to infer that work is underway.
+  license:
+    name: Apache-2.0
+  contact:
+    name: NEBULA
+    url: https://github.com/adityasatwar321/nebula
+
+servers:
+  - url: /
+    description: The service itself, reached through the gateway in a deployed cluster.
+
+security:
+  - apiKey: []
+
+tags:
+  - name: identity
+    description: Who the caller is, plus users and credentials.
+  - name: registry
+    description: Models and their immutable versions.
+  - name: deployments
+    description: Deployment records and the deployment state machine.
+  - name: audit
+    description: The append-only record of every change.
+  - name: meta
+    description: Machine-readable descriptions of the system's own rules.
+
+paths:
+  /v1/me:
+    get:
+      tags: [identity]
+      operationId: whoAmI
+      summary: Describe the calling credential.
+      description: |
+        Requires authentication but no scope. A caller that has just received a
+        403 must be able to discover what its credential actually carries,
+        otherwise the 403 is unexplainable.
+      responses:
+        "200":
+          description: The credential and its organization.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/lifecycle/deployment-states:
+    get:
+      tags: [meta]
+      operationId: getDeploymentLifecycle
+      summary: The deployment state machine, as data.
+      description: |
+        The states, the legal transitions between them with the reason each exists,
+        and the reason vocabulary. Served so a CLI or dashboard renders the graph
+        the database enforces instead of keeping its own copy, which would
+        eventually disagree.
+      responses:
+        "200":
+          description: The state machine.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeploymentLifecycle" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/users:
+    get:
+      tags: [identity]
+      operationId: listUsers
+      summary: List users.
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: A page of users.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [identity]
+      operationId: createUser
+      summary: Create a user.
+      description: |
+        Only an owner may create an owner. Without that rule the role hierarchy is
+        decorative, because any admin could mint an owner and take the
+        organization.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateUser" }
+      responses:
+        "201":
+          description: The created user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/users/{user_id}:
+    parameters:
+      - name: user_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [identity]
+      operationId: getUser
+      summary: Fetch a user.
+      responses:
+        "200":
+          description: The user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [identity]
+      operationId: updateUser
+      summary: Change a user's role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { $ref: "#/components/schemas/UserRole" }
+      responses:
+        "200":
+          description: The updated user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [identity]
+      operationId: deleteUser
+      summary: Remove a user.
+      description: |
+        A soft delete. Refused for the last owner: an organization with no owner
+        cannot be administered or billed.
+      responses:
+        "204": { description: Removed. }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/api-keys:
+    get:
+      tags: [identity]
+      operationId: listAPIKeys
+      summary: List API keys, including revoked ones.
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: A page of keys. The secret is never included.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/APIKey" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [identity]
+      operationId: createAPIKey
+      summary: Mint an API key.
+      description: |
+        The plaintext key is returned in this response and never again: the server
+        stores an HMAC-SHA256 with a server-side pepper and cannot reproduce the
+        secret.
+
+        A caller cannot grant a scope its own credential does not carry. Otherwise
+        `admin` would be a privilege-escalation primitive and scoping would be
+        advisory.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateAPIKey" }
+      responses:
+        "201":
+          description: The created key, with its one-time secret.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedAPIKey" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/api-keys/{key_id}:
+    parameters:
+      - name: key_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [identity]
+      operationId: revokeAPIKey
+      summary: Revoke an API key.
+      description: |
+        Idempotent. The revoking process stops honouring the key immediately; other
+        control-plane replicas honour it for at most `auth.key_cache_ttl`, because
+        revocation broadcast arrives in Phase 4. That window is why the TTL default
+        is 30 seconds.
+      responses:
+        "204": { description: Revoked. }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/models:
+    post:
+      tags: [registry]
+      operationId: createModel
+      summary: Register a model family.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateModel" }
+      responses:
+        "201":
+          description: The created model.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Model" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/models/registry:
+    get:
+      tags: [registry]
+      operationId: listModels
+      summary: List registered models.
+      description: |
+        Distinct from the OpenAI-compatible `GET /v1/models`, which lists routes in
+        OpenAI's shape and is served by the gateway. This path returns NEBULA's own
+        model records.
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: A page of models.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Model" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/models/{model_id}:
+    parameters:
+      - name: model_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [registry]
+      operationId: getModel
+      summary: Fetch a model.
+      responses:
+        "200":
+          description: The model.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Model" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [registry]
+      operationId: updateModel
+      summary: Change a model's mutable metadata.
+      description: |
+        Only `family` and `description`. The name is immutable: it appears in
+        Kubernetes object names and in every audit record referencing the model, so
+        renaming it would make history unreadable. A model that needs a different
+        name is a new model.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                family: { type: [string, "null"] }
+                description: { type: [string, "null"] }
+      responses:
+        "200":
+          description: The updated model.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Model" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [registry]
+      operationId: deleteModel
+      summary: Soft-delete a model.
+      description: Refused while any of its versions backs a live deployment.
+      responses:
+        "204": { description: Deleted. }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/models/{model_id}/versions:
+    parameters:
+      - name: model_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [registry]
+      operationId: listModelVersions
+      summary: List a model's versions.
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: A page of versions.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/ModelVersion" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [registry]
+      operationId: createModelVersion
+      summary: Register a version.
+      description: |
+        The checksum, size and context window are declared here because the
+        two-phase upload names the object by its digest and because a version row
+        is not valid without them. At this point they are CLAIMS; `finalize` is
+        where the claim is checked.
+
+        `upload` is `null` in this build: object storage and presigned upload
+        targets arrive in Phase 3, so the version is registered against the
+        `artifact_uri` you supply. The response `note` says exactly that.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateModelVersion" }
+      responses:
+        "201":
+          description: The registered version.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedModelVersion" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /v1/model-versions/{version_id}:
+    parameters:
+      - name: version_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [registry]
+      operationId: getModelVersion
+      summary: Fetch a version.
+      responses:
+        "200":
+          description: The version.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelVersion" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [registry]
+      operationId: archiveModelVersion
+      summary: Archive a ready version.
+      description: |
+        Archives rather than deletes. A version is referenced by deployment
+        revisions, usage records and cost records; removing the row would make an
+        invoice unexplainable. Refused while a live deployment references it.
+      responses:
+        "204": { description: Archived. }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/model-versions/{version_id}/finalize:
+    parameters:
+      - name: version_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [registry]
+      operationId: finalizeModelVersion
+      summary: Make a version ready.
+      description: |
+        Moves the version `uploading -> verifying -> ready` in one transaction, and
+        the version becomes immutable.
+
+        **What is actually verified.** The control plane compares the checksum
+        declared at creation with the one presented here. It does not read the
+        artifact bytes: byte-level hashing is the artifact service's job in Phase
+        3, and this is the transition it will call. The response and the audit
+        record both carry `verification: declared_checksum`, so a version that
+        became ready without its bytes being read stays identifiable afterwards.
+
+        A mismatch fails the version terminally, with both digests in
+        `failure_reason`. Terminal, not retryable, so a caller cannot keep guessing
+        until one matches.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FinalizeModelVersion" }
+      responses:
+        "200":
+          description: The ready version.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FinalizedModelVersion" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The version is not in the uploading state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          description: Checksum mismatch. The version is now failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /v1/model-versions/{version_id}/fail:
+    parameters:
+      - name: version_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [registry]
+      operationId: failModelVersion
+      summary: Record that a version cannot be made ready.
+      description: |
+        The reason is required. "Failed" with no cause is the state that makes an
+        incident unexplainable an hour later.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 1, maxLength: 1024 }
+      responses:
+        "200":
+          description: The failed version.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelVersion" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/deployments:
+    get:
+      tags: [deployments]
+      operationId: listDeployments
+      summary: List deployments.
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+        - name: state
+          in: query
+          schema: { $ref: "#/components/schemas/DeploymentState" }
+        - name: model_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: model_version_id
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: A page of deployments.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Deployment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [deployments]
+      operationId: createDeployment
+      summary: Record the intent to run a model version.
+      description: |
+        Returns `202 Accepted`, never `201 Created`. A deployment is a reconciled
+        intent: the row exists and nothing in the cluster does. "Created" would be
+        a claim about pods that has not been verified.
+
+        The model version must be `ready`. A deployment of an uploading version
+        would fail minutes later inside a pod, with the cause buried in kubelet
+        events instead of in this response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateDeployment" }
+      responses:
+        "202":
+          description: Desired state recorded. The `Location` header names the deployment.
+          headers:
+            Location:
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AcceptedDeployment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /v1/deployments/{deployment_id}:
+    parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [deployments]
+      operationId: getDeployment
+      summary: Fetch a deployment, spec and observed status.
+      responses:
+        "200":
+          description: The deployment.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Deployment" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [deployments]
+      operationId: updateDeployment
+      summary: Change desired state, producing a new revision.
+      description: |
+        `generation` is required: send the generation you read. The update is a
+        compare-and-set on it, so two operators editing the same deployment cannot
+        silently overwrite one another — the second gets a 409 naming the
+        generation that exists now.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateDeployment" }
+      responses:
+        "200":
+          description: The updated deployment.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AcceptedDeployment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The deployment has moved to another generation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+    delete:
+      tags: [deployments]
+      operationId: deleteDeployment
+      summary: Soft-delete a deployment.
+      description: |
+        Refused unless the deployment is resting — `pending`, `failed` or
+        `stopped`. A deployment with pods still running must be stopped first, so
+        the controller reconciles an explicit stop rather than discovering that the
+        desired state it was working towards has vanished. Also refused while a
+        route still targets it.
+      responses:
+        "204": { description: Deleted. }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/deployments/{deployment_id}/status:
+    parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [deployments]
+      operationId: getDeploymentStatus
+      summary: The status alone, for polling.
+      description: |
+        The same status object the full response embeds, without the spec: a client
+        polling every second should not re-transfer a spec that changes on human
+        timescales.
+      responses:
+        "200":
+          description: Observed status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeploymentStatusEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/deployments/{deployment_id}/revisions:
+    parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [deployments]
+      operationId: listDeploymentRevisions
+      summary: The deployment's immutable spec history, newest first.
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: A page of revisions.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/DeploymentRevision" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/deployments/{deployment_id}/transitions:
+    parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [deployments]
+      operationId: listDeploymentTransitions
+      summary: Every recorded state change, newest first.
+      description: |
+        Written by a database trigger, so a transition cannot happen without being
+        recorded — including one made by hand in psql during an incident. This is
+        the answer to "why was it degraded at 02:00" a day later, which Kubernetes
+        Events cannot give because they expire in about an hour.
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: A page of transitions.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/DeploymentTransition" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/deployments/{deployment_id}/scale:
+    parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [deployments]
+      operationId: scaleDeployment
+      summary: Change the replica count.
+      description: |
+        Its own endpoint rather than a PATCH because it records revision reason
+        `scale`, so a spec diff caused by scaling is distinguishable from one
+        caused by an edit. It takes no generation precondition: this is also what
+        the autoscaler calls in Phase 6, where a generation round-trip would be
+        pure contention.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Scale" }
+      responses:
+        "202":
+          description: Desired replica count recorded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AcceptedDeployment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /v1/deployments/{deployment_id}/rollback:
+    parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [deployments]
+      operationId: rollbackDeployment
+      summary: Restore an earlier revision's spec.
+      description: |
+        History is never rewritten: rolling back from revision 5 to revision 2
+        produces revision 6 whose spec equals revision 2's. "We rolled back at
+        14:02" is then a fact in the table rather than an absence.
+
+        An empty body means the revision before the current one, which is what an
+        operator wants at 02:00 and needs no lookup first.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Rollback" }
+      responses:
+        "202":
+          description: The rolled-back deployment.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RolledBackDeployment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/deployments/{deployment_id}/stop:
+    parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [deployments]
+      operationId: stopDeployment
+      summary: Ask for a deployment to be wound down.
+      description: |
+        Moves the deployment to `stopping` and stops there. `stopping` means the
+        intent is recorded; only something that has observed the replicas going
+        away may write `stopped`, and that is the controller's job in Phase 5.
+        Marking it stopped here would be a claim about pods that nothing has
+        checked.
+      responses:
+        "202":
+          description: The stopping deployment.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AcceptedDeployment" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/deployments/{deployment_id}/start:
+    parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [deployments]
+      operationId: startDeployment
+      summary: Restart a stopped deployment.
+      description: |
+        Only from `stopped`. A failed deployment is not restarted by asking again:
+        the way out of `failed` is a new revision, which the controller reconciles
+        as `failed -> provisioning`. Offering "start" there would invite retrying
+        an unchanged spec that fails identically.
+      responses:
+        "202":
+          description: The deployment, back in pending.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AcceptedDeployment" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/deployments/{deployment_id}/transition:
+    parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [deployments]
+      operationId: transitionDeployment
+      summary: Perform an explicit state transition (admin).
+      description: |
+        An operator tool, admin-scoped, for two honest reasons: during an incident
+        desired state has to be correctable in a way that is recorded rather than a
+        hand-written UPDATE that is not; and until Phase 5 nothing else advances an
+        in-flight state, so this is how the state machine is exercised end to end.
+
+        The transition is attributed to the calling credential in
+        `deployment_state_transitions`, so a state a human set stays distinguishable
+        from one a controller observed.
+
+        `from` is required and the write is a compare-and-set on it. The database
+        independently refuses any edge absent from `deployment_state_edges`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Transition" }
+      responses:
+        "200":
+          description: The deployment. `changed` is false when it was already in `to`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TransitionedDeployment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The deployment is not in the `from` state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          description: The requested edge is not part of the state machine.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /v1/audit-logs:
+    get:
+      tags: [audit]
+      operationId: listAuditLogs
+      summary: Read the audit trail.
+      description: |
+        Append-only, and written in the same transaction as the change it
+        describes: an audit row written in a second transaction is a change that
+        can happen unrecorded.
+
+        The cursor is composite (`<RFC 3339 timestamp> <uuid>`) because the table is
+        partitioned by `created_at`; an id-only cursor would have to be searched for
+        in every partition.
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - name: cursor
+          in: query
+          description: An opaque cursor from a previous page's `next_cursor`.
+          schema: { type: string }
+        - name: action
+          in: query
+          schema: { type: string, examples: ["deployment.scale"] }
+        - name: resource_type
+          in: query
+          schema: { type: string, examples: ["deployment"] }
+        - name: resource_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+        - name: until
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: A page of audit records.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/AuditLog" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: nbk
+      description: |
+        `Authorization: Bearer nbk_<key>`. Session tokens share this header in the
+        deployed system but are not accepted by this service until the dashboard
+        arrives in Phase 7; a non-`nbk_` bearer is refused with code
+        `unsupported_credential` rather than a generic 401, because "your
+        credential type is not supported yet" and "your key is wrong" are different
+        problems.
+
+  parameters:
+    limit:
+      name: limit
+      in: query
+      description: Page size, 1-200. Defaults to 50.
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    cursor:
+      name: cursor
+      in: query
+      description: |
+        The `next_cursor` from a previous page. Cursor-based, not offset-based:
+        offset paging skips and duplicates rows while the collection is being
+        written to.
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: The request is malformed or semantically invalid.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Unauthorized:
+      description: |
+        No usable credential. The message never distinguishes "no such key" from
+        "wrong key": that difference is an oracle for enumerating valid prefixes.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Forbidden:
+      description: The credential lacks the required scope or role.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    NotFound:
+      description: |
+        No such resource. Also returned for a resource in another organization, so
+        existence elsewhere is never disclosed.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Conflict:
+      description: A uniqueness or state precondition failed.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Unprocessable:
+      description: Well-formed, but the system cannot act on it.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      description: |
+        One shape everywhere, OpenAI-compatible so existing SDK error handling
+        works. It carries nothing internal: no pod names, no SQL detail, no
+        upstream bodies. Those belong in logs and traces, which are operator-only.
+      properties:
+        error:
+          type: object
+          required: [message, type]
+          properties:
+            message: { type: string }
+            type:
+              type: string
+              enum:
+                - invalid_request_error
+                - authentication_error
+                - permission_error
+                - not_found_error
+                - conflict_error
+                - unprocessable_entity
+                - rate_limit_error
+                - internal_error
+                - upstream_error
+                - service_unavailable
+                - timeout_error
+            code: { type: string }
+            param: { type: string }
+            request_id: { type: string }
+
+    Page:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data: { type: array, items: {} }
+        next_cursor:
+          type: [string, "null"]
+          description: Absent when this is the last page.
+        has_more: { type: boolean }
+
+    UserRole:
+      type: string
+      enum: [owner, admin, developer, viewer]
+      description: |
+        Descending privilege. A role belongs to a human; a scope belongs to a
+        credential, and scopes are what the request path checks.
+
+    Scope:
+      type: string
+      enum:
+        - inference:invoke
+        - inference:pin
+        - models:read
+        - models:write
+        - deployments:read
+        - deployments:write
+        - rollouts:write
+        - usage:read
+        - audit:read
+        - admin
+      description: |
+        `admin` does not imply the others: an admin credential that cannot invoke
+        inference is a useful thing to be able to issue.
+
+    Priority:
+      type: string
+      enum: [LOW, NORMAL, HIGH]
+      description: Carried by the credential, never read from a request body.
+
+    Me:
+      type: object
+      required: [org_id, org_slug, org_name, default_namespace, actor_type, actor_id, scopes, priority]
+      properties:
+        org_id: { type: string, format: uuid }
+        org_slug: { type: string }
+        org_name: { type: string }
+        default_namespace: { type: string }
+        actor_type: { type: string, enum: [user, api_key, system] }
+        actor_id: { type: string, format: uuid }
+        actor_label:
+          type: string
+          description: The key prefix or the user's email. Safe to display and log.
+        role: { $ref: "#/components/schemas/UserRole" }
+        scopes:
+          type: array
+          items: { $ref: "#/components/schemas/Scope" }
+        priority: { $ref: "#/components/schemas/Priority" }
+
+    User:
+      type: object
+      required: [id, email, role, created_at, updated_at]
+      description: The password hash is absent from every serialisation, by construction.
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        name: { type: [string, "null"] }
+        role: { $ref: "#/components/schemas/UserRole" }
+        last_login_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    CreateUser:
+      type: object
+      required: [email, role]
+      properties:
+        email: { type: string, format: email, maxLength: 320 }
+        name: { type: [string, "null"] }
+        role: { $ref: "#/components/schemas/UserRole" }
+        password:
+          type: string
+          minLength: 12
+          maxLength: 1024
+          description: |
+            Optional: a user backed by an external identity provider never holds
+            one. Hashed with argon2id. Write-only, never echoed.
+
+    APIKey:
+      type: object
+      required: [id, name, prefix, scopes, priority, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        prefix:
+          type: string
+          description: |
+            `nbk_` plus 7 characters. Safe to display, log and audit, and the
+            indexed column a presented key is looked up by.
+        user_id: { type: [string, "null"], format: uuid }
+        scopes:
+          type: array
+          items: { $ref: "#/components/schemas/Scope" }
+        priority: { $ref: "#/components/schemas/Priority" }
+        last_used_at: { type: [string, "null"], format: date-time }
+        expires_at: { type: [string, "null"], format: date-time }
+        revoked_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+
+    CreatedAPIKey:
+      allOf:
+        - $ref: "#/components/schemas/APIKey"
+        - type: object
+          required: [key, key_note]
+          properties:
+            key:
+              type: string
+              description: The plaintext key. Shown here and never again.
+            key_note: { type: string }
+
+    CreateAPIKey:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128 }
+        user_id:
+          type: [string, "null"]
+          format: uuid
+          description: |
+            The human the key belongs to, who must be in the same organization.
+            Recorded as `created_by` on resources the key creates.
+        scopes:
+          type: array
+          items: { $ref: "#/components/schemas/Scope" }
+          description: |
+            Defaults from the creating credential's role rather than to everything,
+            so a key created without thought is a limited key. Bounded by the
+            creating credential's own scopes.
+        priority: { $ref: "#/components/schemas/Priority" }
+        expires_at: { type: [string, "null"], format: date-time }
+
+    ModelTask:
+      type: string
+      enum: [chat, completion, embedding]
+
+    Model:
+      type: object
+      required: [id, name, task, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name:
+          type: string
+          pattern: "^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$"
+          description: Immutable once created.
+        family: { type: [string, "null"] }
+        task: { $ref: "#/components/schemas/ModelTask" }
+        description: { type: [string, "null"] }
+        created_by: { type: [string, "null"], format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    CreateModel:
+      type: object
+      required: [name, task]
+      properties:
+        name: { type: string, pattern: "^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$" }
+        task: { $ref: "#/components/schemas/ModelTask" }
+        family: { type: [string, "null"] }
+        description: { type: [string, "null"] }
+
+    ModelVersionStatus:
+      type: string
+      enum: [uploading, verifying, ready, failed, archived]
+      description: |
+        `uploading -> verifying -> ready`, with failure possible from either of the
+        first two. A version is immutable from `ready`, enforced by a database
+        trigger; from there the only legal move is `archived`.
+
+    ArtifactFormat:
+      type: string
+      enum: [gguf, safetensors, mock]
+
+    Runtime:
+      type: string
+      enum: [llamacpp, vllm, mock]
+      description: |
+        `mock` is a declared development stub: it is refused unless
+        `NEBULA_DEV_MOCK_RUNTIME=true`, always refused in production, and named
+        "mock" everywhere it appears. No runtime serves inference in this build;
+        `llamacpp` arrives in Phase 3.
+
+    ModelVersion:
+      type: object
+      required:
+        [id, model_id, version, format, runtime, size_bytes, checksum_sha256,
+         context_window, artifact_uri, status, immutable, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        model_id: { type: string, format: uuid }
+        version: { type: string, pattern: "^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$" }
+        format: { $ref: "#/components/schemas/ArtifactFormat" }
+        runtime: { $ref: "#/components/schemas/Runtime" }
+        quantization: { type: [string, "null"] }
+        parameter_count: { type: [integer, "null"], format: int64 }
+        size_bytes: { type: integer, format: int64, minimum: 1 }
+        checksum_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        context_window: { type: integer, format: int32, minimum: 1 }
+        artifact_uri: { type: string }
+        hardware_profile: { type: object, additionalProperties: true }
+        runtime_config: { type: object, additionalProperties: true }
+        status: { $ref: "#/components/schemas/ModelVersionStatus" }
+        failure_reason: { type: [string, "null"] }
+        immutable:
+          type: boolean
+          description: True once ready. Derived from status, not stored separately.
+        created_by: { type: [string, "null"], format: uuid }
+        created_at: { type: string, format: date-time }
+        ready_at: { type: [string, "null"], format: date-time }
+
+    CreateModelVersion:
+      type: object
+      required: [version, format, runtime, artifact_uri, size_bytes, checksum_sha256, context_window]
+      properties:
+        version: { type: string, pattern: "^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$" }
+        format: { $ref: "#/components/schemas/ArtifactFormat" }
+        runtime: { $ref: "#/components/schemas/Runtime" }
+        artifact_uri:
+          type: string
+          description: |
+            `s3://`, `https://` or `hf://`. `file://` is accepted outside production
+            only: a path on one node's disk is not reachable from every node, so a
+            deployment referencing one works until it is scheduled elsewhere.
+        size_bytes: { type: integer, format: int64, minimum: 1 }
+        checksum_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        context_window: { type: integer, format: int32, minimum: 1 }
+        quantization: { type: [string, "null"] }
+        parameter_count: { type: [integer, "null"], format: int64 }
+        hardware_profile: { type: object, additionalProperties: true }
+        runtime_config: { type: object, additionalProperties: true }
+
+    UploadTarget:
+      type: object
+      description: |
+        Where to PUT the artifact bytes, so multi-gigabyte weights never pass
+        through the JSON API. Always `null` in this build: Phase 3 introduces object
+        storage.
+      required: [method, url, expires_at, max_bytes]
+      properties:
+        method: { type: string }
+        url: { type: string }
+        headers: { type: object, additionalProperties: { type: string } }
+        expires_at: { type: string, format: date-time }
+        max_bytes: { type: integer, format: int64 }
+
+    CreatedModelVersion:
+      allOf:
+        - $ref: "#/components/schemas/ModelVersion"
+        - type: object
+          required: [upload]
+          properties:
+            upload:
+              oneOf:
+                - $ref: "#/components/schemas/UploadTarget"
+                - type: "null"
+            note: { type: string }
+
+    FinalizeModelVersion:
+      type: object
+      required: [checksum_sha256]
+      properties:
+        checksum_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        size_bytes: { type: [integer, "null"], format: int64 }
+        context_window: { type: [integer, "null"], format: int32 }
+        quantization: { type: [string, "null"] }
+        parameter_count: { type: [integer, "null"], format: int64 }
+
+    FinalizedModelVersion:
+      allOf:
+        - $ref: "#/components/schemas/ModelVersion"
+        - type: object
+          required: [verification]
+          properties:
+            verification:
+              type: string
+              enum: [declared_checksum, computed_checksum]
+              description: |
+                How readiness was established. `declared_checksum` means the two
+                declarations agreed and the bytes were not read; `computed_checksum`
+                is what the Phase 3 artifact service writes. Recorded in the audit
+                trail too, so the weaker case stays identifiable.
+            note: { type: string }
+
+    DeploymentState:
+      type: string
+      enum: [pending, provisioning, starting, ready, degraded, failed, stopping, stopped]
+      description: |
+        `provisioning` and `starting` are separate because they fail differently and
+        on different timescales — applying objects fails in seconds, pulling a 4 GB
+        artifact fails in minutes — and one "progressing" state cannot express
+        "stuck". `stopping`/`stopped` are not deletion: a stopped deployment keeps
+        its revisions, history and cost records and can be started again. See
+        docs/architecture-decisions/0027-deployment-state-machine.md.
+
+    DeploymentSpec:
+      type: object
+      description: |
+        Desired state. Changing any field here bumps `generation` and writes a new
+        revision. Nothing observed appears in this object.
+      required: [desired_replicas, min_replicas, max_replicas, resources]
+      properties:
+        desired_replicas: { type: integer, format: int32, minimum: 0 }
+        min_replicas: { type: integer, format: int32, minimum: 0 }
+        max_replicas: { type: integer, format: int32, minimum: 0, maximum: 1000 }
+        resources: { type: object, additionalProperties: true }
+        runtime_overrides: { type: object, additionalProperties: true }
+        autoscaling: { type: object, additionalProperties: true }
+        queue: { type: object, additionalProperties: true }
+        routing_policy_id: { type: [string, "null"], format: uuid }
+
+    DeploymentStatus:
+      type: object
+      description: |
+        What the control plane has OBSERVED. Every field is written by the
+        controller or derived from the state column; a client cannot set any of
+        them. In this build `reconciled` is always false and `observed_generation`
+        always 0, because no controller runs.
+      required:
+        [state, state_entered_at, state_age_seconds, serving, next_states,
+         observed_generation, reconciled, ready_replicas, updated_replicas, conditions]
+      properties:
+        state: { $ref: "#/components/schemas/DeploymentState" }
+        state_reason: { type: [string, "null"] }
+        state_message: { type: [string, "null"] }
+        state_entered_at:
+          type: string
+          format: date-time
+          description: |
+            Maintained by a database trigger, and not restarted when a controller
+            re-reports the same state. "Stuck in starting for 20 minutes" is
+            therefore a query rather than a guess.
+        state_age_seconds: { type: integer, format: int64 }
+        serving:
+          type: boolean
+          description: True for `ready` and `degraded`. A degraded deployment still serves.
+        next_states:
+          type: array
+          items: { $ref: "#/components/schemas/DeploymentState" }
+        observed_generation: { type: integer, format: int64 }
+        reconciled: { type: boolean }
+        ready_replicas: { type: integer, format: int32 }
+        updated_replicas: { type: integer, format: int32 }
+        conditions: { type: array, items: { type: object, additionalProperties: true } }
+        last_error: { type: [string, "null"] }
+        last_synced_at: { type: [string, "null"], format: date-time }
+
+    Deployment:
+      type: object
+      required: [id, name, namespace, model_version_id, spec, status, generation, current_revision, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name:
+          type: string
+          pattern: "^[a-z0-9]([a-z0-9-]{0,45}[a-z0-9])?$"
+          description: Becomes a Kubernetes object name, hence the shorter limit.
+        namespace: { type: string }
+        model_version_id: { type: string, format: uuid }
+        spec: { $ref: "#/components/schemas/DeploymentSpec" }
+        status: { $ref: "#/components/schemas/DeploymentStatus" }
+        generation:
+          type: integer
+          format: int64
+          description: |
+            Bumped on spec changes only, never on a status write. That single rule
+            is what makes `generation != observed_generation` a trustworthy "there
+            is work to do" predicate.
+        current_revision: { type: integer, format: int32 }
+        created_by: { type: [string, "null"], format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    AcceptedDeployment:
+      allOf:
+        - $ref: "#/components/schemas/Deployment"
+        - type: object
+          properties:
+            note:
+              type: string
+              description: |
+                Present whenever the response describes desired state the cluster
+                has not been told about. Without it, `202` plus `pending` could be
+                read as "NEBULA is working on it".
+
+    RolledBackDeployment:
+      allOf:
+        - $ref: "#/components/schemas/AcceptedDeployment"
+        - type: object
+          required: [rolled_back_to_revision]
+          properties:
+            rolled_back_to_revision: { type: integer, format: int32 }
+
+    TransitionedDeployment:
+      allOf:
+        - $ref: "#/components/schemas/Deployment"
+        - type: object
+          required: [changed]
+          properties:
+            changed:
+              type: boolean
+              description: False when the deployment was already in the target state.
+
+    DeploymentStatusEnvelope:
+      type: object
+      required: [id, generation, current_revision, status]
+      properties:
+        id: { type: string, format: uuid }
+        generation: { type: integer, format: int64 }
+        current_revision: { type: integer, format: int32 }
+        status: { $ref: "#/components/schemas/DeploymentStatus" }
+
+    CreateDeployment:
+      type: object
+      required: [name, model_version_id]
+      properties:
+        name: { type: string, pattern: "^[a-z0-9]([a-z0-9-]{0,45}[a-z0-9])?$" }
+        model_version_id:
+          type: string
+          format: uuid
+          description: Must be a `ready` version.
+        namespace:
+          type: [string, "null"]
+          description: |
+            Defaults to the organization's namespace, not to a constant: a tenant's
+            objects belong where its quota and network policy are attached.
+        replicas: { type: [integer, "null"], format: int32, minimum: 0 }
+        min_replicas: { type: [integer, "null"], format: int32, minimum: 0 }
+        max_replicas: { type: [integer, "null"], format: int32, minimum: 0 }
+        resources: { type: object, additionalProperties: true }
+        runtime_overrides: { type: object, additionalProperties: true }
+        autoscaling: { type: object, additionalProperties: true }
+        queue: { type: object, additionalProperties: true }
+        routing_policy_id: { type: [string, "null"], format: uuid }
+
+    UpdateDeployment:
+      type: object
+      required: [generation]
+      description: |
+        A patch: an omitted field is unchanged, and an explicit `null` on a jsonb
+        field is also "unchanged", because those columns are NOT NULL and there is
+        no value a caller could mean by null.
+      properties:
+        generation: { type: integer, format: int64, minimum: 1 }
+        model_version_id: { type: [string, "null"], format: uuid }
+        replicas: { type: [integer, "null"], format: int32 }
+        min_replicas: { type: [integer, "null"], format: int32 }
+        max_replicas: { type: [integer, "null"], format: int32 }
+        resources: { type: object, additionalProperties: true }
+        runtime_overrides: { type: object, additionalProperties: true }
+        autoscaling: { type: object, additionalProperties: true }
+        queue: { type: object, additionalProperties: true }
+        routing_policy_id: { type: [string, "null"], format: uuid }
+
+    Scale:
+      type: object
+      required: [replicas]
+      properties:
+        replicas: { type: integer, format: int32, minimum: 0 }
+        min_replicas: { type: [integer, "null"], format: int32 }
+        max_replicas: { type: [integer, "null"], format: int32 }
+
+    Rollback:
+      type: object
+      properties:
+        revision:
+          type: [integer, "null"]
+          format: int32
+          minimum: 1
+          description: Omit for the revision before the current one.
+
+    Transition:
+      type: object
+      required: [from, to, reason]
+      properties:
+        from:
+          $ref: "#/components/schemas/DeploymentState"
+        to:
+          $ref: "#/components/schemas/DeploymentState"
+        reason:
+          type: string
+          description: |
+            One of the values from `GET /v1/lifecycle/deployment-states`. Required:
+            a transition with no recorded cause cannot be explained afterwards.
+        message: { type: [string, "null"] }
+
+    RevisionReason:
+      type: string
+      enum: [create, update, scale, rollback, rollout]
+
+    DeploymentRevision:
+      type: object
+      required: [id, revision, model_version_id, spec, spec_hash, reason, created_at]
+      description: Immutable. A database trigger refuses UPDATE.
+      properties:
+        id: { type: string, format: uuid }
+        revision: { type: integer, format: int32, minimum: 1 }
+        model_version_id: { type: string, format: uuid }
+        spec: { type: object, additionalProperties: true }
+        spec_hash:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: |
+            SHA-256 of the canonical spec encoding. Stable across whitespace, so two
+            logically identical specs hash identically.
+        reason: { $ref: "#/components/schemas/RevisionReason" }
+        created_by: { type: [string, "null"], format: uuid }
+        created_at: { type: string, format: date-time }
+
+    DeploymentTransition:
+      type: object
+      required: [id, to_state, generation, actor_type, occurred_at]
+      properties:
+        id: { type: string, format: uuid }
+        from_state:
+          oneOf:
+            - $ref: "#/components/schemas/DeploymentState"
+            - type: "null"
+          description: Null on the row recording the deployment's creation.
+        to_state: { $ref: "#/components/schemas/DeploymentState" }
+        reason: { type: [string, "null"] }
+        message: { type: [string, "null"] }
+        generation: { type: integer, format: int64 }
+        actor_type: { type: string, enum: [user, api_key, system] }
+        actor_id: { type: [string, "null"], format: uuid }
+        occurred_at: { type: string, format: date-time }
+
+    DeploymentLifecycle:
+      type: object
+      required: [states, transitions, reasons]
+      properties:
+        states:
+          type: array
+          items:
+            type: object
+            required: [name, serving, resting, in_flight, next]
+            properties:
+              name: { $ref: "#/components/schemas/DeploymentState" }
+              serving: { type: boolean }
+              resting:
+                type: boolean
+                description: Resting states are the only ones a deployment may be deleted from.
+              in_flight: { type: boolean }
+              next:
+                type: array
+                items: { $ref: "#/components/schemas/DeploymentState" }
+        transitions:
+          type: array
+          items:
+            type: object
+            required: [from, to, note]
+            properties:
+              from: { $ref: "#/components/schemas/DeploymentState" }
+              to: { $ref: "#/components/schemas/DeploymentState" }
+              note:
+                type: string
+                description: Why this edge exists, in one sentence.
+        reasons:
+          type: array
+          items: { type: string }
+
+    AuditLog:
+      type: object
+      required: [id, created_at, actor_type, action, resource_type]
+      properties:
+        id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        actor_type: { type: string, enum: [user, api_key, system] }
+        actor_id: { type: [string, "null"], format: uuid }
+        actor_label:
+          type: [string, "null"]
+          description: |
+            Denormalised (the key prefix, or the user's email) so the record stays
+            readable after the actor is deleted.
+        action: { type: string }
+        resource_type: { type: string }
+        resource_id: { type: [string, "null"], format: uuid }
+        before: { type: [object, "null"], additionalProperties: true }
+        after: { type: [object, "null"], additionalProperties: true }
+        request_id: { type: [string, "null"], format: uuid }
+        ip: { type: [string, "null"] }
+        user_agent: { type: [string, "null"] }

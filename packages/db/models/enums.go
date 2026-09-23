@@ -83,38 +83,59 @@ func (s ModelVersionStatus) Immutable() bool {
 }
 
 // DeploymentState mirrors the deployment_state PostgreSQL enum.
+//
+// The transition graph, the reason vocabulary and the predicates that depend on
+// more than one state live in packages/lifecycle, which imports this package.
+// Only the values and the two single-state predicates are here, so the mirror of
+// the database enum stays dependency-free.
 type DeploymentState string
 
-// Deployment states.
+// Deployment states. See packages/lifecycle for what may follow what, and
+// docs/architecture-decisions/0027-deployment-state-machine.md for why these
+// eight.
 const (
-	DeploymentPending     DeploymentState = "pending"
-	DeploymentProgressing DeploymentState = "progressing"
-	DeploymentReady       DeploymentState = "ready"
-	DeploymentDegraded    DeploymentState = "degraded"
-	DeploymentFailed      DeploymentState = "failed"
-	DeploymentDeleting    DeploymentState = "deleting"
-	DeploymentDeleted     DeploymentState = "deleted"
+	DeploymentPending      DeploymentState = "pending"
+	DeploymentProvisioning DeploymentState = "provisioning"
+	DeploymentStarting     DeploymentState = "starting"
+	DeploymentReady        DeploymentState = "ready"
+	DeploymentDegraded     DeploymentState = "degraded"
+	DeploymentFailed       DeploymentState = "failed"
+	DeploymentStopping     DeploymentState = "stopping"
+	DeploymentStopped      DeploymentState = "stopped"
 )
+
+// DeploymentStates lists every state, in lifecycle order.
+func DeploymentStates() []DeploymentState {
+	return []DeploymentState{
+		DeploymentPending, DeploymentProvisioning, DeploymentStarting, DeploymentReady,
+		DeploymentDegraded, DeploymentFailed, DeploymentStopping, DeploymentStopped,
+	}
+}
 
 // Valid reports whether s is a known state.
 func (s DeploymentState) Valid() bool {
-	switch s {
-	case DeploymentPending, DeploymentProgressing, DeploymentReady,
-		DeploymentDegraded, DeploymentFailed, DeploymentDeleting, DeploymentDeleted:
-		return true
+	for _, v := range DeploymentStates() {
+		if v == s {
+			return true
+		}
 	}
 	return false
 }
 
-// Terminal reports whether no further reconciliation is expected.
-func (s DeploymentState) Terminal() bool { return s == DeploymentDeleted }
-
-// Serving reports whether a deployment in this state may receive traffic. Note
-// that degraded still serves: some replicas are healthy, and removing the whole
+// Serving reports whether a deployment in this state may receive traffic.
+//
+// Degraded still serves: some replicas are healthy, and removing the whole
 // deployment from rotation because one pod died would turn a partial failure into
 // a total one.
 func (s DeploymentState) Serving() bool {
 	return s == DeploymentReady || s == DeploymentDegraded
+}
+
+// Resting reports whether nothing is expected to change without an operator or a
+// new revision. A deployment may only be soft-deleted from a resting state, which
+// is also a CHECK constraint on the table.
+func (s DeploymentState) Resting() bool {
+	return s == DeploymentPending || s == DeploymentFailed || s == DeploymentStopped
 }
 
 // RolloutState mirrors the rollout_state PostgreSQL enum.

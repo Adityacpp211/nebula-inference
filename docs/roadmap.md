@@ -96,28 +96,64 @@ and gated but does nothing yet: it creates an API key, and key generation arrive
 
 ---
 
-## Phase 2 — Control plane and model registry
+## Phase 2 — Control plane and model registry ✅
 
-**Deliverables**
+**Status: complete**, with one deliverable moved to Phase 3 (see below).
 
-- `services/controlplane`: HTTP server, auth middleware, request IDs, structured logging, the
-  registry and deployment-spec endpoints from [api.md](./api.md) §4, audit logging on every mutation,
-  cursor pagination, the error envelope.
-- `packages/auth`: key generation, HMAC hashing with pepper, prefix lookup, scope checks, JWT issue
-  and verify, RBAC by role.
-- `packages/artifact`: `ArtifactStore` with `s3` (MinIO in dev) and `file` backends; presigned
-  upload; streaming checksum verification; GGUF header parsing to extract context window,
-  quantization, and parameter count rather than trusting client-declared metadata.
-- `packages/api/openapi.yaml` v0.1 with codegen wired into `make gen`.
-- Deployment spec CRUD writing `deployments` + `deployment_revisions` + `routes` transactionally.
-  No Kubernetes yet — the rows are the contract.
+**Delivered**
 
-**Tests:** API tests per endpoint including every documented error; upload/finalize with a corrupted
-artifact (must fail with the computed checksum reported); revision creation on update; audit entries
-present and redacted; cross-org access returns 404 not 403 (no existence leak).
+- `services/controlplane`: HTTP server with the route table in one place, API-key authentication,
+  scope enforcement per endpoint, request IDs, structured logging, cursor pagination, the error
+  envelope, and an audit record written in the same transaction as every mutation.
+- `packages/auth`: key generation (`nbk_` + base62), HMAC-SHA256 hashing with a server-side pepper,
+  indexed prefix lookup, argon2id password hashing, the scope vocabulary and the role→scope map.
+- `packages/lifecycle`: the deployment state machine as a pure package — eight states, 24 edges, the
+  reason vocabulary, and the predicates that depend on more than one state.
+- `migrations/000009_deployment_lifecycle`: replaces the Phase 0 enum with the eight states, adds
+  `state_entered_at` / `state_reason` / `state_message`, the `deployment_state_edges` table, the
+  `deployment_state_transitions` history table, and the trigger that validates an edge, stamps the
+  timer and writes history — in the caller's transaction
+  ([ADR-0027](./architecture-decisions/0027-deployment-state-machine.md)).
+- `services/controlplane/internal/store`: repositories over pgx in the shape sqlc produces, with
+  compare-and-set state transitions and generation preconditions on spec changes.
+- Registry endpoints: models, immutable model versions, `finalize`, `fail`, archive.
+- Deployment endpoints: create (`202 Accepted`), patch with a generation precondition, scale,
+  rollback, stop, start, an admin-only explicit transition, status, revisions and transitions.
+- Deployment records written with their first revision transactionally. No Kubernetes — the rows are
+  the contract.
+- `packages/api/openapi.yaml`, embedded and served at `/openapi.yaml`, with a test asserting in both
+  directions that every mounted route is documented and every documented path is mounted.
+- `NEBULA_DEV_SEED`: an idempotent development organization, owner and API key, refused in production
+  twice over.
 
-**Exit:** `curl` can register a model, upload an artifact, create a version, and create a deployment
-spec; every mutation appears in `audit_logs`.
+**Moved to Phase 3: `packages/artifact`**
+
+Presigned upload, streaming checksum verification and GGUF header parsing were planned here. They are
+moved to Phase 3, where the inference worker introduces object storage, because all three need
+something to talk to: a presigned URL with no MinIO behind it, or a checksum verifier with no bytes to
+read, would be scaffolding shaped like a feature. The registry therefore records the checksum the
+client declares and `finalize` compares it with the one presented, reporting
+`verification: declared_checksum` in both the response and the audit record — so a version that
+became ready without its bytes being read stays identifiable once the real verifier exists.
+`upload` is present in the contract and `null` in every response, with a note saying why.
+
+Session-token (JWT) authentication also moves out: it exists to serve the dashboard, which is
+Phase 15, so it will land with the surface that needs it. A non-`nbk_` bearer token is refused with
+code `unsupported_credential` rather than a generic 401.
+
+**Tests:** unit tests for key generation, verification and prefix parsing (including a wrong secret
+against a real prefix), argon2id, the scope and role tables, the state machine, and the canonical
+spec hash; a test that parses migration 000009 and fails if the SQL and Go transition graphs differ in
+either direction; integration tests against a real PostgreSQL for the immutability trigger, row-level
+security under `SET ROLE nebula_app`, append-only grants, the atomicity of a deployment and its first
+revision, `state_entered_at` not moving on a same-state write, the database refusing every edge the Go
+machine rejects, concurrent transitions having exactly one winner, and stale-generation refusal; API
+tests over HTTP for every documented error, cross-org access returning 404 rather than 403, scope
+enforcement per endpoint, scope escalation, and revocation taking effect immediately.
+
+**Exit:** `curl` can register a model, create a version, finalize it, create a deployment, scale it,
+roll it back, drive it through the state machine and read its history; every mutation appears in
+`audit_logs` with the calling key and request id.
 
 ---
 

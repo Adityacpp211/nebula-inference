@@ -250,7 +250,7 @@ func newProbes(t *testing.T) *telemetry.Probes {
 func get(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, http.NoBody))
 	return rec
 }
 

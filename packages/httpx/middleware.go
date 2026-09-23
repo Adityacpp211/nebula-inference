@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -132,14 +133,20 @@ func MaxBody(limit int64) Middleware {
 func Recover(logger *slog.Logger) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			defer func() {
+			// contextcheck cannot see that the deferred closure acts on the same
+			// request it was created for: there is no other context available inside a
+			// recover, and passing one in would be passing r.Context() to itself.
+			defer func() { //nolint:contextcheck // recovers for this request only
 				rec := recover()
 				if rec == nil {
 					return
 				}
 				// http.ErrAbortHandler is the documented way to abort a response;
 				// re-panic so the server handles it as intended.
-				if rec == http.ErrAbortHandler {
+				// errors.Is rather than ==: a handler may legitimately wrap it, and a
+				// wrapped ErrAbortHandler that is not re-panicked becomes a 500 with a
+				// stack trace instead of the silent abort the caller asked for.
+				if err, isErr := rec.(error); isErr && errors.Is(err, http.ErrAbortHandler) {
 					panic(rec)
 				}
 				if logger != nil {
@@ -164,6 +171,9 @@ type statusRecorder struct {
 	written int64
 }
 
+// WriteHeader records the first status written and passes it through. First only:
+// a handler that writes a header twice has a bug, and the access log should report
+// what the client actually received.
 func (s *statusRecorder) WriteHeader(code int) {
 	if s.status == 0 {
 		s.status = code

@@ -110,7 +110,7 @@ jobs:
       - name: integration tests
         env:
           NEBULA_TEST_DATABASE_URL: postgres://nebula:nebula@127.0.0.1:5432/nebula?sslmode=disable
-        run: go test -race -count=1 ./tests/integration/...
+        run: go test -race -count=1 ./tests/integration/... ./services/controlplane/tests/...
 
   migrations:
     name: migration cycle (up, down, up)

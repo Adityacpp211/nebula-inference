@@ -41,6 +41,11 @@ BINARIES := nebula-controlplane nebula-migrate
 DEV_DB_URL  ?= $(or $(NEBULA_DATABASE_URL),postgres://nebula:nebula@127.0.0.1:5432/nebula?sslmode=disable)
 TEST_DB_URL ?= $(or $(NEBULA_TEST_DATABASE_URL),postgres://nebula:nebula@127.0.0.1:5432/nebula_test?sslmode=disable)
 
+# A fixed development pepper, so restarting the control plane does not invalidate
+# the seeded API key you just copied out of the log. Config validation refuses
+# this exact value when NEBULA_ENV=production, which is what keeps it honest.
+DEV_KEY_PEPPER ?= $(or $(NEBULA_AUTH_KEY_PEPPER),nebula-development-pepper-do-not-use-in-production)
+
 # In a restricted network where proxy.golang.org is unreachable but github.com is
 # not, export GOPROXY=direct GOSUMDB=off before running these targets.
 
@@ -104,9 +109,15 @@ test-short:
 	@go test ./packages/... ./services/... ./cmd/...
 
 ## test-integration: tests that need a real PostgreSQL (see NEBULA_TEST_DATABASE_URL)
+##
+## Two packages, not one: tests/integration covers the schema, and
+## services/controlplane/tests covers the API and store. The second cannot live
+## beside the first because Go's internal-package rule keeps the control plane's
+## handlers out of reach from the repository root.
 .PHONY: test-integration
 test-integration:
-	@NEBULA_TEST_DATABASE_URL="$(TEST_DB_URL)" go test -race -count=1 ./tests/integration/...
+	@NEBULA_TEST_DATABASE_URL="$(TEST_DB_URL)" go test -race -count=1 \
+		./tests/integration/... ./services/controlplane/tests/...
 
 ## cover: open the HTML coverage report
 .PHONY: cover
@@ -157,9 +168,16 @@ migrate-cycle: build
 	@NEBULA_DATABASE_URL="$(DEV_DB_URL)" $(BIN_DIR)/nebula-migrate status
 
 ## run-controlplane: run the control plane against the development database
+##
+## Seeds a development organization and a full-scope API key on first run and
+## prints the key once. The pepper is fixed here so a restart does not invalidate
+## the key you just copied; config validation refuses this value when
+## NEBULA_ENV=production.
 .PHONY: run-controlplane
 run-controlplane:
 	@NEBULA_DATABASE_URL="$(DEV_DB_URL)" NEBULA_LOG_FORMAT=text NEBULA_ENV=dev \
+		NEBULA_AUTH_KEY_PEPPER="$(DEV_KEY_PEPPER)" \
+		NEBULA_DEV_SEED=true NEBULA_DEV_MOCK_RUNTIME=true \
 		go run ./services/controlplane
 
 ## docker-build: build the container images

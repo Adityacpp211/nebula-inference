@@ -9,12 +9,14 @@
 package migrate
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -323,7 +325,7 @@ func (r *Runner) applyOne(ctx context.Context, conn *pgxpool.Conn, m Migration) 
 func record(ctx context.Context, q execer, m Migration, took time.Duration) error {
 	_, err := q.Exec(ctx,
 		`INSERT INTO schema_migrations (version, name, checksum, execution_ms) VALUES ($1, $2, $3, $4)`,
-		m.Version, m.Name, m.UpChecksum, int32(took.Milliseconds()))
+		m.Version, m.Name, m.UpChecksum, executionMS(took))
 	if err != nil {
 		return fmt.Errorf("recording migration: %w", err)
 	}
@@ -377,9 +379,23 @@ func (r *Runner) Down(ctx context.Context, steps int) ([]int64, error) {
 	return reverted, err
 }
 
+// executionMS narrows a duration for the execution_ms column, saturating rather than
+// wrapping. A migration that ran for 24 days is not a number worth preserving
+// exactly, but a negative one in a bookkeeping column would be a lie.
+func executionMS(took time.Duration) int32 {
+	ms := took.Milliseconds()
+	switch {
+	case ms < 0:
+		return 0
+	case ms > math.MaxInt32:
+		return math.MaxInt32
+	}
+	return int32(ms)
+}
+
 // Version returns the highest applied version, and whether any migration is
 // applied at all.
-func (r *Runner) Version(ctx context.Context) (int64, bool, error) {
+func (r *Runner) Version(ctx context.Context) (version int64, applied bool, err error) {
 	if err := ensureTable(ctx, r.pool); err != nil {
 		return 0, false, err
 	}
@@ -408,7 +424,7 @@ func (r *Runner) Status(ctx context.Context) ([]Status, error) {
 		if a, ok := have[m.Version]; ok {
 			s.Applied = true
 			s.AppliedAt = a.AppliedAt
-			s.Drifted = string(a.Checksum) != string(m.UpChecksum)
+			s.Drifted = !bytes.Equal(a.Checksum, m.UpChecksum)
 		}
 		out = append(out, s)
 	}
@@ -449,7 +465,7 @@ func (r *Runner) verify(have map[int64]AppliedRecord) error {
 					"the database is newer than this build", v, a.Name))
 			continue
 		}
-		if string(a.Checksum) != string(m.UpChecksum) {
+		if !bytes.Equal(a.Checksum, m.UpChecksum) {
 			problems = append(problems, fmt.Sprintf(
 				"version %06d (%s) was modified after it was applied: edit a new migration instead",
 				v, m.Name))

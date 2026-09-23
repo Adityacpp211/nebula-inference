@@ -37,7 +37,7 @@ func TestEveryFieldIsSettable(t *testing.T) {
 	t.Parallel()
 
 	var cfg Config
-	err := walk(reflect.ValueOf(&cfg).Elem(), "", func(f reflect.StructField, v reflect.Value, path string) error {
+	err := walk(reflect.ValueOf(&cfg).Elem(), "", func(f reflect.StructField, _ reflect.Value, path string) error {
 		if f.Tag.Get("env") == "" && f.Tag.Get("flag") == "" {
 			t.Errorf("%s has neither an env nor a flag tag, so it cannot be configured", path)
 		}
@@ -55,7 +55,7 @@ func TestEnvTagsAreUniqueAndPrefixed(t *testing.T) {
 
 	var cfg Config
 	seen := map[string]string{}
-	err := walk(reflect.ValueOf(&cfg).Elem(), "", func(f reflect.StructField, v reflect.Value, path string) error {
+	err := walk(reflect.ValueOf(&cfg).Elem(), "", func(f reflect.StructField, _ reflect.Value, path string) error {
 		key := f.Tag.Get("env")
 		if key == "" {
 			return nil

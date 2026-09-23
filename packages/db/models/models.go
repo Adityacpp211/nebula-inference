@@ -159,11 +159,16 @@ type Deployment struct {
 
 	ObservedGeneration int64           `json:"observed_generation"`
 	State              DeploymentState `json:"state"`
-	ReadyReplicas      int32           `json:"ready_replicas"`
-	UpdatedReplicas    int32           `json:"updated_replicas"`
-	Conditions         json.RawMessage `json:"conditions"`
-	LastError          *string         `json:"last_error,omitempty"`
-	LastSyncedAt       *time.Time      `json:"last_synced_at,omitempty"`
+	// StateEnteredAt is maintained by a database trigger, so "stuck in starting
+	// for 20 minutes" is a query rather than a guess.
+	StateEnteredAt  time.Time       `json:"state_entered_at"`
+	StateReason     *string         `json:"state_reason,omitempty"`
+	StateMessage    *string         `json:"state_message,omitempty"`
+	ReadyReplicas   int32           `json:"ready_replicas"`
+	UpdatedReplicas int32           `json:"updated_replicas"`
+	Conditions      json.RawMessage `json:"conditions"`
+	LastError       *string         `json:"last_error,omitempty"`
+	LastSyncedAt    *time.Time      `json:"last_synced_at,omitempty"`
 
 	CreatedBy *uuid.UUID `json:"created_by,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
@@ -190,6 +195,23 @@ type DeploymentRevision struct {
 	Reason         RevisionReason  `json:"reason"`
 	CreatedBy      *uuid.UUID      `json:"created_by,omitempty"`
 	CreatedAt      time.Time       `json:"created_at"`
+}
+
+// DeploymentStateTransition is one recorded state change. APPEND-ONLY, written by
+// a database trigger so a transition cannot happen without being recorded —
+// including one made by hand in psql during an incident.
+type DeploymentStateTransition struct {
+	ID           uuid.UUID        `json:"id"`
+	OrgID        uuid.UUID        `json:"org_id"`
+	DeploymentID uuid.UUID        `json:"deployment_id"`
+	FromState    *DeploymentState `json:"from_state,omitempty"` // nil for the creation row
+	ToState      DeploymentState  `json:"to_state"`
+	Reason       *string          `json:"reason,omitempty"`
+	Message      *string          `json:"message,omitempty"`
+	Generation   int64            `json:"generation"`
+	ActorType    ActorType        `json:"actor_type"`
+	ActorID      *uuid.UUID       `json:"actor_id,omitempty"`
+	OccurredAt   time.Time        `json:"occurred_at"`
 }
 
 // Route is the stable public identity clients address. AUTHORITATIVE.

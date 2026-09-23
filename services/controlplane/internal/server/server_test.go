@@ -53,7 +53,7 @@ func TestProbeEndpointsAreWired(t *testing.T) {
 	for _, path := range []string{telemetry.PathLivez, telemetry.PathReadyz, telemetry.PathHealthz} {
 		t.Run(path, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, http.NoBody))
 			if rec.Code != http.StatusOK {
 				t.Errorf("%s = %d, want 200; body: %s", path, rec.Code, rec.Body.String())
 			}
@@ -76,7 +76,7 @@ func TestUnknownPathReturnsTheStandardEnvelope(t *testing.T) {
 	probes.MarkReady()
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/deployments", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/deployments", http.NoBody))
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
@@ -112,7 +112,7 @@ func TestReadinessReflectsLifecycle(t *testing.T) {
 
 	get := func() int {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, telemetry.PathReadyz, nil))
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, telemetry.PathReadyz, http.NoBody))
 		return rec.Code
 	}
 
@@ -131,7 +131,7 @@ func TestReadinessReflectsLifecycle(t *testing.T) {
 	// Liveness must stay up throughout: the process is healthy, it is just not
 	// accepting new work.
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, telemetry.PathLivez, nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, telemetry.PathLivez, http.NoBody))
 	if rec.Code != http.StatusOK {
 		t.Errorf("livez while draining = %d, want 200", rec.Code)
 	}
@@ -146,7 +146,7 @@ func TestHealthzDoesNotLeakSecrets(t *testing.T) {
 	probes.MarkReady()
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, telemetry.PathHealthz, nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, telemetry.PathHealthz, http.NoBody))
 
 	body := rec.Body.String()
 	if strings.Contains(body, "not-a-default-secret") {

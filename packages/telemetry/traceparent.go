@@ -62,7 +62,7 @@ func ParseTraceparent(v string) (TraceContext, error) {
 	}
 	b, err := hex.DecodeString(flags)
 	if err != nil {
-		return TraceContext{}, fmt.Errorf("%w: trace-flags: %v", ErrInvalidTraceparent, err)
+		return TraceContext{}, fmt.Errorf("%w: trace-flags: %w", ErrInvalidTraceparent, err)
 	}
 
 	return TraceContext{TraceID: traceID, SpanID: spanID, Sampled: b[0]&0x01 == 0x01}, nil
@@ -134,5 +134,5 @@ func isAllZero(s string) bool {
 			return false
 		}
 	}
-	return len(s) > 0
+	return s != ""
 }

@@ -31,12 +31,7 @@ func TestEnumsMatchMigrations(t *testing.T) {
 				string(models.VersionUploading), string(models.VersionVerifying),
 				string(models.VersionReady), string(models.VersionFailed), string(models.VersionArchived),
 			}},
-			{"deployment_state", []string{
-				string(models.DeploymentPending), string(models.DeploymentProgressing),
-				string(models.DeploymentReady), string(models.DeploymentDegraded),
-				string(models.DeploymentFailed), string(models.DeploymentDeleting),
-				string(models.DeploymentDeleted),
-			}},
+			{"deployment_state", toStrings(models.DeploymentStates())},
 			{"rollout_state", []string{
 				string(models.RolloutPending), string(models.RolloutProgressing),
 				string(models.RolloutPaused), string(models.RolloutPromoted),
@@ -104,14 +99,21 @@ func readMigrations(t *testing.T) string {
 
 var quoted = regexp.MustCompile(`'([a-z0-9_.]+)'`)
 
+// enumValuesFromSQL returns the values of the LAST definition of an enum type in
+// migration order.
+//
+// The last one, not the first: a migration may replace an enum (000009 does, for
+// the deployment lifecycle), and the current schema is what the final definition
+// says. Reading the first would compare the Go enums against a type that no longer
+// exists.
 func enumValuesFromSQL(t *testing.T, sql, typeName string) []string {
 	t.Helper()
 	re := regexp.MustCompile(`(?is)CREATE TYPE\s+` + regexp.QuoteMeta(typeName) + `\s+AS ENUM\s*\(([^)]*)\)`)
-	m := re.FindStringSubmatch(sql)
-	if m == nil {
+	all := re.FindAllStringSubmatch(sql, -1)
+	if len(all) == 0 {
 		return nil
 	}
-	return extractQuoted(m[1])
+	return extractQuoted(all[len(all)-1][1])
 }
 
 func checkValuesFromSQL(t *testing.T, sql, constraint string) []string {

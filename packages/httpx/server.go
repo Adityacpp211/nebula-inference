@@ -67,8 +67,12 @@ func NewServer(opts ServerOptions) *Server {
 func (s *Server) Run(ctx context.Context) error {
 	ln := s.listener
 	if ln == nil {
+		// net.ListenConfig rather than net.Listen, so a cancelled startup context
+		// aborts the bind instead of the process hanging on a slow DNS or a socket
+		// that will not come up.
 		var err error
-		ln, err = net.Listen("tcp", s.cfg.Addr)
+		var lc net.ListenConfig
+		ln, err = lc.Listen(ctx, "tcp", s.cfg.Addr)
 		if err != nil {
 			return fmt.Errorf("listening on %s: %w", s.cfg.Addr, err)
 		}
@@ -109,7 +113,7 @@ func (s *Server) Run(ctx context.Context) error {
 		s.drainer.MarkDraining()
 	}
 	if s.logger != nil {
-		s.logger.Info("shutdown requested, draining",
+		s.logger.InfoContext(ctx, "shutdown requested, draining",
 			slog.Duration("drain_delay", s.cfg.DrainDelay.Duration()),
 			slog.Duration("shutdown_grace", s.cfg.ShutdownGrace.Duration()))
 	}
@@ -129,11 +133,11 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		// Step 4: in-flight work outlasted the grace period.
 		if s.logger != nil {
-			s.logger.Warn("graceful shutdown exceeded grace period, closing connections",
+			s.logger.WarnContext(shutdownCtx, "graceful shutdown exceeded grace period, closing connections",
 				slog.String("error", err.Error()))
 		}
 		if cerr := srv.Close(); cerr != nil && s.logger != nil {
-			s.logger.Warn("force close failed", slog.String("error", cerr.Error()))
+			s.logger.WarnContext(shutdownCtx, "force close failed", slog.String("error", cerr.Error()))
 		}
 	}
 
@@ -141,7 +145,7 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 	if s.logger != nil {
-		s.logger.Info("http server stopped")
+		s.logger.InfoContext(ctx, "http server stopped")
 	}
 	return nil
 }

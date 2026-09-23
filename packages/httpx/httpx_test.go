@@ -20,7 +20,7 @@ import (
 )
 
 func okHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
@@ -36,7 +36,7 @@ func TestRequestIDMintedAndEchoed(t *testing.T) {
 	}))
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
 
 	if seen == "" {
 		t.Fatal("no request ID placed on the context")
@@ -70,10 +70,10 @@ func TestRequestIDValidation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var seen string
-			h := httpx.RequestID()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := httpx.RequestID()(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 				seen = telemetry.RequestID(r.Context())
 			}))
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 			if tt.supplied != "" {
 				// Set directly on the map: http.Header.Set would reject some of
 				// these, and we are testing our own validation, not net/http's.
@@ -117,10 +117,10 @@ func TestTraceContinuedOrStarted(t *testing.T) {
 			t.Parallel()
 			var tc telemetry.TraceContext
 			var ok bool
-			h := httpx.Trace()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := httpx.Trace()(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 				tc, ok = telemetry.Trace(r.Context())
 			}))
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 			if tt.header != "" {
 				req.Header.Set(telemetry.HeaderTraceparent, tt.header)
 			}
@@ -158,12 +158,12 @@ func TestRecoverConvertsPanicToEnvelope(t *testing.T) {
 	h := httpx.Chain(
 		httpx.RequestID(),
 		httpx.Recover(logger),
-	)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		panic("something went very wrong")
 	}))
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boom", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boom", http.NoBody))
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", rec.Code)
@@ -212,11 +212,11 @@ func TestAccessLogRecordsRecoveredPanic(t *testing.T) {
 		httpx.RequestID(),
 		httpx.AccessLog(logger),
 		httpx.Recover(telemetry.Discard()),
-	)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		panic("kaboom")
 	}))
 
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/boom", nil))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/boom", http.NoBody))
 
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 	var found bool
@@ -245,7 +245,7 @@ func TestErrorEnvelopeShape(t *testing.T) {
 	}))
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", http.NoBody))
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
@@ -287,7 +287,7 @@ func TestWriteErrorHidesNonAPIErrors(t *testing.T) {
 	}))
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", rec.Code)
@@ -304,7 +304,7 @@ func TestAPIVersionHeader(t *testing.T) {
 
 	h := httpx.APIVersion()(okHandler())
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
 
 	if got := rec.Header().Get(httpx.HeaderAPIVersion); got != version.Contract {
 		t.Errorf("%s = %q, want %q", httpx.HeaderAPIVersion, got, version.Contract)
@@ -344,13 +344,13 @@ func TestAccessLogSkipsProbes(t *testing.T) {
 	)(okHandler())
 
 	for _, p := range []string{telemetry.PathLivez, telemetry.PathReadyz} {
-		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, p, nil))
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, p, http.NoBody))
 	}
 	if buf.Len() != 0 {
 		t.Errorf("probe requests were logged; kubelet polls would bury real events:\n%s", buf.String())
 	}
 
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/real", nil))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/real", http.NoBody))
 	if buf.Len() == 0 {
 		t.Fatal("a real request was not logged")
 	}
@@ -390,10 +390,10 @@ func TestAccessLogLevelsByStatus(t *testing.T) {
 			var buf bytes.Buffer
 			logger, _ := telemetry.NewLogger(&buf, config.LogConfig{Level: "debug", Format: "json"},
 				version.Info{Service: "t", Version: "1"}, "i")
-			h := httpx.AccessLog(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := httpx.AccessLog(logger)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(tt.status)
 			}))
-			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", http.NoBody))
 
 			var m map[string]any
 			if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &m); err != nil {
@@ -416,7 +416,7 @@ func TestClientIPIgnoresForwardedHeaders(t *testing.T) {
 		version.Info{Service: "t", Version: "1"}, "i")
 
 	h := httpx.AccessLog(logger)(okHandler())
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req.RemoteAddr = "10.1.2.3:54321"
 	req.Header.Set("X-Forwarded-For", "203.0.113.9")
 	h.ServeHTTP(httptest.NewRecorder(), req)
@@ -517,7 +517,7 @@ func TestServerFinishesInFlightRequests(t *testing.T) {
 
 	released := make(chan struct{})
 	started := make(chan struct{})
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		close(started)
 		<-released
 		w.WriteHeader(http.StatusOK)

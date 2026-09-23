@@ -181,7 +181,7 @@ func applyDefaults(cfg *Config) error {
 
 func applyEnv(cfg *Config, getenv func(string) string) error {
 	var verrs ValidationErrors
-	err := walk(reflect.ValueOf(cfg).Elem(), "", func(f reflect.StructField, v reflect.Value, path string) error {
+	err := walk(reflect.ValueOf(cfg).Elem(), "", func(f reflect.StructField, v reflect.Value, _ string) error {
 		key := f.Tag.Get("env")
 		if key == "" {
 			return nil

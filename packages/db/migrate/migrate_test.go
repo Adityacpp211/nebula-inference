@@ -1,6 +1,7 @@
 package migrate_test
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -141,7 +142,7 @@ func TestChecksumChangesWithContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if string(a[0].UpChecksum) == string(b[0].UpChecksum) {
+	if bytes.Equal(a[0].UpChecksum, b[0].UpChecksum) {
 		t.Error("checksum did not change when the migration content changed")
 	}
 
@@ -149,7 +150,7 @@ func TestChecksumChangesWithContent(t *testing.T) {
 	c, _ := migrate.Load(fsWith(map[string]string{
 		"000001_a.up.sql": "SELECT 1;", "000001_a.down.sql": "SELECT -1;",
 	}))
-	if string(a[0].UpChecksum) != string(c[0].UpChecksum) {
+	if !bytes.Equal(a[0].UpChecksum, c[0].UpChecksum) {
 		t.Error("checksum is not stable for identical content")
 	}
 }

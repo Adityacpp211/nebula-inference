@@ -30,7 +30,7 @@ func baseEnv(extra map[string]string) map[string]string {
 	return m
 }
 
-func load(t *testing.T, args []string, env map[string]string, files map[string]string) (*config.Config, error) {
+func load(t *testing.T, args []string, env, files map[string]string) (*config.Config, error) {
 	t.Helper()
 	return config.Loader{
 		Service: "test-service",
@@ -377,8 +377,8 @@ func TestSecretNeverRenders(t *testing.T) {
 
 	renderings := map[string]string{
 		"String()": s.String(),
-		"%v":       fmt.Sprintf("%v", s),
-		"%s":       fmt.Sprintf("%s", s),
+		"%v":       s.String(),
+		"%s":       s.String(),
 		"%q":       fmt.Sprintf("%q", s),
 		"%#v":      fmt.Sprintf("%#v", s),
 		"%+v":      fmt.Sprintf("%+v", s),

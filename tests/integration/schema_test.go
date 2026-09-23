@@ -22,7 +22,7 @@ type org struct {
 	Slug string
 }
 
-func newOrg(t *testing.T, ctx context.Context, q db.Querier, slug string) org {
+func newOrg(ctx context.Context, t *testing.T, q db.Querier, slug string) org {
 	t.Helper()
 	o := org{ID: db.MustNewID(), Slug: slug}
 	_, err := q.Exec(ctx,
@@ -34,7 +34,7 @@ func newOrg(t *testing.T, ctx context.Context, q db.Querier, slug string) org {
 	return o
 }
 
-func newModel(t *testing.T, ctx context.Context, q db.Querier, o org, name string) uuid.UUID {
+func newModel(ctx context.Context, t *testing.T, q db.Querier, o org, name string) uuid.UUID {
 	t.Helper()
 	id := db.MustNewID()
 	_, err := q.Exec(ctx,
@@ -50,7 +50,7 @@ func sum32(s string) []byte {
 	return h[:]
 }
 
-func newReadyVersion(t *testing.T, ctx context.Context, q db.Querier, modelID uuid.UUID, version string) uuid.UUID {
+func newReadyVersion(ctx context.Context, t *testing.T, q db.Querier, modelID uuid.UUID, version string) uuid.UUID {
 	t.Helper()
 	id := db.MustNewID()
 	_, err := q.Exec(ctx, `
@@ -66,7 +66,7 @@ func newReadyVersion(t *testing.T, ctx context.Context, q db.Querier, modelID uu
 	return id
 }
 
-func newDeployment(t *testing.T, ctx context.Context, q db.Querier, o org, versionID uuid.UUID, name string) uuid.UUID {
+func newDeployment(ctx context.Context, t *testing.T, q db.Querier, o org, versionID uuid.UUID, name string) uuid.UUID {
 	t.Helper()
 	id := db.MustNewID()
 	_, err := q.Exec(ctx, `
@@ -89,7 +89,7 @@ func TestUUIDRoundTripAndOrdering(t *testing.T) {
 
 	var ids []uuid.UUID
 	for i := range 5 {
-		o := newOrg(t, ctx, pool, "uuid-org-"+string(rune('a'+i)))
+		o := newOrg(ctx, t, pool, "uuid-org-"+string(rune('a'+i)))
 		ids = append(ids, o.ID)
 	}
 
@@ -132,10 +132,10 @@ func TestRowLevelSecurityIsolatesTenants(t *testing.T) {
 	pool := migratedDatabase(t)
 	ctx := ctxT(t)
 
-	acme := newOrg(t, ctx, pool, "acme")
-	globex := newOrg(t, ctx, pool, "globex")
-	newModel(t, ctx, pool, acme, "acme-model")
-	newModel(t, ctx, pool, globex, "globex-model")
+	acme := newOrg(ctx, t, pool, "acme")
+	globex := newOrg(ctx, t, pool, "globex")
+	newModel(ctx, t, pool, acme, "acme-model")
+	newModel(ctx, t, pool, globex, "globex-model")
 
 	// Run as nebula_app, which is not the table owner, so policies apply.
 	asApp := func(t *testing.T, orgID uuid.UUID, fn func(tx pgx.Tx)) {
@@ -199,8 +199,8 @@ func TestRowLevelSecurityIsolatesTenants(t *testing.T) {
 
 	// Child tables are reached through their parent's org_id.
 	t.Run("child tables are isolated too", func(t *testing.T) {
-		acmeModel := newModel(t, ctx, pool, acme, "acme-child-model")
-		newReadyVersion(t, ctx, pool, acmeModel, "1b-q4")
+		acmeModel := newModel(ctx, t, pool, acme, "acme-child-model")
+		newReadyVersion(ctx, t, pool, acmeModel, "1b-q4")
 
 		asApp(t, globex.ID, func(tx pgx.Tx) {
 			var n int
@@ -255,7 +255,7 @@ func TestInTxForOrgSetsTheSessionVariable(t *testing.T) {
 	pool := migratedDatabase(t)
 	ctx := ctxT(t)
 
-	o := newOrg(t, ctx, pool, "session-org")
+	o := newOrg(ctx, t, pool, "session-org")
 
 	err := db.InTxForOrg(ctx, pool, o.ID, func(tx pgx.Tx) error {
 		got, err := db.CurrentSessionOrg(ctx, tx)
@@ -330,9 +330,9 @@ func TestModelVersionImmutability(t *testing.T) {
 	pool := migratedDatabase(t)
 	ctx := ctxT(t)
 
-	o := newOrg(t, ctx, pool, "immutable-org")
-	modelID := newModel(t, ctx, pool, o, "qwen2.5")
-	versionID := newReadyVersion(t, ctx, pool, modelID, "0.5b-q4")
+	o := newOrg(ctx, t, pool, "immutable-org")
+	modelID := newModel(ctx, t, pool, o, "qwen2.5")
+	versionID := newReadyVersion(ctx, t, pool, modelID, "0.5b-q4")
 
 	frozen := []struct {
 		field string
@@ -392,7 +392,7 @@ func TestAppendOnlyTables(t *testing.T) {
 	pool := migratedDatabase(t)
 	ctx := ctxT(t)
 
-	o := newOrg(t, ctx, pool, "append-only-org")
+	o := newOrg(ctx, t, pool, "append-only-org")
 
 	t.Run("audit_logs cannot be updated", func(t *testing.T) {
 		id := db.MustNewID()
@@ -420,8 +420,8 @@ func TestAppendOnlyTables(t *testing.T) {
 	})
 
 	t.Run("deployment revisions cannot be updated", func(t *testing.T) {
-		versionID := newReadyVersion(t, ctx, pool, newModel(t, ctx, pool, o, "rev-model"), "1b")
-		depID := newDeployment(t, ctx, pool, o, versionID, "rev-deploy")
+		versionID := newReadyVersion(ctx, t, pool, newModel(ctx, t, pool, o, "rev-model"), "1b")
+		depID := newDeployment(ctx, t, pool, o, versionID, "rev-deploy")
 
 		revID := db.MustNewID()
 		spec := json.RawMessage(`{"replicas":1}`)
@@ -447,12 +447,12 @@ func TestRouteWeightsMustTotal100(t *testing.T) {
 	pool := migratedDatabase(t)
 	ctx := ctxT(t)
 
-	o := newOrg(t, ctx, pool, "weights-org")
-	modelID := newModel(t, ctx, pool, o, "weights-model")
-	v1 := newReadyVersion(t, ctx, pool, modelID, "v1")
-	v2 := newReadyVersion(t, ctx, pool, modelID, "v2")
-	d1 := newDeployment(t, ctx, pool, o, v1, "baseline")
-	d2 := newDeployment(t, ctx, pool, o, v2, "canary")
+	o := newOrg(ctx, t, pool, "weights-org")
+	modelID := newModel(ctx, t, pool, o, "weights-model")
+	v1 := newReadyVersion(ctx, t, pool, modelID, "v1")
+	v2 := newReadyVersion(ctx, t, pool, modelID, "v2")
+	d1 := newDeployment(ctx, t, pool, o, v1, "baseline")
+	d2 := newDeployment(ctx, t, pool, o, v2, "canary")
 
 	routeID := db.MustNewID()
 	if _, err := pool.Exec(ctx,
@@ -485,7 +485,7 @@ func TestRouteWeightsMustTotal100(t *testing.T) {
 		}
 		defer func() { _ = tx.Rollback(ctx) }()
 
-		// 100 (existing) + 10 = 110
+		// The route already totals 100; adding a 10-weight target takes it to 110.
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO route_targets (id, route_id, deployment_id, weight)
 			VALUES ($1, $2, $3, 10)`, db.MustNewID(), routeID, d2); err != nil {
@@ -537,12 +537,12 @@ func TestOneActiveRolloutPerRoute(t *testing.T) {
 	pool := migratedDatabase(t)
 	ctx := ctxT(t)
 
-	o := newOrg(t, ctx, pool, "rollout-org")
-	modelID := newModel(t, ctx, pool, o, "rollout-model")
-	v1 := newReadyVersion(t, ctx, pool, modelID, "v1")
-	v2 := newReadyVersion(t, ctx, pool, modelID, "v2")
-	d1 := newDeployment(t, ctx, pool, o, v1, "baseline")
-	d2 := newDeployment(t, ctx, pool, o, v2, "canary")
+	o := newOrg(ctx, t, pool, "rollout-org")
+	modelID := newModel(ctx, t, pool, o, "rollout-model")
+	v1 := newReadyVersion(ctx, t, pool, modelID, "v1")
+	v2 := newReadyVersion(ctx, t, pool, modelID, "v2")
+	d1 := newDeployment(ctx, t, pool, o, v1, "baseline")
+	d2 := newDeployment(ctx, t, pool, o, v2, "canary")
 
 	routeID := db.MustNewID()
 	if _, err := pool.Exec(ctx,
@@ -583,9 +583,9 @@ func TestDeploymentReplicaBounds(t *testing.T) {
 	pool := migratedDatabase(t)
 	ctx := ctxT(t)
 
-	o := newOrg(t, ctx, pool, "bounds-org")
-	versionID := newReadyVersion(t, ctx, pool, newModel(t, ctx, pool, o, "bounds-model"), "v1")
-	depID := newDeployment(t, ctx, pool, o, versionID, "bounded")
+	o := newOrg(ctx, t, pool, "bounds-org")
+	versionID := newReadyVersion(ctx, t, pool, newModel(ctx, t, pool, o, "bounds-model"), "v1")
+	depID := newDeployment(ctx, t, pool, o, versionID, "bounded")
 
 	tests := []struct {
 		name string
@@ -629,7 +629,7 @@ func TestAPIKeyConstraints(t *testing.T) {
 	pool := migratedDatabase(t)
 	ctx := ctxT(t)
 
-	o := newOrg(t, ctx, pool, "keys-org")
+	o := newOrg(ctx, t, pool, "keys-org")
 
 	insert := func(prefix string, hashLen int, priority string) error {
 		_, err := pool.Exec(ctx, `
@@ -661,7 +661,7 @@ func TestRequestPartitionRouting(t *testing.T) {
 	pool := migratedDatabase(t)
 	ctx := ctxT(t)
 
-	o := newOrg(t, ctx, pool, "requests-org")
+	o := newOrg(ctx, t, pool, "requests-org")
 	now := time.Now().UTC()
 	id := db.MustNewID()
 
@@ -695,7 +695,7 @@ func TestUsageRecordUpsertIsIdempotent(t *testing.T) {
 	pool := migratedDatabase(t)
 	ctx := ctxT(t)
 
-	o := newOrg(t, ctx, pool, "usage-org")
+	o := newOrg(ctx, t, pool, "usage-org")
 	var profileID uuid.UUID
 	if err := pool.QueryRow(ctx,
 		`SELECT id FROM pricing_profiles WHERE org_id IS NULL AND version = 1`).Scan(&profileID); err != nil {

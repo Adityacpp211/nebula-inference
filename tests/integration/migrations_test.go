@@ -55,12 +55,12 @@ func TestMigrateUpDownUp(t *testing.T) {
 		t.Fatalf("down reverted %d migrations, want %d", len(reverted), len(applied))
 	}
 
-	v, any, err := runner.Version(ctx)
+	v, stillApplied, err := runner.Version(ctx)
 	if err != nil {
 		t.Fatalf("reading version after down: %v", err)
 	}
-	if any || v != 0 {
-		t.Errorf("after a full down the schema version is %d (any=%v), want 0", v, any)
+	if stillApplied || v != 0 {
+		t.Errorf("after a full down the schema version is %d (applied=%v), want 0", v, stillApplied)
 	}
 
 	// Every table must be gone, otherwise a down migration left debris that the
