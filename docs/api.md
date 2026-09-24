@@ -469,11 +469,20 @@ Worker response body (non-streaming):
 ```json
 { "text": "...", "finish_reason": "stop",
   "usage": {"prompt_tokens": 42, "completion_tokens": 128},
-  "timing": {"queue_ms": 4, "prefill_ms": 61, "decode_ms": 1180, "ttft_ms": 84},
-  "runtime": {"name": "llamacpp", "version": "b4xxx", "model_version": "qwen2.5:0.5b-q4",
-              "slot": 2, "kv_cache_used_mib": 512}
+  "timing": {"queue_ms": 4, "prefill_ms": 61, "decode_ms": 1180, "ttft_ms": 84,
+             "total_ms": 1245},
+  "runtime": {"name": "llamacpp", "version": "b11157", "model_version": "qwen2.5:0.5b-q4",
+              "slot": 2, "kv_cache_used_bytes": null}
 }
 ```
+
+`finish_reason` is one of `stop`, `length`, `cancel`, `deadline`, `error`. `cancel` and `deadline` are
+deliberately distinct: one is a client changing its mind and the other is the system running out of
+budget, and a router that cannot tell them apart cannot tell a healthy worker from an overloaded one.
+
+`kv_cache_used_bytes` is `null` when the engine does not report it, which is the case for the pinned
+llama.cpp build. Reporting zero would read as "there is KV cache to spare", which is a worse answer
+than "unknown" — see [observability.md §2.3](./observability.md#23-worker-and-runtime).
 
 Admission control: when the local queue is full the worker returns **429 with `Retry-After`** and
 `X-Nebula-Reason: worker_saturated`. It never accepts work it cannot start before the deadline —
@@ -524,6 +533,20 @@ where adapters usually diverge and the divergence surfaces as inconsistent user-
 Shipping order: `mock` (Phase 3, CI and load-test workhorse), `llamacpp` (Phase 3, the real one),
 `vllm` (post-v1, when GPU hardware exists — designed now so the interface is not shaped around a
 single engine's quirks).
+
+**Implemented in Phase 3**, as written above: `runtimes/base.py` is the protocol, `runtimes/mock.py`
+and `runtimes/llamacpp.py` are the two adapters, and one conformance suite runs unchanged against both
+with nothing skipped or overridden for either. Two notes on how the obligations turned out in practice:
+
+- Obligation 3 is why the llama.cpp adapter supervises the engine over HTTP rather than calling into
+  it: `llama-server` abandons a generation when its client disconnects, so cancelling really does stop
+  computing. An in-process binding could stop *delivering* tokens and nothing more, which would satisfy
+  a naive test and lie to the gateway's capacity model.
+- Obligation 6 is why there is no single `up` gauge. `/livez` and `/readyz`, and
+  `engine_process_alive` and `model_ready` beside them, are separate because "the engine died" and "the
+  model is still loading" need different responses.
+
+See [workers/inference/README.md](../workers/inference/README.md).
 
 ---
 

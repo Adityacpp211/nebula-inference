@@ -1,6 +1,8 @@
 # Build output
 /bin/
 /dist/
+# Locally built engine binaries and the trained test fixture model
+/.cache/
 *.exe
 *.test
 *.out
@@ -13,6 +15,9 @@ coverage.html
 # Python
 __pycache__/
 *.py[cod]
+*.egg-info/
+# setuptools leaves these behind when the worker is installed from its source tree
+workers/*/build/
 .venv/
 .mypy_cache/
 .pytest_cache/

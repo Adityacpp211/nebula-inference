@@ -19,27 +19,36 @@ for chunk in client.chat.completions.create(
 
 ---
 
-> ## Project status — Phase 2 complete
+> ## Project status — Phase 3 complete
 >
-> **The control plane records and enforces desired state; there is still no inference and no
+> **A real model now streams real tokens through a real worker. There is still no gateway and no
 > Kubernetes.** The `nebula deploy` commands above describe the finished system, not what runs today.
 >
-> What works now: the PostgreSQL schema with its constraints, triggers and row-level security; an
-> embedded migration runner with checksum drift detection; layered configuration; JSON structured
-> logging with request-ID and trace correlation; API-key authentication with scopes; the model
-> registry with immutable versions; deployment records with revision history; and the eight-state
-> deployment lifecycle, enforced by a database trigger and recorded as history that nothing can
-> rewrite ([ADR-0027](docs/architecture-decisions/0027-deployment-state-machine.md)).
+> What works now: everything from Phase 2 — the PostgreSQL schema with its constraints, triggers and
+> row-level security, the migration runner, layered configuration, structured logging with request-ID
+> and trace correlation, API-key authentication with scopes, the model registry with immutable
+> versions, deployment records with revision history, and the eight-state deployment lifecycle
+> enforced by a database trigger
+> ([ADR-0027](docs/architecture-decisions/0027-deployment-state-machine.md)) — plus the inference
+> worker: the `InferenceRuntime` abstraction, a llama.cpp adapter that supervises upstream
+> `llama-server` as a child process, a declared mock stub, a bounded priority queue with absolute
+> deadlines, cancellation that actually stops compute, drain, probes and Prometheus metrics.
 >
-> What this deliberately does NOT do: talk to Kubernetes. A deployment is a reconciled intent, so
-> `POST /v1/deployments` answers `202 Accepted`, `status.reconciled` stays `false`, and every response
-> describing unreconciled state says so in a `note` rather than letting a caller infer that pods are
-> starting. Artifact upload has no presigned target yet, and `finalize` compares the checksum the
-> client declared against the one it presents rather than hashing the bytes — reported as
-> `verification: declared_checksum`, not as verified.
+> The abstraction is verified rather than asserted: one conformance suite runs unchanged against both
+> adapters, with no test skipped or overridden for either, and a separate suite streams tokens out of a
+> real GGUF and asserts on their content. 145 tests, green.
 >
-> Next: [Phase 3](docs/roadmap.md#phase-3--runtime-abstraction-and-the-first-runtime) — the artifact
-> store and the first inference runtime. See [Capability status](#capability-status).
+> What this deliberately does NOT do: route. A worker answers for itself and nothing decides which
+> worker to ask — that is Phase 6, and saying so here keeps a temporary shortcut from becoming the
+> design. There is still no Kubernetes, so `POST /v1/deployments` answers `202 Accepted` with
+> `status.reconciled` false. Artifact upload still has no presigned target, and `finalize` still
+> compares the checksum the client declared against the one it presents rather than hashing the bytes —
+> reported as `verification: declared_checksum`, not as verified. The worker container images are
+> written but unbuilt: no Docker daemon was available where this phase was developed, so CI is what
+> will prove them.
+>
+> Next: [Phase 4](docs/roadmap.md#phase-4--api-gateway-and-openai-compatible-api) — the gateway and the
+> OpenAI-compatible API. See [Capability status](#capability-status).
 
 ## Running it today
 
@@ -47,10 +56,32 @@ for chunk in client.chat.completions.create(
 make preflight        # check the toolchain
 make db-up            # PostgreSQL 16 in Docker
 make migrate-up       # apply the schema
-make test             # unit tests
-make test-integration # tests against the real database
+make test             # Go unit tests
+make test-integration # Go tests against the real database
 make run-controlplane # seeds a dev org and prints an API key, once
 ```
+
+And the inference worker, which is Python and has its own targets:
+
+```bash
+make worker-install   # the worker plus its development extra
+make worker-lint      # ruff and mypy --strict
+make worker-test      # 103 tests, no engine or model needed
+make run-worker-mock  # the declared stub: real API, no real tokens
+```
+
+For the real thing you need a `llama-server` binary and a model. The fixture model is
+*trained* rather than downloaded, in about seven seconds
+([ADR-0028](docs/architecture-decisions/0028-locally-trained-test-fixture-model.md)):
+
+```bash
+export NEBULA_LLAMA_SERVER_BIN=/path/to/llama-server
+make worker-model              # trains a 1.6 MB GGUF that llama-server loads unmodified
+make worker-test-integration   # 145 tests, streaming real tokens from a real engine
+```
+
+[workers/inference/README.md](workers/inference/README.md) has the whole surface: the
+protocol, the endpoints, every environment variable, and what is deliberately absent.
 
 `run-controlplane` logs a line containing `api_key` on its first start. That key is
 shown once and cannot be recovered — the server stores an HMAC — so copy it, then:
@@ -188,7 +219,7 @@ Every stage is named, bounded, instrumented, and has defined behaviour when it f
 | **Never retry after the first token** | A streamed response cannot be un-sent; retrying would concatenate two generations into text no model produced. [ADR-0013](docs/architecture-decisions/README.md#adr-0013) |
 | **Model versions are immutable; rollback is a new revision** | "What exactly was serving at 14:32 last Tuesday" has to be answerable. [ADR-0010](docs/architecture-decisions/README.md#adr-0010) |
 
-All twenty-four: [docs/architecture-decisions/](docs/architecture-decisions/).
+All twenty-eight: [docs/architecture-decisions/](docs/architecture-decisions/).
 
 ## Documentation
 
@@ -204,9 +235,10 @@ All twenty-four: [docs/architecture-decisions/](docs/architecture-decisions/).
 | [observability.md](docs/observability.md) | Telemetry pipeline, metric catalogue with cardinality budget, span model, log schema, correlation path, SLOs and alerts |
 | [deployment-architecture.md](docs/deployment-architecture.md) | Namespaces, RBAC, NetworkPolicy, probes, artifact storage, Helm layout, kind topology, GPU optionality, CI |
 | [repository-structure.md](docs/repository-structure.md) | Monorepo layout, module strategy, dependency rules, conventions |
+| [workers/inference/README.md](workers/inference/README.md) | The inference worker: the `InferenceRuntime` contract, both adapters, the worker API, configuration, the fixture model |
 | [roadmap.md](docs/roadmap.md) | Phases 0–18 with deliverables, tests, and exit criteria |
 | [risk-register.md](docs/risk-register.md) | Twenty scored risks with mitigations and residuals |
-| [architecture-decisions/](docs/architecture-decisions/) | ADR index (24) plus the six load-bearing ones in full |
+| [architecture-decisions/](docs/architecture-decisions/) | ADR index (28); eight of them, including every one written during implementation, as full files |
 
 Written during implementation: `development.md`, `deployment.md`, `model-runtime.md`,
 `reliability.md`, and `security.md` (the operational threat model extending
@@ -244,8 +276,9 @@ checkout.
 | Schema, migrations, config, logging, request IDs, health endpoints | ✅ **working** | 1 |
 | Tenants, users, API-key auth with scopes, audit trail | ✅ **working** | 2 |
 | Model registry, immutable versions, deployment records, state machine | ✅ **working** | 2 |
-| Artifact store: presigned upload, streaming checksum, GGUF metadata | ⬜ moved to 3 — needs object storage, which arrives with the worker | 3 |
-| Runtime abstraction, llama.cpp + mock runtimes | ⬜ not started | 3 |
+| Runtime abstraction, llama.cpp + mock runtimes, worker API, queue, deadlines, cancellation | ✅ **working** | 3 |
+| Worker container images (mock and llama.cpp variants) | ⚠️ written, **unverified** — no Docker daemon on the development hardware; CI builds both | 3 |
+| Artifact store: presigned upload, streaming checksum, GGUF metadata | ⬜ moved to 5 — needs MinIO and the pull path the controller introduces | 5 |
 | Gateway, OpenAI-compatible API, streaming | ⬜ not started | 4 |
 | Deployment controller, Kubernetes integration, Helm | ⬜ not started | 5 |
 | Health-aware routing, routing strategies | ⬜ not started | 6 |
@@ -274,7 +307,7 @@ Reasoning for each: [architecture.md §12](docs/architecture.md#12-explicit-non-
 
 ## Technology
 
-Go (control plane, gateway, CLI) · Python (inference worker) · PostgreSQL · Redis · NATS + JetStream ·
+Go (control plane, gateway, CLI) · Python (inference worker) · llama.cpp · PostgreSQL · Redis · NATS + JetStream ·
 Kubernetes + Helm + kind · Prometheus, OpenTelemetry, Tempo, Loki, Grafana · React + TypeScript ·
 k6 · GitHub Actions.
 

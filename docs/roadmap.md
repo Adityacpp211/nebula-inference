@@ -157,27 +157,97 @@ roll it back, drive it through the state machine and read its history; every mut
 
 ---
 
-## Phase 3 — Runtime abstraction and the first runtime
+## Phase 3 — Runtime abstraction and the first runtime ✅
 
-**Deliverables**
+**Status: complete**, with the artifact store still outstanding (see below).
 
-- `workers/inference`: FastAPI app, worker API from [api.md](./api.md) §6, bounded priority queue
-  with deadlines, cancellation, drain, probes, Prometheus metrics, OTel tracing.
-- `runtimes/base.py` — the protocol, typed errors, capability declaration.
-- `runtimes/mock.py` — declared stub: seeded deterministic output, configurable tokens/sec, injectable
-  errors and stalls, fake VRAM accounting. Refuses to start when `NEBULA_ENV=production`.
-- `runtimes/llamacpp.py` — supervises `llama-server`, proxies generation, translates metrics, maps
-  load failures to typed errors, handles child crash and restart.
-- `tests/runtime_conformance.py` — the suite both adapters must pass.
-- Dockerfiles for both worker variants; a small real model (Qwen2.5-0.5B-Instruct-Q4_K_M or
-  TinyLlama-1.1B-Q4) documented as the reference dev model.
+**Delivered**
 
-**Tests:** conformance suite on both adapters; TTFT is measured on the first token, not the last;
-cancel frees the slot (asserted via `/internal/v1/state`); deadline exceeded aborts and reports;
-queue-full returns 429 with `Retry-After`; child-process crash surfaces as unready, not as a hang.
+- `workers/inference/nebula_worker`: the FastAPI worker serving the internal API from
+  [api.md §6](./api.md#6-internal-worker-api) — synchronous generation, SSE streaming, cancel by
+  request id, `state`, `drain`, `livez`, `readyz`, `healthz`, `metrics`. Every response echoes the
+  worker protocol version, and the request context (request id, traceparent, deadline, priority,
+  asserted model version) travels in headers rather than the body.
+- `runtimes/base.py`: the `InferenceRuntime` protocol — eight methods, frozen request and result
+  dataclasses, and typed errors that each carry a `code` and a `retryable` flag so a caller decides
+  what to do without matching on a message. A `Protocol`, not a base class, so an out-of-tree engine
+  conforms by shape and imports nothing from NEBULA.
+- `runtimes/llamacpp.py`: supervises upstream `llama-server` as a child process and proxies over
+  loopback ([ADR-0015](./architecture-decisions/README.md#adr-0015)). Verifies the artifact checksum
+  *before* starting the engine, binds to `127.0.0.1` on an OS-assigned port, maps engine startup
+  failures onto the typed errors, drains the child's pipes, reaps it, and restarts a crashed child a
+  bounded number of times. Cancellation disconnects from the engine, which is what makes it stop
+  computing rather than merely stop delivering.
+- `runtimes/mock.py`: the declared stub and the reference implementation of the contract. Configurable
+  tokens/sec, load duration, slots and resident bytes; injectable load errors, load stalls, pre-first-
+  token stalls, mid-stream failure and a dead engine process. Reports `declared_stub: true` and
+  `generates_real_tokens: false`, and is refused in production three independent ways: configuration
+  validation, the adapter's own entry point, and a container image that ships no engine.
+- `queue.py`: the admission queue — bounded, priority-ordered, deadline-aware. A request whose
+  remaining budget cannot cover the current EWMA service time is refused at admission rather than
+  queued to die, and saturation answers `429` with `Retry-After` and
+  `X-Nebula-Reason: worker_saturated`.
+- `deadline.py`: `X-Nebula-Deadline` as absolute Unix **milliseconds**. A duration is re-derived at
+  every hop and silently grants each hop a fresh budget; an absolute deadline cannot be renewed by
+  accident. Malformed values are rejected rather than defaulted, including both units mistakes — a
+  value that looks like seconds, and one more than 24 hours out.
+- `telemetry.py`: JSON logging with request-id and trace-id correlation, and the Prometheus metric set
+  — requests, admission rejections, request duration, TTFT, queue wait, prompt and generated tokens,
+  cancellations, deadlines exceeded, load duration, plus adapter-owned gauges (slots total and busy,
+  queue depth, in-flight, model ready, engine process alive, draining, engine restarts, KV cache used)
+  pulled from the adapter at scrape time rather than cached.
+- `main.py`: the drain sequence — SIGTERM, fail readiness, wait `drain_delay`, stop accepting, finish
+  in-flight work, unload the model.
+- `deploy/docker/Dockerfile.worker`: two targets from one file, `mock` and `llamacpp`. The mock image
+  contains no engine binary at all, so selecting the stub is a different image name rather than a
+  different environment variable. The engine is pinned to a llama.cpp tag.
+- `tools/make_tiny_model.py`: the fixture generator. Trains a 2-layer, 128-dimension
+  LLaMA-architecture model (401,280 parameters, 1.6 MB, 285-token vocabulary) and writes a GGUF that
+  upstream `llama-server` loads unmodified
+  ([ADR-0028](./architecture-decisions/0028-locally-trained-test-fixture-model.md)).
 
-**Exit:** `docker run` the worker with the mock runtime and with the real GGUF; stream tokens from
-both via `curl`; identical externally observable behaviour apart from content.
+**Still outstanding: `packages/artifact`**
+
+Presigned upload, streaming checksum verification and GGUF header parsing were moved here from Phase 2
+and have **not** landed. They need MinIO and the deployment path that pulls from it, which arrives with
+the controller in Phase 5, so they move there rather than being written against nothing. The worker
+verifies a checksum it is given by configuration, which is real verification of the file it loads; it
+is not the registry verifying bytes it received. `finalize` still reports
+`verification: declared_checksum`, and the capability table still says so.
+
+Session-token (JWT) authentication remains deferred to Phase 15, with the dashboard that needs it.
+
+**Tests** — 145, all green; 103 need nothing installed, 42 need a real engine and a real model.
+
+- `tests/runtime_conformance.py`: one suite, run unchanged against both adapters. A subclass supplies
+  a `runtime` fixture and a `spec` and nothing else; no test is skipped or overridden for either
+  engine. It enforces the seven obligations from [api.md §7](./api.md#7-inferenceruntime-interface):
+  cancellation frees the slot (asserted through `/internal/v1/state`), TTFT is measured at the first
+  token rather than derived at the end, a deadline aborts and reports `deadline` distinctly from
+  `cancel`, token counts come from the engine's tokenizer, load failures are typed and a non-retryable
+  one is never retried, `livez` and `readyz` answer different questions, and shutdown drains.
+- `tests/test_real_model.py`: the exit criterion. Asserts on the *content* of real streamed output and
+  separately that the runtime is named `llamacpp`, so a silent fallback to the stub fails the suite
+  instead of passing it. Also: streaming and non-streaming parity, determinism at temperature 0,
+  `length` versus `stop`, stop sequences, readiness gating, a model-version assertion mismatch
+  answering `409`, cancellation stopping the real engine, a deadline aborting it, and a client
+  disconnect releasing the slot.
+- `tests/test_app.py`: 31 tests against a **real uvicorn server on an ephemeral port**, not
+  `httpx.ASGITransport` — the ASGI transport buffers a streaming response, so a test that occupies a
+  slot by reading slowly occupies nothing. Three tests here passed vacuously until this changed, and
+  they were the three about saturation and slot accounting.
+- `tests/test_llamacpp_conformance.py`: supervision — a missing artifact, a checksum mismatch refused
+  before the engine starts, unload reaping the child (verified with `os.kill(pid, 0)`), loopback-only
+  binding.
+- `tests/test_worker_units.py`: deadline parsing, priority overtaking and FIFO within a class, cancel
+  while queued, the EWMA, drain, duplicate request ids, configuration validation, the registry.
+
+**Exit:** met for the runtime path — `make worker-test-integration` streams real tokens from a real
+GGUF through a supervised `llama-server` and asserts on their content. **Not** met for the container
+images: no Docker daemon was available in the environment this phase was built in, so
+`Dockerfile.worker` is unbuilt and unrun here. CI builds both targets, and the llamacpp image's final
+step runs `llama-server --version` so a missing shared object fails the build rather than someone's
+first request. Until that job has gone green, treat the images as written-but-unverified.
 
 ---
 
@@ -216,13 +286,23 @@ tokens from a worker through the gateway.
 - `packages/scheduler`: `hardware_profile` → constraints; node inventory from informers; capacity
   admission returning a real explanation on rejection.
 - Inventory reconciler: `nodes` cache and `worker_events`.
+- `packages/artifact`, arriving here rather than in Phase 2 or 3: MinIO, presigned upload with expiry
+  and a size limit, streaming SHA-256 verification of the bytes actually received, GGUF header parsing,
+  and the node-local content-addressed cache
+  ([ADR-0016](./architecture-decisions/README.md#adr-0016)). It lands with the artifact-puller
+  initContainer above, because a presigned URL with nothing behind it and a verifier with no bytes to
+  read would both be scaffolding shaped like a feature. Until then `finalize` keeps reporting
+  `verification: declared_checksum`, so a version that became ready without its bytes being read stays
+  identifiable.
 - `deploy/helm/nebula` + `deploy/kind/cluster.yaml`; RBAC; NetworkPolicies; migration Job hook;
   `scripts/dev-up.sh` / `.ps1`.
 
 **Tests:** controller tests with `envtest` (real API server, fake kubelet) for create/update/scale/
 delete/adopt-orphan/drift-correction; the deliberate one — delete the Deployment out from under
 NEBULA and assert it is recreated; inadmissible capacity request returns 422 before any object is
-created; RBAC verified by `kubectl auth can-i` assertions in CI, including the negatives.
+created; RBAC verified by `kubectl auth can-i` assertions in CI, including the negatives; an upload
+whose bytes hash to something other than the declared checksum is refused at `finalize`, and the
+version stays unusable.
 
 **Exit:** `nebula deploy` equivalent via `curl` creates real pods on kind; `kubectl get deploy -n
 nebula-workloads` shows them; killing a pod brings a replacement; deleting the Deployment object

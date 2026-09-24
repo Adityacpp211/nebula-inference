@@ -49,6 +49,21 @@ DEV_KEY_PEPPER ?= $(or $(NEBULA_AUTH_KEY_PEPPER),nebula-development-pepper-do-no
 # In a restricted network where proxy.golang.org is unreachable but github.com is
 # not, export GOPROXY=direct GOSUMDB=off before running these targets.
 
+# ---- inference worker (Python) ---------------------------------------------
+# The worker is the one component that is not Go (ADR-0002: Python only where the
+# model libraries require it). It gets its own targets rather than being folded into
+# `test`, because its integration suite needs an engine binary and a model file that
+# a Go developer has no reason to have.
+WORKER_DIR := workers/inference
+PY         ?= python3
+
+# The engine binary and the fixture model. Both are paths, never defaults that might
+# exist: a test that silently runs against the wrong model is worse than one that
+# refuses to run. `make worker-model` produces the second.
+WORKER_ENGINE_BIN  ?= $(NEBULA_LLAMA_SERVER_BIN)
+WORKER_MODEL_PATH  ?= $(or $(NEBULA_TEST_MODEL_PATH),$(CURDIR)/.cache/nebula-tiny.gguf)
+WORKER_MODEL_VER   ?= nebula-tiny:fixture
+
 ## help: list every target
 .PHONY: help
 help:
@@ -118,6 +133,69 @@ test-short:
 test-integration:
 	@NEBULA_TEST_DATABASE_URL="$(TEST_DB_URL)" go test -race -count=1 \
 		./tests/integration/... ./services/controlplane/tests/...
+
+## worker-install: install the inference worker with its development extra
+.PHONY: worker-install
+worker-install:
+	@cd $(WORKER_DIR) && $(PY) -m pip install -e '.[dev]'
+
+## worker-lint: ruff and mypy --strict over the inference worker
+.PHONY: worker-lint
+worker-lint:
+	@cd $(WORKER_DIR) && $(PY) -m ruff check . && $(PY) -m ruff format --check . \
+		&& $(PY) -m mypy --strict nebula_worker
+
+## worker-fmt: format the inference worker
+.PHONY: worker-fmt
+worker-fmt:
+	@cd $(WORKER_DIR) && $(PY) -m ruff format . && $(PY) -m ruff check --fix .
+
+## worker-test: worker tests that need no engine and no model
+.PHONY: worker-test
+worker-test:
+	@cd $(WORKER_DIR) && $(PY) -m pytest -q -m 'not integration'
+
+## worker-model: train the tiny fixture model used by the worker integration tests
+##
+## Trained rather than downloaded (ADR-0028). Needs the dev extra for torch and gguf,
+## and the engine's own llama-tokenize so the model trains against exactly the
+## tokenizer it will be served with.
+.PHONY: worker-model
+worker-model:
+	@test -n "$(WORKER_ENGINE_BIN)" || { \
+		echo "set NEBULA_LLAMA_SERVER_BIN to a llama-server binary"; exit 1; }
+	@mkdir -p $(dir $(WORKER_MODEL_PATH))
+	@cd $(WORKER_DIR) && $(PY) tools/make_tiny_model.py \
+		--llama-tokenize "$(dir $(WORKER_ENGINE_BIN))llama-tokenize" \
+		--out "$(WORKER_MODEL_PATH)"
+	@echo "wrote $(WORKER_MODEL_PATH)"
+
+## worker-test-integration: worker tests against the real engine and a real model
+##
+## Requires NEBULA_LLAMA_SERVER_BIN and a fixture model (see worker-model). Refuses to
+## run rather than skipping silently: a green run that quietly tested nothing is the
+## failure mode this suite exists to prevent.
+.PHONY: worker-test-integration
+worker-test-integration:
+	@test -n "$(WORKER_ENGINE_BIN)" || { \
+		echo "set NEBULA_LLAMA_SERVER_BIN to a llama-server binary"; exit 1; }
+	@test -f "$(WORKER_MODEL_PATH)" || { \
+		echo "no model at $(WORKER_MODEL_PATH) — run 'make worker-model'"; exit 1; }
+	@cd $(WORKER_DIR) && \
+		NEBULA_LLAMA_SERVER_BIN="$(WORKER_ENGINE_BIN)" \
+		NEBULA_TEST_MODEL_PATH="$(WORKER_MODEL_PATH)" \
+		NEBULA_TEST_MODEL_VERSION="$(WORKER_MODEL_VER)" \
+		$(PY) -m pytest -q
+
+## run-worker-mock: run the inference worker with the declared stub runtime
+##
+## No engine, no model, no real tokens. Useful for exercising the worker API, the
+## admission queue and the probes; useless for anything about output.
+.PHONY: run-worker-mock
+run-worker-mock:
+	@cd $(WORKER_DIR) && NEBULA_ENV=dev NEBULA_LOG_LEVEL=debug \
+		NEBULA_WORKER_RUNTIME=mock NEBULA_WORKER_MODEL_VERSION=dev:mock \
+		$(PY) -m nebula_worker.main
 
 ## cover: open the HTML coverage report
 .PHONY: cover
@@ -189,6 +267,12 @@ docker-build:
 	@docker build -f deploy/docker/Dockerfile.migrate \
 		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
 		-t nebula/migrate:$(VERSION) .
+	@docker build -f deploy/docker/Dockerfile.worker --target mock \
+		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
+		-t nebula/worker-mock:$(VERSION) .
+	@docker build -f deploy/docker/Dockerfile.worker --target llamacpp \
+		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
+		-t nebula/worker-llamacpp:$(VERSION) .
 
 ## tidy: tidy go.mod and go.sum
 .PHONY: tidy
@@ -198,12 +282,15 @@ tidy:
 
 ## verify-phase: the phase gate — everything that must be green to finish a phase
 .PHONY: verify-phase
-verify-phase: fmt-check vet build test
+verify-phase: fmt-check vet build test worker-lint worker-test
 	@echo
-	@echo "unit tests, build and formatting are green."
-	@echo "run 'make test-integration' with a database to complete the gate."
+	@echo "Go and worker unit tests, build, formatting and worker typing are green."
+	@echo "run 'make test-integration' with a database and"
+	@echo "'make worker-test-integration' with an engine binary to complete the gate."
 
 ## clean: remove build output
 .PHONY: clean
 clean:
 	@rm -rf $(BIN_DIR) coverage.out coverage.html
+	@rm -rf $(WORKER_DIR)/.pytest_cache $(WORKER_DIR)/.mypy_cache $(WORKER_DIR)/.ruff_cache
+	@find $(WORKER_DIR) -name __pycache__ -type d -prune -exec rm -rf {} +

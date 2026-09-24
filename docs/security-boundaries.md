@@ -207,6 +207,28 @@ Denied by NetworkPolicy, and verified by a test that proves the denial rather th
 PostgreSQL, Redis, the control plane, other workers, and general internet egress. A worker can reach
 NATS, the OTel collector, DNS, and the object store (at startup, for its artifact). Nothing else.
 
+**The engine's own output is the one path worth naming explicitly** (Phase 3,
+`runtimes/llamacpp.py`). The adapter supervises `llama-server` as a child process and keeps a bounded
+tail of its output, because a startup failure or a crash is diagnosable from nothing else. That tail is
+handled under three rules:
+
+- It is **never logged**, at any level. No logging call in the worker takes it as a field.
+- It **never appears in an HTTP response body.** It travels only in a typed error's `detail`, which
+  `error_response` does not serialise; the envelope carries a message, a code and a request id.
+- The adapter **never raises the engine's verbosity.** The argv it builds passes `--metrics`,
+  `--slots`, `--no-webui` and the model's parameters, and no verbose or request-logging flag. At its
+  default verbosity `llama-server` logs request lines and timings, not prompt content.
+
+The residual is `extra_args` in the adapter's runtime configuration, which an operator could use to
+turn engine verbosity up. That is an operator choosing to log prompts on their own infrastructure, the
+same as attaching a debugger; it is not something NEBULA does, and it is not something NEBULA can
+prevent without maintaining a denylist of another project's flags. Named here so the decision is
+visible rather than implicit.
+
+The one place engine output is exposed at all is `RuntimeHealth.detail`, and only on the branch where
+the engine process is **not** running — so the last line before a crash reaches an internal probe
+response. No request is being served at that point, which is what makes that acceptable.
+
 ### B7 — Artifact integrity
 
 Model weights are the one large untrusted input NEBULA deliberately executes against, so integrity is

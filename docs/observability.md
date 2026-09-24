@@ -137,16 +137,51 @@ nobody notices until an incident.
 
 ### 2.3 Worker and runtime
 
+Implemented in Phase 3 (`workers/inference/nebula_worker/telemetry.py`). The names below are what the
+worker actually exports; where Phase 0 planned a different name, this table is the one that matches the
+code.
+
 | Metric | Type | Labels | Purpose |
 |--------|------|--------|---------|
-| `nebula_worker_up` | gauge | `deployment`, `pod`, `model_version` | liveness from NEBULA's own view |
-| `nebula_worker_slots_busy` / `_total` | gauge | `deployment`, `pod` | runtime saturation |
-| `nebula_worker_queue_depth` | gauge | `deployment`, `pod` | second-tier queue |
-| `nebula_model_load_duration_seconds` | histogram | `deployment`, `model_version`, `cache` (hit\|miss) | cold-start cost; `cache` is what proves the node cache works |
-| `nebula_model_load_failures_total` | counter | `deployment`, `error_class` | typed load failures |
-| `nebula_runtime_kv_cache_used_bytes` | gauge | `deployment`, `pod` | the usual cause of worker OOM |
-| `nebula_worker_rejections_total` | counter | `deployment`, `pod`, `reason` | admission control working |
-| `nebula_artifact_pull_duration_seconds` | histogram | `model_version`, `cache` | initContainer cost |
+| `nebula_worker_requests_total` | counter | `endpoint`, `outcome` | traffic and how it ended |
+| `nebula_worker_admission_rejected_total` | counter | `reason` | admission control working |
+| `nebula_worker_request_duration_seconds` | histogram | — | end-to-end generation duration |
+| `nebula_worker_ttft_seconds` | histogram | — | time to first token, observed at the first token |
+| `nebula_worker_queue_wait_seconds` | histogram | — | user-visible queueing pain, at the worker |
+| `nebula_worker_tokens_generated_total` / `_prompt_total` | counter | — | tokens, counted by the engine's tokenizer |
+| `nebula_worker_cancellations_total` | counter | — | cancels honoured |
+| `nebula_worker_deadlines_exceeded_total` | counter | — | requests that ran out of budget |
+| `nebula_worker_model_load_duration_seconds` | histogram | — | cold-start cost |
+| `nebula_worker_in_flight` | gauge | — | generations running now |
+| `nebula_worker_queue_depth` | gauge | — | second-tier queue |
+| `nebula_worker_slots_total` / `_busy` | gauge | — | runtime saturation |
+| `nebula_worker_model_ready` | gauge | — | a model is loaded and the engine answers |
+| `nebula_worker_engine_process_alive` | gauge | — | the engine child is running |
+| `nebula_worker_draining` | gauge | — | 1 once draining has begun |
+| `nebula_worker_engine_restarts` | gauge | — | times the adapter restarted the engine |
+| `nebula_worker_kv_cache_used_bytes` | gauge | — | KV cache in use, **absent unless the engine reports it** |
+
+Three deliberate departures from the Phase 0 sketch, each for a reason:
+
+**No `deployment`, `pod` or `model_version` labels on worker metrics.** Those identify the *target*, not
+the measurement, and Prometheus service discovery already attaches them at scrape time. Emitting them
+from inside the process duplicates that, doubles cardinality when the two disagree, and makes a metric
+wrong after a rollout rather than merely stale.
+
+**`nebula_worker_up` does not exist; two gauges replace it.** `nebula_worker_engine_process_alive` and
+`nebula_worker_model_ready` answer different questions, exactly as `/livez` and `/readyz` do
+(obligation 6). A single `up` gauge cannot distinguish "the engine died" from "the model is still
+loading", and those have different runbooks.
+
+**`nebula_worker_kv_cache_used_bytes` is absent rather than zero when unknown.** The pinned llama.cpp
+build exposes token counters, throughput and busy-slot averages, but nothing about KV-cache occupancy;
+`/slots` reports only `is_processing` and each slot's `n_ctx`. An always-zero gauge would tell an
+operator there is KV cache to spare while a worker OOMs, which is the "fake metrics" failure in
+miniature. The series simply does not appear until an engine reports the number.
+
+Still to come: `cache` (hit|miss) on load duration, `nebula_model_load_failures_total` by error class,
+and `nebula_artifact_pull_duration_seconds` all belong to the artifact-pull path, which arrives with the
+controller in Phase 5. They are not listed as implemented because they are not.
 
 Where `llama-server` does not expose something NEBULA needs, the adapter times its own calls and the
 metric is documented as **adapter-measured rather than engine-reported**. Presenting an adapter estimate

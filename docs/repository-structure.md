@@ -48,7 +48,9 @@ nebula/
 ├── workers/
 │   └── inference/                  # Python: FastAPI + runtime adapters
 │       ├── pyproject.toml
+│       ├── README.md
 │       ├── nebula_worker/
+│       │   ├── main.py             # entrypoint: config, signals, the drain sequence
 │       │   ├── app.py              # HTTP surface: /internal/v1/*, probes, /metrics
 │       │   ├── queue.py            # bounded, priority, deadline-aware local queue
 │       │   ├── deadline.py  cancel.py  telemetry.py  config.py
@@ -57,6 +59,8 @@ nebula/
 │       │       ├── mock.py         # DECLARED STUB: seeded, deterministic, error injection
 │       │       ├── llamacpp.py     # supervises upstream llama-server
 │       │       └── vllm.py         # post-v1, GPU
+│       ├── tools/                  # development only, never shipped in the image
+│       │   └── make_tiny_model.py  # trains the GGUF fixture the integration tests need
 │       └── tests/
 │           ├── runtime_conformance.py   # the suite EVERY adapter must pass
 │           └── test_{queue,deadline,cancel,app}.py

@@ -1,8 +1,9 @@
 name: CI
 
-# The Phase 1 gate, run by a machine: build, lint, unit tests, and the real
-# database checks that cannot be faked (migrations up/down/up, row-level
-# security, immutability triggers, deferred constraints).
+# The phase gate, run by a machine: build, lint, unit tests, and the checks that
+# cannot be faked — migrations up/down/up, row-level security, immutability
+# triggers, deferred constraints, and (Phase 3) the inference worker streaming real
+# tokens out of a real model through a real engine process.
 
 on:
   push:
@@ -19,6 +20,12 @@ concurrency:
 
 env:
   GO_VERSION: "1.24"
+  PYTHON_VERSION: "3.11"
+  # The engine is pinned to a tag, not master. Which tokens a GGUF produces is a
+  # property of a specific engine build, so an engine tracking master would make an
+  # upstream sampling change look like a model regression. Keep in step with
+  # LLAMA_CPP_REF in deploy/docker/Dockerfile.worker.
+  LLAMA_CPP_REF: "b11157"
 
 jobs:
   build:
@@ -172,6 +179,93 @@ jobs:
           fi
           echo "schema is clean after teardown"
 
+  worker:
+    name: inference worker (lint, types, unit tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: workers/inference/pyproject.toml
+
+      - name: install the worker and its development extra
+        run: make worker-install
+
+      - name: lint and types
+        run: make worker-lint
+
+      - name: unit tests
+        run: make worker-test
+
+  worker-integration:
+    name: inference worker (real engine, real model)
+    runs-on: ubuntu-latest
+
+    # This is the Phase 3 exit criterion, so it is a job rather than a manual step:
+    # client -> worker -> model -> streamed tokens, asserted on the content of real
+    # output. The suite also asserts the runtime is named llamacpp, so a silent
+    # fallback to the declared stub fails here instead of passing.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: workers/inference/pyproject.toml
+
+      - name: cache the engine build
+        id: engine-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/nebula/engine
+          # Keyed by the pinned ref, so bumping the engine rebuilds and anything
+          # else reuses. A cache key without the ref would serve the old engine
+          # after a bump, which is the failure this pin exists to prevent.
+          key: llamacpp-${{ env.LLAMA_CPP_REF }}-${{ runner.os }}
+
+      - name: build llama-server
+        if: steps.engine-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$LLAMA_CPP_REF" \
+            https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp
+          cmake -B /tmp/llama.cpp/build -S /tmp/llama.cpp \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF
+          # llama-tokenize as well as llama-server: the fixture trains against the
+          # engine's own tokenizer rather than a reimplementation of it, which is
+          # what keeps a model that loads cleanly from emitting confident garbage.
+          cmake --build /tmp/llama.cpp/build --config Release -j "$(nproc)" \
+            --target llama-server llama-tokenize
+          mkdir -p ~/.cache/nebula/engine
+          cp /tmp/llama.cpp/build/bin/llama-server \
+             /tmp/llama.cpp/build/bin/llama-tokenize ~/.cache/nebula/engine/
+          cp -a /tmp/llama.cpp/build/bin/*.so* ~/.cache/nebula/engine/
+
+      - name: install the worker and its development extra
+        run: make worker-install
+
+      - name: train the fixture model
+        run: |
+          set -euo pipefail
+          # ggml's backends are loaded by name from the library path, and the
+          # binaries were copied away from their build tree.
+          export LD_LIBRARY_PATH="$HOME/.cache/nebula/engine:${LD_LIBRARY_PATH:-}"
+          make worker-model NEBULA_LLAMA_SERVER_BIN="$HOME/.cache/nebula/engine/llama-server"
+
+      - name: integration tests
+        run: |
+          set -euo pipefail
+          export LD_LIBRARY_PATH="$HOME/.cache/nebula/engine:${LD_LIBRARY_PATH:-}"
+          make worker-test-integration \
+            NEBULA_LLAMA_SERVER_BIN="$HOME/.cache/nebula/engine/llama-server"
+
   docker:
     name: container images
     runs-on: ubuntu-latest
@@ -198,3 +292,46 @@ jobs:
           tags: nebula/migrate:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: build worker image (mock)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.worker
+          target: mock
+          push: false
+          # Loaded into the daemon so the assertion below can run against it.
+          load: true
+          tags: nebula/worker-mock:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Compiles llama.cpp, so it is the slowest job here. It stays in CI anyway:
+      # the image's final step runs `llama-server --version`, which is what turns a
+      # missing shared object into a failed build rather than a failed first
+      # request in someone's cluster.
+      - name: build worker image (llama.cpp)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.worker
+          target: llamacpp
+          build-args: |
+            LLAMA_CPP_REF=${{ env.LLAMA_CPP_REF }}
+          push: false
+          tags: nebula/worker-llamacpp:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: the mock image must contain no engine
+        run: |
+          set -euo pipefail
+          # The declared stub is kept out of production by three independent
+          # refusals; this asserts the third one, which is the only one visible
+          # from outside the process.
+          if docker run --rm --entrypoint sh nebula/worker-mock:ci \
+               -c 'command -v llama-server' 2>/dev/null; then
+            echo "the mock worker image contains an engine binary"
+            exit 1
+          fi
+          echo "mock image carries no engine, as intended"

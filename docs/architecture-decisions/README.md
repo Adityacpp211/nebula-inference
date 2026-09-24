@@ -42,7 +42,8 @@ Status values: `Proposed` · `Accepted` · `Rejected` · `Superseded` · `Deprec
 | [0025](./0025-own-the-migration-runner.md) | Own the migration runner rather than adopting a migration library | Accepted | 1 |
 | [0026](#adr-0026) | Shared HTTP primitives live in `packages/httpx` | Accepted | 1 |
 | [0027](./0027-deployment-state-machine.md) | Eight deployment states, enforced in the database | Accepted | 2 |
-| 0028+ | reserved — written in the phase that makes the decision | — | — |
+| [0028](./0028-locally-trained-test-fixture-model.md) | The integration-test model is trained locally, not downloaded | Accepted | 3 |
+| 0029+ | reserved — written in the phase that makes the decision | — | — |
 
 ADRs 0001, 0003, 0004, 0005, 0006, 0025 and 0027 have full files because their reasoning is long and they are the
 ones a reviewer is most likely to challenge. The rest are recorded below in full-enough form to be

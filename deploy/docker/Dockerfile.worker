@@ -1,0 +1,182 @@
+# nebula-inference-worker
+#
+# Two final targets from one file, because the two worker variants differ only in
+# whether an engine binary is present:
+#
+#   docker build -f deploy/docker/Dockerfile.worker --target mock     -t nebula/worker-mock:dev     .
+#   docker build -f deploy/docker/Dockerfile.worker --target llamacpp -t nebula/worker-llamacpp:dev .
+#
+# The mock image deliberately carries NO engine. One image with the engine present
+# and the mock selected by an environment variable would put the declared stub and
+# the real runtime a single variable apart, and the stub would eventually be
+# reachable in production by configuration mistake. Two images make that mistake a
+# different image name instead (ADR-0015, docs/security-boundaries.md).
+#
+# Unlike the Go services this cannot be distroless-static: the worker is Python, and
+# the llamacpp variant supervises a child process, so it needs a libc, a shell-less
+# but forkable process tree, and ggml's shared objects. That is a genuine reduction
+# in hardening relative to the control plane, recorded in ADR-0015 — stated here so
+# the difference is not read as an oversight.
+
+# ---- engine build -----------------------------------------------------------
+# Pinned to a tag, not master. Which tokens a GGUF produces is a property of a
+# specific engine build; "latest upstream" is not a version, and a silently moving
+# engine is indistinguishable from a model regression when output changes.
+ARG LLAMA_CPP_REF=b11157
+
+FROM debian:12-slim AS engine
+
+ARG LLAMA_CPP_REF
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+RUN git clone --depth 1 --branch "${LLAMA_CPP_REF}" \
+      https://github.com/ggml-org/llama.cpp.git .
+
+# Only llama-server is built and only llama-server ships. The worker talks to the
+# engine over loopback HTTP and never links against it (ADR-0015: supervision, not
+# bindings), so llama-cli, the perplexity tools and the engine's own test suite are
+# build-time weight with no runtime purpose.
+# No LLAMA_CURL flag: model downloading was removed from the engine by this tag, and
+# the worker would not want it anyway — artifacts arrive from the registry, and an
+# engine that can fetch a URL is an engine that can be pointed at one.
+RUN cmake -B build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DLLAMA_BUILD_SERVER=ON \
+      -DLLAMA_BUILD_TESTS=OFF \
+      -DLLAMA_BUILD_EXAMPLES=OFF \
+  && cmake --build build --config Release --target llama-server -j "$(nproc)"
+
+# Collect the binary and the shared objects beside it, so the runtime stage does
+# not need to know ggml's backend layout — which changes between releases.
+RUN set -eux; \
+    mkdir -p /engine/bin /engine/lib; \
+    cp build/bin/llama-server /engine/bin/; \
+    cp -a build/bin/*.so* /engine/lib/; \
+    ldd /engine/bin/llama-server
+
+# ---- python dependencies ----------------------------------------------------
+# Installed from the project metadata alone, before any source is copied, so that
+# editing a module does not reinstall FastAPI. The dev extra — pytest, ruff, mypy,
+# gguf, torch — is never installed: the fixture generator is a development tool and
+# a worker image has no business carrying a training framework.
+FROM python:3.11-slim-bookworm AS deps
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /build
+COPY workers/inference/pyproject.toml ./
+RUN mkdir -p nebula_worker/runtimes \
+  && touch nebula_worker/__init__.py nebula_worker/runtimes/__init__.py \
+  && pip install --prefix=/install .
+
+# ---- runtime base -----------------------------------------------------------
+# Shared by both variants: interpreter, dependencies, worker source, non-root user.
+FROM python:3.11-slim-bookworm AS base
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# 65532 is the uid distroless calls "nonroot", which the Go images already use. One
+# uid across every NEBULA image means a PodSecurityContext or a mounted model
+# directory is correct for all of them rather than per-service.
+RUN groupadd --gid 65532 nonroot \
+  && useradd --uid 65532 --gid 65532 --no-create-home --shell /usr/sbin/nologin nonroot
+
+COPY --from=deps /install /usr/local
+
+# The real package over the dependency stage's placeholder. --no-deps because the
+# dependency set was resolved above and this step must not be able to change it;
+# --force-reinstall because the version string is unchanged, so pip would otherwise
+# consider the placeholder satisfactory.
+COPY workers/inference/pyproject.toml /src/
+COPY workers/inference/nebula_worker /src/nebula_worker
+RUN pip install --no-deps --force-reinstall /src && rm -rf /src
+
+# Model artifacts are mounted, never baked. A layer holding a multi-gigabyte GGUF
+# would have to be rebuilt and re-pushed to change a model version, which is the
+# thing the registry exists to avoid.
+RUN mkdir -p /models && chown 65532:65532 /models
+VOLUME ["/models"]
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    NEBULA_WORKER_HOST=0.0.0.0 \
+    NEBULA_WORKER_PORT=8090
+
+USER 65532:65532
+EXPOSE 8090
+
+# No HEALTHCHECK, for the same reason as the Go images: Kubernetes owns liveness and
+# readiness through /livez and /readyz, and two health mechanisms that can disagree
+# are worse than one. /livez means the process is alive; /readyz means the model is
+# loaded. They are deliberately not the same question.
+ENTRYPOINT ["nebula-inference-worker"]
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+
+# Build metadata as labels, not environment variables: nothing in the worker reads a
+# version at runtime yet, and an environment variable no code consults is a wire
+# that looks connected.
+LABEL org.opencontainers.image.source="https://github.com/adityasatwar321/nebula" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${COMMIT}" \
+      org.opencontainers.image.created="${BUILD_TIME}"
+
+# ---- mock variant -----------------------------------------------------------
+# No engine binary in the image at all. nebula_worker.config refuses the mock
+# runtime when NEBULA_ENV=production and runtimes.mock.build refuses again at its
+# own entry point; this image is the third refusal and the only one visible from
+# outside the process.
+FROM base AS mock
+
+ENV NEBULA_WORKER_RUNTIME=mock
+
+LABEL org.opencontainers.image.title="nebula-inference-worker (mock)" \
+      org.opencontainers.image.description="Declared development stub. Generates no real tokens. Refuses to start when NEBULA_ENV=production." \
+      io.nebula.runtime="mock" \
+      io.nebula.declared-stub="true"
+
+# ---- llamacpp variant -------------------------------------------------------
+FROM base AS llamacpp
+
+ARG LLAMA_CPP_REF
+
+USER root
+
+# libgomp is ggml's OpenMP runtime. It is the one library the CPU backend needs that
+# the Python base image does not already carry; libssl and libstdc++ come with the
+# interpreter. The `--version` check below is what proves that claim rather than
+# assuming it.
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY --from=engine /engine/bin/llama-server /usr/local/bin/llama-server
+COPY --from=engine /engine/lib/ /usr/local/lib/nebula-engine/
+
+# ggml's backends are loaded by name from the library path, so the directory has to
+# be on it rather than reached by an rpath the copy above would have invalidated.
+RUN echo /usr/local/lib/nebula-engine > /etc/ld.so.conf.d/nebula-engine.conf \
+  && ldconfig \
+  && ldd /usr/local/bin/llama-server
+
+USER 65532:65532
+
+ENV NEBULA_WORKER_RUNTIME=llamacpp \
+    NEBULA_LLAMA_SERVER_BIN=/usr/local/bin/llama-server
+
+# Fails the build rather than the first request if the engine cannot execute in this
+# image — a missing shared object is otherwise discovered by a user.
+RUN /usr/local/bin/llama-server --version
+
+LABEL org.opencontainers.image.title="nebula-inference-worker (llama.cpp)" \
+      org.opencontainers.image.description="Supervises llama-server as a child process and streams real tokens." \
+      io.nebula.runtime="llamacpp" \
+      io.nebula.engine="llama.cpp" \
+      io.nebula.engine-ref="${LLAMA_CPP_REF}"
