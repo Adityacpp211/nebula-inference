@@ -51,6 +51,10 @@ type Config struct {
 	HTTP     HTTPConfig     `json:"http" yaml:"http"`
 	Database DatabaseConfig `json:"database" yaml:"database"`
 	Auth     AuthConfig     `json:"auth" yaml:"auth"`
+	Internal InternalConfig `json:"internal" yaml:"internal"`
+	Redis    RedisConfig    `json:"redis" yaml:"redis"`
+	Gateway  GatewayConfig  `json:"gateway" yaml:"gateway"`
+	Limits   LimitsConfig   `json:"limits" yaml:"limits"`
 	Dev      DevConfig      `json:"dev" yaml:"dev"`
 
 	// service is set by the binary, never by configuration.
@@ -127,6 +131,109 @@ type AuthConfig struct {
 	// KeyCacheSize bounds the cache so a flood of distinct prefixes cannot grow it
 	// without limit.
 	KeyCacheSize int `json:"key_cache_size" yaml:"key_cache_size" env:"NEBULA_AUTH_KEY_CACHE_SIZE" default:"4096"`
+}
+
+// InternalConfig secures service-to-service calls inside the cluster.
+type InternalConfig struct {
+	// AuthSecret keys the HMAC on X-Nebula-Auth-Context, the signed identity the
+	// gateway attaches to every call it makes to the control plane
+	// (docs/security-boundaries.md §2, B2). Shared by exactly those two services.
+	// Without it the control plane accepts only direct API-key authentication.
+	AuthSecret Secret `json:"auth_secret" yaml:"auth_secret" env:"NEBULA_INTERNAL_AUTH_SECRET"`
+
+	// AuthMaxAge bounds how old a signed context may be. It is the replay window,
+	// so it is seconds, not minutes: a context is minted per call, never reused.
+	AuthMaxAge Duration `json:"auth_max_age" yaml:"auth_max_age" env:"NEBULA_INTERNAL_AUTH_MAX_AGE" default:"10s"`
+}
+
+// RedisConfig controls the Redis client. Everything NEBULA keeps in Redis is
+// transient and rebuildable (docs/architecture.md §3.2), so Redis is a soft
+// dependency: every caller has a documented behaviour for when it is down.
+type RedisConfig struct {
+	// URL is redis://[user:password@]host:port/db. Empty disables Redis, which is
+	// legal in dev and makes the gateway use its in-process fallbacks from the start.
+	URL Secret `json:"url" yaml:"url" env:"NEBULA_REDIS_URL"`
+
+	// KeyPrefix namespaces every key, so two installations can share a server.
+	KeyPrefix string `json:"key_prefix" yaml:"key_prefix" env:"NEBULA_REDIS_KEY_PREFIX" default:"nebula:"`
+
+	DialTimeout Duration `json:"dial_timeout" yaml:"dial_timeout" env:"NEBULA_REDIS_DIAL_TIMEOUT" default:"2s"`
+	// OpTimeout bounds every command. Short, because Redis sits in the request path
+	// and a slow Redis must degrade to the fallback rather than add its latency to
+	// every request.
+	OpTimeout Duration `json:"op_timeout" yaml:"op_timeout" env:"NEBULA_REDIS_OP_TIMEOUT" default:"150ms"`
+	PoolSize  int      `json:"pool_size" yaml:"pool_size" env:"NEBULA_REDIS_POOL_SIZE" default:"64"`
+}
+
+// GatewayConfig controls nebula-gateway, the data plane.
+type GatewayConfig struct {
+	// ControlPlaneURL is where credentials are resolved and admin calls proxied.
+	ControlPlaneURL string `json:"controlplane_url" yaml:"controlplane_url" env:"NEBULA_GATEWAY_CONTROLPLANE_URL" flag:"controlplane-url" usage:"base URL of nebula-controlplane" default:"http://127.0.0.1:8082"`
+	// ControlPlaneTimeout bounds one call to the control plane.
+	ControlPlaneTimeout Duration `json:"controlplane_timeout" yaml:"controlplane_timeout" env:"NEBULA_GATEWAY_CONTROLPLANE_TIMEOUT" default:"5s"`
+
+	// RoutesFile is the static route table (Phase 4 only; dynamic routing is
+	// Phase 6). YAML or JSON. Empty means no inference routes.
+	RoutesFile string `json:"routes_file" yaml:"routes_file" env:"NEBULA_GATEWAY_ROUTES_FILE" flag:"routes-file" usage:"static route table (YAML or JSON)"`
+
+	// DefaultTimeout is a request's budget when neither the client nor the route
+	// sets one. MaxTimeout caps whatever the client asks for.
+	DefaultTimeout Duration `json:"default_timeout" yaml:"default_timeout" env:"NEBULA_GATEWAY_DEFAULT_TIMEOUT" default:"60s"`
+	MaxTimeout     Duration `json:"max_timeout" yaml:"max_timeout" env:"NEBULA_GATEWAY_MAX_TIMEOUT" default:"10m"`
+
+	// KeepAliveInterval is how long a stream may be idle before an SSE comment is
+	// written, so an idle proxy does not close a connection whose model is still
+	// thinking (docs/api.md §2).
+	KeepAliveInterval Duration `json:"keepalive_interval" yaml:"keepalive_interval" env:"NEBULA_GATEWAY_KEEPALIVE_INTERVAL" default:"15s"`
+	// StreamWriteTimeout bounds one write to a streaming client. A client that stops
+	// reading is cancelled and its worker slot freed rather than holding it forever
+	// (docs/components.md §2.1, "slow client").
+	StreamWriteTimeout Duration `json:"stream_write_timeout" yaml:"stream_write_timeout" env:"NEBULA_GATEWAY_STREAM_WRITE_TIMEOUT" default:"10s"`
+	// CancelDrainTimeout is how long, after a client disconnects, the gateway keeps
+	// reading the cancelled worker stream for its final usage frame. Bounded, because
+	// the client is already gone and this exists only for accounting.
+	CancelDrainTimeout Duration `json:"cancel_drain_timeout" yaml:"cancel_drain_timeout" env:"NEBULA_GATEWAY_CANCEL_DRAIN_TIMEOUT" default:"3s"`
+
+	// LocalKeyCacheTTL is the in-process credential cache in front of Redis. Shorter
+	// than the Redis TTL, because it is the part a revocation cannot reach on other
+	// replicas: this number is the cross-replica revocation delay.
+	LocalKeyCacheTTL Duration `json:"local_key_cache_ttl" yaml:"local_key_cache_ttl" env:"NEBULA_GATEWAY_LOCAL_KEY_CACHE_TTL" default:"5s"`
+	// NegativeKeyCacheTTL caches "no such key" so a flood of invented keys costs one
+	// control-plane lookup per prefix per TTL, not one per request.
+	NegativeKeyCacheTTL Duration `json:"negative_key_cache_ttl" yaml:"negative_key_cache_ttl" env:"NEBULA_GATEWAY_NEGATIVE_KEY_CACHE_TTL" default:"5s"`
+	// StaleKeyGrace is how long a cached credential keeps authenticating after its
+	// TTL when the control plane cannot be reached (axiom A8: a degraded control plane
+	// must not break inference). Bounded, then it fails closed.
+	StaleKeyGrace Duration `json:"stale_key_grace" yaml:"stale_key_grace" env:"NEBULA_GATEWAY_STALE_KEY_GRACE" default:"5m"`
+
+	// DefaultMaxTokens applies when a request sets neither max_tokens nor
+	// max_completion_tokens and the route declares no default.
+	DefaultMaxTokens int `json:"default_max_tokens" yaml:"default_max_tokens" env:"NEBULA_GATEWAY_DEFAULT_MAX_TOKENS" default:"256"`
+}
+
+// LimitsConfig is the gateway's admission control: requests per minute, tokens
+// per minute and concurrency, per API key and per organization.
+//
+// Key limits come from the key's rate_limit_policy when it has one and from the
+// defaults here when it does not. Organization limits come from here.
+type LimitsConfig struct {
+	// Enabled switches rate limiting off entirely. Only for load tests that measure
+	// the serving path rather than the limiter; refused in production.
+	Enabled bool `json:"enabled" yaml:"enabled" env:"NEBULA_LIMITS_ENABLED" default:"true"`
+
+	KeyRPM         int `json:"key_rpm" yaml:"key_rpm" env:"NEBULA_LIMITS_KEY_RPM" default:"600"`
+	KeyTPM         int `json:"key_tpm" yaml:"key_tpm" env:"NEBULA_LIMITS_KEY_TPM" default:"200000"`
+	KeyConcurrency int `json:"key_concurrency" yaml:"key_concurrency" env:"NEBULA_LIMITS_KEY_CONCURRENCY" default:"32"`
+
+	OrgRPM         int `json:"org_rpm" yaml:"org_rpm" env:"NEBULA_LIMITS_ORG_RPM" default:"6000"`
+	OrgTPM         int `json:"org_tpm" yaml:"org_tpm" env:"NEBULA_LIMITS_ORG_TPM" default:"2000000"`
+	OrgConcurrency int `json:"org_concurrency" yaml:"org_concurrency" env:"NEBULA_LIMITS_ORG_CONCURRENCY" default:"256"`
+
+	// FallbackFraction scales every limit while Redis is unreachable and each
+	// replica is counting alone. Below 1 so that N replicas counting independently
+	// admit less, not N times more — "conservative" in docs/architecture.md §3.2 is
+	// this number. Approximate by construction, and documented as such.
+	FallbackFraction float64 `json:"fallback_fraction" yaml:"fallback_fraction" env:"NEBULA_LIMITS_FALLBACK_FRACTION" default:"0.5"`
 }
 
 // DevConfig holds affordances that must never be enabled in production. Every

@@ -1,25 +1,28 @@
 openapi: 3.1.0
 
-# NEBULA control API.
+# NEBULA public API: the control API and the OpenAI-compatible inference API.
 #
-# Scope: this file documents what the control plane SERVES TODAY. It is not a
-# roadmap. Endpoints described in docs/api.md that no handler implements yet — the
-# inference surface, routes, rollouts, metrics, logs, replicas, nodes — are absent
-# deliberately: a specification that documents unbuilt endpoints trains clients to
-# call them and turns a 404 into a support ticket.
+# Scope: this file documents what the system SERVES TODAY. It is not a roadmap.
+# Endpoints described in docs/api.md that no handler implements yet — embeddings,
+# routes, rollouts, metrics, logs, replicas, nodes — are absent deliberately: a
+# specification that documents unbuilt endpoints trains clients to call them and
+# turns a 404 into a support ticket.
 #
-# A test (services/controlplane/internal/api/openapi_test.go) asserts in both
-# directions that every route this service mounts appears here and every path here
-# is mounted, so the two cannot drift.
+# Every operation is served by exactly one service. Operations the gateway serves
+# itself carry `x-nebula-served-by: gateway`; everything else is served by the
+# control plane and reached through the gateway's admin proxy. Two tests assert in
+# both directions that each service mounts exactly the operations attributed to
+# it: services/controlplane/internal/api/openapi_test.go and
+# services/gateway/internal/server/openapi_test.go.
 #
 # ADR-0018 commits to generating the Go server interfaces, the CLI client and the
 # dashboard's TypeScript types from this file. The Phase 2 handlers are
 # hand-written against it; TODO(NEB-131) tracks the generator.
 
 info:
-  title: NEBULA Control API
-  version: "1.0.0-phase2"
-  summary: Model registry, credentials and deployment lifecycle.
+  title: NEBULA API
+  version: "1.0.0-phase4"
+  summary: OpenAI-compatible inference, model registry, credentials and deployment lifecycle.
   description: |
     The control plane is the only writer of desired state. Everything here is
     org-scoped by the caller's credential: `org_id` is never a parameter, in a
@@ -45,6 +48,11 @@ security:
   - apiKey: []
 
 tags:
+  - name: inference
+    description: |
+      OpenAI-compatible, served by the gateway. `model` names a route, not a
+      deployment. In Phase 4 routes come from a static table on the gateway;
+      dynamic routing from the control plane is Phase 6.
   - name: identity
     description: Who the caller is, plus users and credentials.
   - name: registry
@@ -57,6 +65,81 @@ tags:
     description: Machine-readable descriptions of the system's own rules.
 
 paths:
+  /v1/chat/completions:
+    post:
+      tags: [inference]
+      operationId: createChatCompletion
+      x-nebula-served-by: gateway
+      summary: Generate a chat completion (OpenAI-compatible).
+      description: |
+        Requires `inference:invoke`. Parameters NEBULA cannot honour are refused by
+        name with code `unsupported_parameter` rather than silently ignored.
+
+        With `"stream": true` the response is `text/event-stream`: a named
+        `nebula.meta` event first (OpenAI SDKs skip named events), then OpenAI
+        `chat.completion.chunk` frames, `: keep-alive` comments during silence, a
+        finish chunk, a usage chunk when `stream_options.include_usage` is true, and
+        `data: [DONE]`. A failure after the first frame is a terminal
+        `{"error": {...}}` frame followed by `[DONE]`, and no `finish_reason` is ever
+        sent for an interrupted stream.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChatCompletionRequest" }
+      responses:
+        "200":
+          description: The completion, or an SSE stream of chunks when `stream` is true.
+          headers:
+            x-ratelimit-limit-requests: { $ref: "#/components/headers/RateLimitLimitRequests" }
+            x-ratelimit-remaining-requests: { $ref: "#/components/headers/RateLimitRemainingRequests" }
+            x-ratelimit-limit-tokens: { $ref: "#/components/headers/RateLimitLimitTokens" }
+            x-ratelimit-remaining-tokens: { $ref: "#/components/headers/RateLimitRemainingTokens" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChatCompletion" }
+            text/event-stream:
+              schema: { $ref: "#/components/schemas/ChatCompletionChunk" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+        "504": { $ref: "#/components/responses/Timeout" }
+
+  /v1/completions:
+    post:
+      tags: [inference]
+      operationId: createCompletion
+      x-nebula-served-by: gateway
+      summary: Generate a text completion (legacy OpenAI endpoint).
+      description: |
+        The prompt is sent to the model verbatim, with no chat template. Streaming
+        follows the same frame rules as chat, with `text_completion` objects.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CompletionRequest" }
+      responses:
+        "200":
+          description: The completion, or an SSE stream when `stream` is true.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TextCompletion" }
+            text/event-stream:
+              schema: { $ref: "#/components/schemas/TextCompletion" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+        "504": { $ref: "#/components/responses/Timeout" }
+
   /v1/me:
     get:
       tags: [identity]
@@ -264,6 +347,23 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/models:
+    get:
+      tags: [inference]
+      operationId: listRoutesOpenAI
+      x-nebula-served-by: gateway
+      summary: List the models (routes) the caller can invoke, in OpenAI's shape.
+      description: |
+        Requires `inference:invoke`. Lists routes, not deployments: `model` in an
+        inference request names a route. Each entry carries a `nebula` block with
+        the route's weighted targets.
+      responses:
+        "200":
+          description: The caller's routes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OpenAIModelList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
     post:
       tags: [registry]
       operationId: createModel
@@ -321,6 +421,11 @@ paths:
       tags: [registry]
       operationId: getModel
       summary: Fetch a model.
+      description: |
+        At the gateway this path is shared with OpenAI's "retrieve model": a value
+        that is not a uuid is a route name, answered by the gateway with an
+        `OpenAIModel` (scope `inference:invoke`). A uuid is a registry model,
+        answered by the control plane as documented here.
       responses:
         "200":
           description: The model.
@@ -1010,8 +1115,288 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    TooManyRequests:
+      description: |
+        A key or organization limit, or a saturated model. `Retry-After` says when
+        to retry; `X-Nebula-Reason` says which: `rate_limited_rpm`,
+        `rate_limited_tpm`, `concurrency_limit` or `queue_full`.
+      headers:
+        Retry-After: { schema: { type: integer }, description: Seconds. }
+        X-Nebula-Reason: { $ref: "#/components/headers/NebulaReason" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    UpstreamError:
+      description: The model runtime returned an unusable response.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    ServiceUnavailable:
+      description: |
+        No healthy endpoint (`no_healthy_endpoint`), the model is still loading
+        (`model_loading`), or credentials cannot be verified while the control plane
+        is unreachable (`control_plane_degraded`). Retryable per `Retry-After`.
+      headers:
+        Retry-After: { schema: { type: integer } }
+        X-Nebula-Reason: { $ref: "#/components/headers/NebulaReason" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Timeout:
+      description: The request did not complete within its deadline.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  headers:
+    NebulaReason:
+      description: The closed set of operational causes from docs/api.md §1.
+      schema:
+        type: string
+        enum: [no_healthy_endpoint, queue_full, queue_timeout, breaker_open, rate_limited_rpm,
+               rate_limited_tpm, concurrency_limit, model_loading, control_plane_degraded]
+    RateLimitLimitRequests:
+      description: The key's requests-per-minute limit.
+      schema: { type: integer }
+    RateLimitRemainingRequests:
+      description: Requests left in the key's bucket after this one.
+      schema: { type: integer }
+    RateLimitLimitTokens:
+      description: The key's tokens-per-minute limit.
+      schema: { type: integer }
+    RateLimitRemainingTokens:
+      description: |
+        Tokens left after this request's reservation (prompt bytes plus max_tokens,
+        an upper bound). The unused part is refunded when the request finishes.
+      schema: { type: integer }
 
   schemas:
+    ChatMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role: { type: string, enum: [system, developer, user, assistant] }
+        content:
+          description: A string, or an array of `{"type":"text","text":...}` parts.
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+                required: [type, text]
+                properties:
+                  type: { type: string, enum: [text] }
+                  text: { type: string }
+        name: { type: string }
+
+    NebulaRequestExtension:
+      type: object
+      additionalProperties: false
+      description: NEBULA's own request options, namespaced so they cannot collide with OpenAI fields.
+      properties:
+        timeout_ms:
+          type: integer
+          minimum: 1
+          description: The request's total budget, capped by the gateway's maximum.
+        deployment_id:
+          type: string
+          description: Pin a deployment of the route by name or id, bypassing weights. Requires `inference:pin`.
+        queue: { type: string, enum: [allow, reject] }
+        trace: { type: boolean }
+
+    SamplingParameters:
+      type: object
+      properties:
+        max_tokens: { type: integer, minimum: 1 }
+        temperature: { type: number, minimum: 0, maximum: 2, default: 1 }
+        top_p: { type: number, exclusiveMinimum: 0, maximum: 1, default: 1 }
+        top_k: { type: integer, minimum: 0 }
+        stop:
+          oneOf:
+            - type: string
+            - type: array
+              maxItems: 4
+              items: { type: string }
+        seed: { type: integer }
+        presence_penalty: { type: number, minimum: -2, maximum: 2 }
+        frequency_penalty: { type: number, minimum: -2, maximum: 2 }
+        stream: { type: boolean, default: false }
+        stream_options:
+          type: object
+          properties:
+            include_usage: { type: boolean }
+        user: { type: string, maxLength: 256 }
+        nebula: { $ref: "#/components/schemas/NebulaRequestExtension" }
+
+    ChatCompletionRequest:
+      allOf:
+        - $ref: "#/components/schemas/SamplingParameters"
+        - type: object
+          required: [model, messages]
+          properties:
+            model: { type: string, description: A route name. }
+            messages:
+              type: array
+              minItems: 1
+              maxItems: 1024
+              items: { $ref: "#/components/schemas/ChatMessage" }
+            max_completion_tokens: { type: integer, minimum: 1, description: Alias of max_tokens. }
+            response_format:
+              type: object
+              properties:
+                type: { type: string, enum: [text, json_object] }
+
+    CompletionRequest:
+      allOf:
+        - $ref: "#/components/schemas/SamplingParameters"
+        - type: object
+          required: [model, prompt]
+          properties:
+            model: { type: string }
+            prompt:
+              oneOf:
+                - type: string
+                - type: array
+                  minItems: 1
+                  maxItems: 1
+                  items: { type: string }
+
+    Usage:
+      type: object
+      description: Token counts from the runtime's own tokenizer. The gateway never estimates them.
+      required: [prompt_tokens, completion_tokens, total_tokens]
+      properties:
+        prompt_tokens: { type: integer }
+        completion_tokens: { type: integer }
+        total_tokens: { type: integer }
+
+    NebulaResponseMeta:
+      type: object
+      description: |
+        Routing and timing context. Every field is measured; one that could not be
+        measured is absent rather than zero.
+      required: [request_id, deployment, model_version]
+      properties:
+        request_id: { type: string }
+        route: { type: string }
+        deployment: { type: string }
+        model_version: { type: string }
+        variant: { type: string }
+        queue_wait_ms: { type: integer }
+        ttft_ms: { type: integer }
+        duration_ms: { type: integer }
+        tokens_per_second: { type: number }
+        attempts: { type: integer }
+        runtime:
+          type: string
+          description: The engine that produced the tokens, e.g. llamacpp or mock.
+
+    ChatCompletion:
+      type: object
+      required: [id, object, created, model, choices, usage]
+      properties:
+        id: { type: string, description: "chatcmpl-<request id>" }
+        object: { type: string, enum: [chat.completion] }
+        created: { type: integer }
+        model: { type: string }
+        choices:
+          type: array
+          items:
+            type: object
+            required: [index, message, finish_reason]
+            properties:
+              index: { type: integer }
+              message:
+                type: object
+                properties:
+                  role: { type: string, enum: [assistant] }
+                  content: { type: string }
+              logprobs: { type: "null" }
+              finish_reason: { type: string, enum: [stop, length] }
+        usage: { $ref: "#/components/schemas/Usage" }
+        nebula: { $ref: "#/components/schemas/NebulaResponseMeta" }
+
+    ChatCompletionChunk:
+      type: object
+      description: One `data:` frame of a chat stream.
+      required: [id, object, created, model, choices]
+      properties:
+        id: { type: string }
+        object: { type: string, enum: [chat.completion.chunk] }
+        created: { type: integer }
+        model: { type: string }
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index: { type: integer }
+              delta:
+                type: object
+                properties:
+                  role: { type: string }
+                  content: { type: string }
+              finish_reason: { type: [string, "null"], enum: [stop, length, null] }
+        usage: { $ref: "#/components/schemas/Usage" }
+
+    TextCompletion:
+      type: object
+      required: [id, object, created, model, choices]
+      properties:
+        id: { type: string, description: "cmpl-<request id>" }
+        object: { type: string, enum: [text_completion] }
+        created: { type: integer }
+        model: { type: string }
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index: { type: integer }
+              text: { type: string }
+              finish_reason: { type: [string, "null"], enum: [stop, length, null] }
+        usage: { $ref: "#/components/schemas/Usage" }
+        nebula: { $ref: "#/components/schemas/NebulaResponseMeta" }
+
+    OpenAIModel:
+      type: object
+      required: [id, object, created, owned_by]
+      properties:
+        id: { type: string, description: The route name. }
+        object: { type: string, enum: [model] }
+        created: { type: integer }
+        owned_by: { type: string, description: The owning organization's slug. }
+        nebula:
+          type: object
+          properties:
+            route_id: { type: string }
+            context_window: { type: integer }
+            task: { type: string, enum: [chat, completion] }
+            streaming: { type: boolean }
+            embeddings: { type: boolean }
+            source:
+              type: string
+              enum: [static]
+              description: Where the route came from.
+            targets:
+              type: array
+              items:
+                type: object
+                properties:
+                  deployment: { type: string }
+                  model_version: { type: string }
+                  weight: { type: integer }
+                  label: { type: string }
+
+    OpenAIModelList:
+      type: object
+      required: [object, data]
+      properties:
+        object: { type: string, enum: [list] }
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/OpenAIModel" }
+
     ErrorEnvelope:
       type: object
       required: [error]

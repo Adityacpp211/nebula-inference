@@ -22,6 +22,10 @@ type API struct {
 	Logger *slog.Logger
 	Store  *store.Store
 	Hasher *auth.Hasher
+	// Signer verifies X-Nebula-Auth-Context from the gateway. Nil when no internal
+	// secret is configured, in which case only direct API-key authentication works
+	// and the internal surface is not mounted.
+	Signer *auth.ContextSigner
 
 	keys *keyCache
 }
@@ -39,13 +43,20 @@ func New(cfg *config.Config, logger *slog.Logger, st *store.Store) (*API, error)
 	if err != nil {
 		return nil, err
 	}
-	return &API{
+	a := &API{
 		Config: cfg,
 		Logger: logger,
 		Store:  st,
 		Hasher: hasher,
 		keys:   newKeyCache(cfg.Auth.KeyCacheSize, nil),
-	}, nil
+	}
+	if !cfg.Internal.AuthSecret.IsZero() {
+		a.Signer, err = auth.NewContextSigner(cfg.Internal.AuthSecret.Reveal(), cfg.Internal.AuthMaxAge.Duration(), nil)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return a, nil
 }
 
 // logger returns the request-correlated logger.
@@ -216,6 +227,7 @@ func (a *API) Mount(mux *http.ServeMux) {
 		}
 		mux.Handle(route.Pattern, a.authenticate(h))
 	}
+	a.mountInternal(mux)
 }
 
 // whoAmI describes the calling credential. It is the endpoint a caller hits when

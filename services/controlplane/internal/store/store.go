@@ -46,6 +46,7 @@ type Store struct {
 	Organizations *OrganizationRepo
 	Users         *UserRepo
 	APIKeys       *APIKeyRepo
+	RatePolicies  *RateLimitPolicyRepo
 	Models        *ModelRepo
 	Versions      *ModelVersionRepo
 	Deployments   *DeploymentRepo
@@ -59,6 +60,7 @@ func New(pool *db.Pool) *Store {
 		Organizations: &OrganizationRepo{},
 		Users:         &UserRepo{},
 		APIKeys:       &APIKeyRepo{},
+		RatePolicies:  &RateLimitPolicyRepo{},
 		Models:        &ModelRepo{},
 		Versions:      &ModelVersionRepo{},
 		Deployments:   &DeploymentRepo{},

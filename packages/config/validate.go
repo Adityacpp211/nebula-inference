@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -97,10 +98,19 @@ func (c *Config) Validate() error {
 		c.HTTP.ShutdownGrace)
 
 	// --- database ---
-	if c.Database.URL.IsZero() {
-		v.Add("NEBULA_DATABASE_URL", "is required")
-	} else if !plausibleDSN(c.Database.URL.Reveal()) {
-		v.Add("NEBULA_DATABASE_URL", "must be a postgres:// URL or a libpq keyword/value string")
+	// The gateway imports no database package at all
+	// (docs/repository-structure.md §4, rule 3), so requiring a URL it would never
+	// open would only teach operators to hand the data plane a credential.
+	if c.usesDatabase() {
+		if c.Database.URL.IsZero() {
+			v.Add("NEBULA_DATABASE_URL", "is required")
+		} else if !plausibleDSN(c.Database.URL.Reveal()) {
+			v.Add("NEBULA_DATABASE_URL", "must be a postgres:// URL or a libpq keyword/value string")
+		}
+	} else if !c.Database.URL.IsZero() {
+		v.Add("NEBULA_DATABASE_URL",
+			"must not be set for %s: it has no database access by design, and a credential it never uses is one more to leak",
+			c.service)
 	}
 	v.AddIf(c.Database.MaxConns < 1, "NEBULA_DATABASE_MAX_CONNS", "must be at least 1")
 	v.AddIf(c.Database.MinConns < 0, "NEBULA_DATABASE_MIN_CONNS", "must not be negative")
@@ -120,6 +130,29 @@ func (c *Config) Validate() error {
 		"must not exceed 5m: until revocation invalidation exists, this TTL is the whole revocation guarantee")
 	v.AddIf(c.Auth.KeyCacheSize < 1, "NEBULA_AUTH_KEY_CACHE_SIZE", "must be at least 1")
 
+	// --- internal service authentication ---
+	if !c.Internal.AuthSecret.IsZero() && len(c.Internal.AuthSecret.Reveal()) < 32 {
+		v.Add("NEBULA_INTERNAL_AUTH_SECRET", "must be at least 32 bytes (generate with: openssl rand -base64 32)")
+	}
+	v.AddIf(c.Internal.AuthMaxAge.Duration() <= 0, "NEBULA_INTERNAL_AUTH_MAX_AGE", "must be positive")
+	v.AddIf(c.Internal.AuthMaxAge.Duration() > time.Minute, "NEBULA_INTERNAL_AUTH_MAX_AGE",
+		"must not exceed 1m: it is the replay window for a signed identity")
+
+	// --- redis ---
+	if !c.Redis.URL.IsZero() {
+		u := c.Redis.URL.Reveal()
+		if !strings.HasPrefix(u, "redis://") && !strings.HasPrefix(u, "rediss://") {
+			v.Add("NEBULA_REDIS_URL", "must be a redis:// or rediss:// URL")
+		}
+	}
+	v.AddIf(c.Redis.DialTimeout.Duration() <= 0, "NEBULA_REDIS_DIAL_TIMEOUT", "must be positive")
+	v.AddIf(c.Redis.OpTimeout.Duration() <= 0, "NEBULA_REDIS_OP_TIMEOUT", "must be positive")
+	v.AddIf(c.Redis.PoolSize < 1, "NEBULA_REDIS_POOL_SIZE", "must be at least 1")
+
+	if c.service == ServiceGateway {
+		c.validateGateway(&v)
+	}
+
 	// --- production gating -------------------------------------------------
 	// Every development affordance is a startup FAILURE in production, not a
 	// warning. See docs/architecture.md axiom A9 and risk R-17.
@@ -138,6 +171,14 @@ func (c *Config) Validate() error {
 			"is required when NEBULA_ENV=production")
 		v.AddIf(isDevPepper(c.Auth.KeyPepper.Reveal()), "NEBULA_AUTH_KEY_PEPPER",
 			"is the well-known development value; refusing to start in production")
+		v.AddIf(c.Internal.AuthSecret.Reveal() == DevInternalSecret, "NEBULA_INTERNAL_AUTH_SECRET",
+			"is the well-known development value; refusing to start in production")
+		if c.service == ServiceGateway {
+			v.AddIf(!c.Limits.Enabled, "NEBULA_LIMITS_ENABLED",
+				"must be true when NEBULA_ENV=production: an unlimited gateway is a load-test affordance")
+			v.AddIf(c.Redis.URL.IsZero(), "NEBULA_REDIS_URL",
+				"is required when NEBULA_ENV=production: without it every replica rate-limits alone, permanently")
+		}
 	}
 
 	if v.Len() > 0 {
@@ -145,6 +186,64 @@ func (c *Config) Validate() error {
 	}
 	return nil
 }
+
+// Service names. The config package knows them only to decide which sections a
+// binary needs; it holds no other per-service behaviour.
+const (
+	ServiceControlPlane = "nebula-controlplane"
+	ServiceGateway      = "nebula-gateway"
+	ServiceMigrate      = "nebula-migrate"
+)
+
+// usesDatabase reports whether the service opens PostgreSQL. An unknown service
+// name is assumed to, so a new binary gets the strict check until it opts out.
+func (c *Config) usesDatabase() bool { return c.service != ServiceGateway }
+
+// validateGateway checks what only the data plane needs.
+func (c *Config) validateGateway(v *ValidationErrors) {
+	g := c.Gateway
+	if u, err := url.Parse(g.ControlPlaneURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		v.Add("NEBULA_GATEWAY_CONTROLPLANE_URL", "must be an absolute http:// or https:// URL (got %q)", g.ControlPlaneURL)
+	}
+	v.AddIf(g.ControlPlaneTimeout.Duration() <= 0, "NEBULA_GATEWAY_CONTROLPLANE_TIMEOUT", "must be positive")
+	v.AddIf(g.DefaultTimeout.Duration() <= 0, "NEBULA_GATEWAY_DEFAULT_TIMEOUT", "must be positive")
+	v.AddIf(g.MaxTimeout.Duration() < g.DefaultTimeout.Duration(), "NEBULA_GATEWAY_MAX_TIMEOUT",
+		"must not be shorter than NEBULA_GATEWAY_DEFAULT_TIMEOUT (%s)", g.DefaultTimeout)
+	v.AddIf(g.KeepAliveInterval.Duration() < time.Second, "NEBULA_GATEWAY_KEEPALIVE_INTERVAL", "must be at least 1s")
+	v.AddIf(g.StreamWriteTimeout.Duration() <= 0, "NEBULA_GATEWAY_STREAM_WRITE_TIMEOUT", "must be positive")
+	v.AddIf(g.CancelDrainTimeout.Duration() <= 0, "NEBULA_GATEWAY_CANCEL_DRAIN_TIMEOUT", "must be positive")
+	v.AddIf(g.LocalKeyCacheTTL.Duration() <= 0, "NEBULA_GATEWAY_LOCAL_KEY_CACHE_TTL", "must be positive")
+	v.AddIf(g.LocalKeyCacheTTL.Duration() > c.Auth.KeyCacheTTL.Duration(), "NEBULA_GATEWAY_LOCAL_KEY_CACHE_TTL",
+		"must not exceed NEBULA_AUTH_KEY_CACHE_TTL (%s): the in-process cache sits in front of the shared one", c.Auth.KeyCacheTTL)
+	v.AddIf(g.NegativeKeyCacheTTL.Duration() <= 0, "NEBULA_GATEWAY_NEGATIVE_KEY_CACHE_TTL", "must be positive")
+	v.AddIf(g.StaleKeyGrace.Duration() > time.Hour, "NEBULA_GATEWAY_STALE_KEY_GRACE",
+		"must not exceed 1h: past that a revoked key keeps working through a control-plane outage")
+	v.AddIf(g.DefaultMaxTokens < 1, "NEBULA_GATEWAY_DEFAULT_MAX_TOKENS", "must be at least 1")
+
+	if c.Internal.AuthSecret.IsZero() {
+		v.Add("NEBULA_INTERNAL_AUTH_SECRET",
+			"is required by nebula-gateway: it signs the identity attached to every control-plane call")
+	}
+
+	l := c.Limits
+	for _, f := range []struct {
+		name string
+		val  int
+	}{
+		{"NEBULA_LIMITS_KEY_RPM", l.KeyRPM}, {"NEBULA_LIMITS_KEY_TPM", l.KeyTPM},
+		{"NEBULA_LIMITS_KEY_CONCURRENCY", l.KeyConcurrency},
+		{"NEBULA_LIMITS_ORG_RPM", l.OrgRPM}, {"NEBULA_LIMITS_ORG_TPM", l.OrgTPM},
+		{"NEBULA_LIMITS_ORG_CONCURRENCY", l.OrgConcurrency},
+	} {
+		v.AddIf(f.val < 1, f.name, "must be at least 1")
+	}
+	v.AddIf(l.FallbackFraction <= 0 || l.FallbackFraction > 1, "NEBULA_LIMITS_FALLBACK_FRACTION",
+		"must be in (0, 1]: it scales limits down while replicas count independently")
+}
+
+// DevInternalSecret is the internal auth secret used by the Makefile's local
+// targets. Named so production validation can refuse it.
+const DevInternalSecret = "nebula-development-internal-secret-do-not-use"
 
 // plausibleDSN does a shape check only. Full parsing belongs to the driver; this
 // exists so an obviously wrong value fails at startup with a clear message

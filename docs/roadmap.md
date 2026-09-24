@@ -251,9 +251,89 @@ first request. Until that job has gone green, treat the images as written-but-un
 
 ---
 
-## Phase 4 — API gateway and OpenAI-compatible API
+## Phase 4 — API gateway and OpenAI-compatible API ✅
 
-**Deliverables**
+**Status: complete**, with the items below marked as not yet verified here.
+
+**Delivered**
+
+- `services/gateway`: API-key authentication with a three-tier credential lookup (in-process →
+  Redis → the control plane's internal API), verification against the pepper on every request,
+  scope enforcement, tenant-scoped route resolution (another org's model is a 404), validation that
+  refuses unsupported parameters by name, and the OpenAI-compatible `/v1/chat/completions`,
+  `/v1/completions` and `/v1/models`. The gateway imports no database package
+  ([ADR-0030](./architecture-decisions/0030-gateway-credentials-through-the-control-plane.md)).
+- Rate limiting: one atomic Redis Lua script for RPM, TPM (optimistic reservation at admission,
+  settled against the runtime's count at release, overdraft carried forward) and concurrency leases
+  that expire, per key and per org, with OpenAI's `x-ratelimit-*` headers. When Redis fails, an
+  in-process implementation of the same algorithm takes over with limits scaled down, every decision
+  is marked degraded, and Redis is re-probed after a one-second cooldown rather than paying its
+  timeout on every request.
+- Streaming: SSE relayed frame by frame with backpressure through a bounded channel, keep-alive
+  comments, a per-write deadline that cuts off a client that stops reading, terminal error frames
+  with no `finish_reason`, and client-disconnect cancellation that tells the worker to stop and still
+  reads its final frame for the runtime's token count. Routing context moved from a named SSE event
+  to headers plus an SSE comment when the real SDK proved the Phase 0 assumption wrong
+  ([ADR-0029](./architecture-decisions/0029-stream-metadata-is-a-comment.md)).
+- Usage records in the `nebula.usage.record.v1` shape, one per request including partial usage, with
+  `token_source` saying where counts came from. Written as a structured log line until NATS exists
+  (TODO(NEB-140)).
+- The admin proxy: the caller's key is stripped, a signed `X-Nebula-Auth-Context` is attached, the
+  control plane verifies it (`packages/auth/internal.go`), `/internal/` is never proxied, and
+  revocations evict the shared credential cache through a response header the gateway consumes.
+- Static routing from a route file — deterministic weighted bucketing by request id, pinning by
+  deployment name or id (scope `inference:pin`), round-robin endpoints — replaced by dynamic
+  routing in Phase 6.
+- The spec covers the inference surface; operations the gateway serves carry
+  `x-nebula-served-by: gateway`, and a drift test per service checks each side.
+- `scripts/e2e-gateway.sh` (`make e2e-gateway`) and `scripts/load-gateway.sh`
+  (`make load-gateway`), both over `scripts/lib/stack.sh`: a throwaway stack from a clean checkout.
+
+**`packages/api` client: moved to Phase 14.** The roadmap listed a Go client here "for the CLI and
+dashboard later". Nothing in Phase 4 consumes one, the dashboard's client is generated TypeScript,
+and a client written ahead of its first caller is scaffolding; it lands with the CLI.
+
+**Tests.** Go unit tests for parsing (every refusal names its parameter), templates, the route
+table (weighted split within tolerance over 10 000 keys and stable per key), the limiter (every
+behaviour run against both the Lua script and the in-process fallback, plus all-or-nothing
+admission and no overshoot under 200 concurrent admissions), credentials (tiers, negative caching,
+single-flight, revocation, expiry, degraded grace, fail-closed), the worker client, and the handler
+end to end against a scriptable fake worker: frame order, keep-alives, interruption, disconnect with
+partial usage, the error mapping with no worker detail leaking, rate-limit refusal, tenancy, pinning,
+and the proxy's signed identity. Control-plane integration tests against PostgreSQL for signed
+contexts, their refusals, the internal lookup and revocation. The end-to-end suite drives the
+**unmodified OpenAI Python SDK** (3.19.2): list and retrieve, chat, streaming with usage, streaming
+and non-streaming agreeing on counts, text completion, refusal by name, 404, 401, context window, the
+admin API through the gateway, a key created, used and revoked through the gateway, a disconnect
+releasing the worker slot, and the usage record of a cancelled stream. 13/13 green.
+
+**Baseline** (`make load-gateway`, 60 s, mock worker at 400 tokens/s with 32 slots, 16 completion
+tokens per request, everything on one laptop; `tests/load/results/phase4-baseline.json`):
+
+| Scenario | Rate | Errors | p50 | p95 | p99 |
+|----------|------|--------|-----|-----|-----|
+| chat, non-streamed | 40 rps | 0 / 2401 | 130 ms | 155 ms | 162 ms |
+| chat, streamed | 20 rps | 0 / 1200 | 144 ms | 168 ms | 178 ms |
+
+About 40 ms of each request is the mock generating 16 tokens; the rest is the gateway, Redis, the
+Python worker and the loopback network together. Gateway-only latency needs the Phase 8 histograms.
+
+**Exit:** met — `OpenAI(base_url=..., api_key=...).chat.completions.create(stream=True)` streams
+tokens from a worker through the gateway, in `make e2e-gateway`. Against the **mock** runtime: no
+`llama-server` binary was available where this phase was built, so the real-engine path is the
+Phase 3 suite's, not re-run through the gateway here.
+
+**Not verified here, with reasons.** The gateway container image is written and unbuilt — Docker
+Desktop could not start on the development machine, so CI builds it. The race detector did not run
+locally (no C toolchain on Windows); CI runs every Go suite with `-race`. PostgreSQL and Redis for the
+local runs came from a WSL install rather than compose, which is why the e2e script accepts
+`NEBULA_E2E_DEPS=external`.
+
+**Debt recorded:** TODO(NEB-140) usage records to JetStream (Phase 6/13); TODO(NEB-141) gateway
+metrics (Phase 8); TODO(NEB-142) `Idempotency-Key` (Phase 10); TODO(NEB-143) cross-replica
+revocation broadcast (Phase 6); TODO(NEB-144) chat template from GGUF metadata (Phase 5).
+
+**Original plan**
 
 - `services/gateway`: authn/authz, validation, Redis rate limiting (RPM, TPM with optimistic
   reservation, concurrency), request IDs, trace propagation, admin proxy to the control plane,
