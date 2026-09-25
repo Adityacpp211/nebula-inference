@@ -84,7 +84,18 @@ async def _serve(config: WorkerConfig) -> int:
         task.add_done_callback(pending.discard)
 
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, _on_signal, sig.name)
+        try:
+            loop.add_signal_handler(sig, _on_signal, sig.name)
+        except NotImplementedError:
+            # Windows event loops have no add_signal_handler. The worker ships in a
+            # Linux image, but it also runs natively for local development, so fall
+            # back to a plain handler that hops onto the loop's thread.
+            signal.signal(
+                sig,
+                lambda signum, _frame: loop.call_soon_threadsafe(
+                    _on_signal, signal.Signals(signum).name
+                ),
+            )
 
     log.info(
         "starting",

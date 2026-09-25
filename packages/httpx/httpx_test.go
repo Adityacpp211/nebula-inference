@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	"github.com/adityasatwar321/nebula/packages/config"
 	"github.com/adityasatwar321/nebula/packages/httpx"
 	"github.com/adityasatwar321/nebula/packages/telemetry"
+	"github.com/adityasatwar321/nebula/packages/testsupport/netx"
 	"github.com/adityasatwar321/nebula/packages/version"
 )
 
@@ -459,10 +459,7 @@ func (f *fakeDrainer) MarkDraining() {
 func TestServerDrainsBeforeShutdown(t *testing.T) {
 	t.Parallel()
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	ln := netx.Listen(t)
 
 	drainer := &fakeDrainer{called: make(chan struct{}, 1)}
 	srv := httpx.NewServer(httpx.ServerOptions{
@@ -510,10 +507,7 @@ func TestServerDrainsBeforeShutdown(t *testing.T) {
 func TestServerFinishesInFlightRequests(t *testing.T) {
 	t.Parallel()
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	ln := netx.Listen(t)
 
 	released := make(chan struct{})
 	started := make(chan struct{})

@@ -342,3 +342,28 @@ func NewPage(limit int, cursor *uuid.UUID) Page {
 	}
 	return Page{Limit: int32(limit), Cursor: cursor} // #nosec G115 -- clamped above
 }
+
+// ---------------------------------------------------------------------------
+// rate-limit policies
+// ---------------------------------------------------------------------------
+
+// RateLimitPolicyRepo reads rate-limit policies. Written by an admin surface that
+// arrives with Phase 17's policy management; read today so the gateway enforces the
+// policy a key is actually bound to rather than a default.
+type RateLimitPolicyRepo struct{}
+
+// Get returns a policy visible to an org: its own, or a built-in (org_id NULL).
+func (r *RateLimitPolicyRepo) Get(ctx context.Context, q Querier, orgID, id uuid.UUID) (*models.RateLimitPolicy, error) {
+	var p models.RateLimitPolicy
+	err := q.QueryRow(ctx, `
+		SELECT id, org_id, name, requests_per_minute, tokens_per_minute, max_concurrency,
+		       max_queue_depth, created_at
+		  FROM rate_limit_policies
+		 WHERE id = $1 AND (org_id = $2 OR org_id IS NULL)`, id, orgID).
+		Scan(&p.ID, &p.OrgID, &p.Name, &p.RequestsPerMinute, &p.TokensPerMinute,
+			&p.MaxConcurrency, &p.MaxQueueDepth, &p.CreatedAt)
+	if err != nil {
+		return nil, classify(err)
+	}
+	return &p, nil
+}

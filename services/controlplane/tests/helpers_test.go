@@ -32,6 +32,7 @@ import (
 	"github.com/adityasatwar321/nebula/packages/db/models"
 	"github.com/adityasatwar321/nebula/packages/telemetry"
 	"github.com/adityasatwar321/nebula/packages/testsupport/dbtest"
+	"github.com/adityasatwar321/nebula/packages/testsupport/netx"
 	"github.com/adityasatwar321/nebula/packages/version"
 	cpapi "github.com/adityasatwar321/nebula/services/controlplane/internal/api"
 	"github.com/adityasatwar321/nebula/services/controlplane/internal/server"
@@ -87,8 +88,7 @@ func newFixtureOn(t *testing.T, pool *pgxpool.Pool) *fixture {
 		Probes: newProbes(cfg),
 		API:    api,
 	})
-	f.Server = httptest.NewServer(handler)
-	t.Cleanup(f.Server.Close)
+	f.Server = netx.NewServer(t, handler)
 
 	return f
 }
@@ -103,6 +103,8 @@ func testConfig(t *testing.T) *config.Config {
 				return dbtest.BaseURL()
 			case "NEBULA_AUTH_KEY_PEPPER":
 				return testPepper
+			case "NEBULA_INTERNAL_AUTH_SECRET":
+				return testInternalSecret
 			case "NEBULA_DEV_MOCK_RUNTIME":
 				// The registry refuses mock artifacts unless the stub is enabled, and
 				// these tests register mock artifacts, so the tests must enable it
