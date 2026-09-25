@@ -1,0 +1,55 @@
+# kind development values: one replica each, in-cluster PostgreSQL, Redis and an
+# S3-compatible store, the mock runtime allowed, and well-known development
+# secrets that every service refuses when env=production.
+env: dev
+
+images:
+  tag: dev
+  pullPolicy: Never           # images are loaded into kind, never pulled
+
+secrets:
+  keyPepper: nebula-development-pepper-do-not-use-in-production
+  internalAuthSecret: nebula-development-internal-secret-do-not-use
+  databaseURL: postgres://nebula:nebula@postgres.nebula-data:5432/nebula?sslmode=disable
+  controllerDatabaseURL: postgres://nebula:nebula@postgres.nebula-data:5432/nebula?sslmode=disable
+  redisURL: redis://redis.nebula-data:6379/0
+  artifactAccessKey: nebula
+  artifactSecretKey: nebula-dev-secret
+
+artifact:
+  endpoint: s3.nebula-data:8333
+  # The laptop reaches the store through the kind port mapping.
+  publicEndpoint: 127.0.0.1:30333
+  useTLS: false
+
+gateway:
+  replicas: 1
+  service:
+    type: NodePort
+    nodePort: 30080
+  routes:
+    - model: nebula-mock
+      org: dev
+      context_window: 4096
+      chat_template: plain
+      default_max_tokens: 32
+      capabilities: {streaming: true}
+      targets:
+        - deployment: mock-demo
+          model_version: "mock-model:v1"
+          weight: 100
+          label: baseline
+          endpoints: ["http://nebula-dev-mock-demo.nebula-workloads:8090"]
+
+controlplane:
+  replicas: 1
+  devSeed: true
+
+controller:
+  replicas: 1
+  startingTimeout: 5m
+
+data:
+  enabled: true
+  s3:
+    nodePort: 30333

@@ -68,10 +68,16 @@ func newFixture(t *testing.T) *fixture {
 // newFixtureOn builds a fixture over an existing pool, so two tenants can share a
 // database and tenant isolation can actually be tested.
 func newFixtureOn(t *testing.T, pool *pgxpool.Pool) *fixture {
+	return newFixtureWith(t, pool, nil)
+}
+
+// newFixtureWith builds a fixture with extra configuration, keyed by environment
+// variable name.
+func newFixtureWith(t *testing.T, pool *pgxpool.Pool, extra map[string]string) *fixture {
 	t.Helper()
 	ctx := dbtest.Context(t)
 
-	cfg := testConfig(t)
+	cfg := testConfigWith(t, extra)
 	st := store.New(pool)
 
 	api, err := cpapi.New(cfg, telemetry.Discard(), st)
@@ -93,11 +99,16 @@ func newFixtureOn(t *testing.T, pool *pgxpool.Pool) *fixture {
 	return f
 }
 
-func testConfig(t *testing.T) *config.Config {
+func testConfig(t *testing.T) *config.Config { return testConfigWith(t, nil) }
+
+func testConfigWith(t *testing.T, extra map[string]string) *config.Config {
 	t.Helper()
 	cfg, err := config.Loader{
 		Service: "nebula-controlplane",
 		Getenv: func(k string) string {
+			if v, ok := extra[k]; ok {
+				return v
+			}
 			switch k {
 			case "NEBULA_DATABASE_URL":
 				return dbtest.BaseURL()

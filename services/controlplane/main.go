@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"log/slog"
 
@@ -115,6 +116,22 @@ func run() error {
 	cpAPI, err := api.New(cfg, logger, st)
 	if err != nil {
 		return err
+	}
+
+	if cpAPI.Verifier != nil {
+		// The verifier completes finalize for store-backed versions. It resumes any
+		// verification a previous process was interrupted in.
+		go cpAPI.Verifier.Run(ctx)
+		probes.Register(telemetry.CheckFunc{
+			CheckName: "artifact_store", IsCritical: false, CheckTimeout: 2 * time.Second,
+			Fn: func(ctx context.Context) error {
+				if p, ok := cpAPI.Artifacts.(interface{ Ping(context.Context) error }); ok {
+					return p.Ping(ctx)
+				}
+				return nil
+			},
+		})
+		logger.Info("artifact store configured", slog.String("store", cfg.Artifact.Store))
 	}
 
 	if result, err := seed.Run(ctx, cfg, st, cpAPI.Hasher, logger); err != nil {

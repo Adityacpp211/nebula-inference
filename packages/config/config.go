@@ -55,6 +55,8 @@ type Config struct {
 	Redis    RedisConfig    `json:"redis" yaml:"redis"`
 	Gateway  GatewayConfig  `json:"gateway" yaml:"gateway"`
 	Limits   LimitsConfig   `json:"limits" yaml:"limits"`
+	Artifact ArtifactConfig `json:"artifact" yaml:"artifact"`
+	Kube     KubeConfig     `json:"kube" yaml:"kube"`
 	Dev      DevConfig      `json:"dev" yaml:"dev"`
 
 	// service is set by the binary, never by configuration.
@@ -108,6 +110,13 @@ type DatabaseConfig struct {
 	// StatementTimeout is applied server-side to every session in the pool, so a
 	// runaway query cannot hold a connection indefinitely.
 	StatementTimeout Duration `json:"statement_timeout" yaml:"statement_timeout" env:"NEBULA_DATABASE_STATEMENT_TIMEOUT" default:"30s"`
+
+	// Role, when set, is assumed on every connection (SET ROLE, as a startup
+	// parameter). The controller runs as nebula_controller, whose column-level grants
+	// let it write OBSERVED state and nothing a user wrote (migration 000007): the
+	// permission model is enforced by PostgreSQL, not by the controller's good
+	// behaviour. The login user must be a member of the role.
+	Role string `json:"role" yaml:"role" env:"NEBULA_DATABASE_ROLE"`
 
 	// AssertSchemaVersion refuses to serve when the database schema is not the
 	// version this binary was built against. Leave this on.
@@ -234,6 +243,72 @@ type LimitsConfig struct {
 	// admit less, not N times more — "conservative" in docs/architecture.md §3.2 is
 	// this number. Approximate by construction, and documented as such.
 	FallbackFraction float64 `json:"fallback_fraction" yaml:"fallback_fraction" env:"NEBULA_LIMITS_FALLBACK_FRACTION" default:"0.5"`
+}
+
+// ArtifactConfig selects and configures the model artifact store
+// (docs/deployment-architecture.md §5).
+type ArtifactConfig struct {
+	// Store is "s3", "file" or "none". With "none" the registry records whatever
+	// artifact_uri a client declares and finalize can only compare declared
+	// checksums — the Phase 2 behaviour, reported as verification: declared_checksum.
+	Store string `json:"store" yaml:"store" env:"NEBULA_ARTIFACT_STORE" default:"none"`
+
+	S3Endpoint string `json:"s3_endpoint" yaml:"s3_endpoint" env:"NEBULA_ARTIFACT_S3_ENDPOINT"`
+	// S3PublicEndpoint is the host:port clients use; presigned URLs are signed for it.
+	S3PublicEndpoint string `json:"s3_public_endpoint" yaml:"s3_public_endpoint" env:"NEBULA_ARTIFACT_S3_PUBLIC_ENDPOINT"`
+	S3Bucket         string `json:"s3_bucket" yaml:"s3_bucket" env:"NEBULA_ARTIFACT_S3_BUCKET" default:"nebula-models"`
+	S3Region         string `json:"s3_region" yaml:"s3_region" env:"NEBULA_ARTIFACT_S3_REGION" default:"us-east-1"`
+	S3AccessKey      Secret `json:"s3_access_key" yaml:"s3_access_key" env:"NEBULA_ARTIFACT_S3_ACCESS_KEY"`
+	S3SecretKey      Secret `json:"s3_secret_key" yaml:"s3_secret_key" env:"NEBULA_ARTIFACT_S3_SECRET_KEY"`
+	S3UseTLS         bool   `json:"s3_use_tls" yaml:"s3_use_tls" env:"NEBULA_ARTIFACT_S3_USE_TLS" default:"false"`
+
+	// Dir is the root of a "file" store.
+	Dir string `json:"dir" yaml:"dir" env:"NEBULA_ARTIFACT_DIR"`
+
+	// MaxBytes bounds one artifact. 50 GiB by default: larger than any model a CPU
+	// cluster will serve, small enough that a runaway upload is refused.
+	MaxBytes   int64    `json:"max_bytes" yaml:"max_bytes" env:"NEBULA_ARTIFACT_MAX_BYTES" default:"53687091200"`
+	PresignTTL Duration `json:"presign_ttl" yaml:"presign_ttl" env:"NEBULA_ARTIFACT_PRESIGN_TTL" default:"1h"`
+	// VerifyInterval is how often the registry looks for versions to verify, as a
+	// backstop to the immediate verification finalize starts.
+	VerifyInterval Duration `json:"verify_interval" yaml:"verify_interval" env:"NEBULA_ARTIFACT_VERIFY_INTERVAL" default:"5s"`
+}
+
+// KubeConfig configures the controller's view of Kubernetes.
+type KubeConfig struct {
+	// Kubeconfig is a kubeconfig path; empty means in-cluster configuration.
+	Kubeconfig string `json:"kubeconfig" yaml:"kubeconfig" env:"NEBULA_KUBECONFIG" flag:"kubeconfig" usage:"kubeconfig path (empty: in-cluster)"`
+	// WorkloadNamespace holds every worker. The controller's write permissions are
+	// scoped to it alone (docs/deployment-architecture.md §3).
+	WorkloadNamespace string `json:"workload_namespace" yaml:"workload_namespace" env:"NEBULA_KUBE_WORKLOAD_NAMESPACE" default:"nebula-workloads"`
+	// SystemNamespace holds NEBULA itself and the leader-election Lease.
+	SystemNamespace string `json:"system_namespace" yaml:"system_namespace" env:"NEBULA_KUBE_SYSTEM_NAMESPACE" default:"nebula-system"`
+
+	LeaderElection bool     `json:"leader_election" yaml:"leader_election" env:"NEBULA_KUBE_LEADER_ELECTION" default:"true"`
+	LeaseDuration  Duration `json:"lease_duration" yaml:"lease_duration" env:"NEBULA_KUBE_LEASE_DURATION" default:"15s"`
+	RenewDeadline  Duration `json:"renew_deadline" yaml:"renew_deadline" env:"NEBULA_KUBE_RENEW_DEADLINE" default:"10s"`
+	RetryPeriod    Duration `json:"retry_period" yaml:"retry_period" env:"NEBULA_KUBE_RETRY_PERIOD" default:"2s"`
+
+	// ResyncInterval re-reconciles every deployment periodically, so a missed event
+	// is corrected within this bound rather than never.
+	ResyncInterval Duration `json:"resync_interval" yaml:"resync_interval" env:"NEBULA_KUBE_RESYNC_INTERVAL" default:"30s"`
+	// PollInterval is how often the controller asks PostgreSQL what changed. NATS
+	// reconcile signals (Phase 6) make it a backstop rather than the trigger.
+	PollInterval Duration `json:"poll_interval" yaml:"poll_interval" env:"NEBULA_KUBE_POLL_INTERVAL" default:"2s"`
+	// StartingTimeout fails a deployment whose pods have not become ready in time.
+	StartingTimeout Duration `json:"starting_timeout" yaml:"starting_timeout" env:"NEBULA_KUBE_STARTING_TIMEOUT" default:"10m"`
+
+	// Images the controller puts in worker pods. Explicit tags, never "latest".
+	WorkerImage     string `json:"worker_image" yaml:"worker_image" env:"NEBULA_KUBE_WORKER_IMAGE" default:"nebula/worker-llamacpp:dev"`
+	MockWorkerImage string `json:"mock_worker_image" yaml:"mock_worker_image" env:"NEBULA_KUBE_MOCK_WORKER_IMAGE" default:"nebula/worker-mock:dev"`
+	PullerImage     string `json:"puller_image" yaml:"puller_image" env:"NEBULA_KUBE_PULLER_IMAGE" default:"nebula/artifact-puller:dev"`
+	ImagePullPolicy string `json:"image_pull_policy" yaml:"image_pull_policy" env:"NEBULA_KUBE_IMAGE_PULL_POLICY" default:"IfNotPresent"`
+	// ArtifactCacheHostPath is the node-local, content-addressed model cache.
+	ArtifactCacheHostPath string `json:"artifact_cache_host_path" yaml:"artifact_cache_host_path" env:"NEBULA_KUBE_ARTIFACT_CACHE_HOST_PATH" default:"/var/lib/nebula/models"`
+	// ArtifactSecretName holds the store credentials the puller reads. The
+	// controller references it by name and never reads it (it holds no secrets
+	// permission, docs/deployment-architecture.md §3).
+	ArtifactSecretName string `json:"artifact_secret_name" yaml:"artifact_secret_name" env:"NEBULA_KUBE_ARTIFACT_SECRET_NAME" default:"nebula-artifact-store"`
 }
 
 // DevConfig holds affordances that must never be enabled in production. Every

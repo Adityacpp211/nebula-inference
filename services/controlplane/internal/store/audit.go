@@ -55,6 +55,7 @@ const (
 	ActionModelVersionFinalize = "model_version.finalize"
 	ActionModelVersionFail     = "model_version.fail"
 	ActionModelVersionArchive  = "model_version.archive"
+	ActionModelVersionVerify   = "model_version.verify"
 
 	ActionDeploymentCreate     = "deployment.create"
 	ActionDeploymentUpdate     = "deployment.update"

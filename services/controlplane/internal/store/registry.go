@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -232,6 +233,52 @@ func (r *ModelVersionRepo) ListForModel(ctx context.Context, q Querier, orgID, m
 // the second one affects no rows and gets ErrConflict rather than both appearing to
 // succeed. Postgres' own trigger independently refuses anything the lifecycle
 // forbids, so a bug here cannot produce an illegal state.
+// Verifying is a version awaiting byte-level verification, with its tenant.
+type Verifying struct {
+	OrgID   uuid.UUID
+	Version *models.ModelVersion
+}
+
+// ListVerifying returns versions in status verifying across every organization,
+// oldest first. It is the registry verifier's work queue, and the reason a version
+// whose verification was interrupted by a restart is picked up again rather than
+// left in verifying forever. System use only: it is not tenant-scoped.
+func (r *ModelVersionRepo) ListVerifying(ctx context.Context, q Querier, limit int) ([]Verifying, error) {
+	rows, err := q.Query(ctx, `
+		SELECT m.org_id, `+prefixed("mv.", versionColumns)+`
+		  FROM model_versions mv
+		  JOIN models m ON m.id = mv.model_id
+		 WHERE mv.status = 'verifying' AND m.deleted_at IS NULL
+		 ORDER BY mv.created_at
+		 LIMIT $1`, limit)
+	if err != nil {
+		return nil, classify(err)
+	}
+	defer rows.Close()
+	var out []Verifying
+	for rows.Next() {
+		var v models.ModelVersion
+		var org uuid.UUID
+		if err := rows.Scan(&org, &v.ID, &v.ModelID, &v.Version, &v.Format, &v.Runtime, &v.Quantization,
+			&v.ParameterCount, &v.SizeBytes, &v.ChecksumSHA256, &v.ContextWindow, &v.ArtifactURI,
+			&v.HardwareProfile, &v.RuntimeConfig, &v.Status, &v.FailureReason, &v.CreatedBy,
+			&v.CreatedAt, &v.ReadyAt); err != nil {
+			return nil, classify(err)
+		}
+		out = append(out, Verifying{OrgID: org, Version: &v})
+	}
+	return out, classify(rows.Err())
+}
+
+// prefixed qualifies every column in a comma-separated list.
+func prefixed(prefix, columns string) string {
+	parts := strings.Split(columns, ",")
+	for i, p := range parts {
+		parts[i] = prefix + strings.TrimSpace(p)
+	}
+	return strings.Join(parts, ", ")
+}
+
 func (r *ModelVersionRepo) SetStatus(ctx context.Context, q Querier, orgID, id uuid.UUID,
 	from, to models.ModelVersionStatus, failureReason *string) error {
 	if !from.CanTransitionTo(to) {

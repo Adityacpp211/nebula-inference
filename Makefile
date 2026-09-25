@@ -296,6 +296,32 @@ run-gateway:
 e2e-gateway: build
 	@./scripts/e2e-gateway.sh
 
+## dev-up: NEBULA on a local kind cluster — images built and loaded, chart installed
+.PHONY: dev-up
+dev-up:
+	@./scripts/dev-up.sh
+
+## dev-down: delete the kind cluster (the host model cache is kept)
+.PHONY: dev-down
+dev-down:
+	@./scripts/dev-down.sh
+
+## e2e-kind: the Phase 5 demo against the kind cluster dev-up created
+.PHONY: e2e-kind
+e2e-kind:
+	@$(PY) tests/e2e/kind/phase5_demo.py
+
+## helm-check: lint the chart and render it with dev and production-shaped values
+.PHONY: helm-check
+helm-check:
+	@helm lint deploy/helm/nebula -f deploy/helm/nebula/values-dev.yaml
+	@helm template nebula deploy/helm/nebula -n nebula-system -f deploy/helm/nebula/values-dev.yaml >/dev/null
+	@helm template nebula deploy/helm/nebula -n nebula-system --set images.tag=ci \
+		--set secrets.keyPepper=x --set secrets.internalAuthSecret=x --set secrets.databaseURL=x \
+		--set secrets.controllerDatabaseURL=x --set secrets.redisURL=x --set secrets.artifactAccessKey=x \
+		--set secrets.artifactSecretKey=x --set artifact.endpoint=s3.example:443 >/dev/null
+	@echo "chart lints and renders for dev and production values"
+
 ## load-gateway: the Phase 4 load baseline (k6) against the same live stack
 .PHONY: load-gateway
 load-gateway: build

@@ -149,8 +149,55 @@ func (c *Config) Validate() error {
 	v.AddIf(c.Redis.OpTimeout.Duration() <= 0, "NEBULA_REDIS_OP_TIMEOUT", "must be positive")
 	v.AddIf(c.Redis.PoolSize < 1, "NEBULA_REDIS_POOL_SIZE", "must be at least 1")
 
+	// --- artifact store ---
+	switch c.Artifact.Store {
+	case "none":
+	case "s3":
+		v.AddIf(c.Artifact.S3Endpoint == "", "NEBULA_ARTIFACT_S3_ENDPOINT", "is required when NEBULA_ARTIFACT_STORE=s3")
+		v.AddIf(strings.Contains(c.Artifact.S3Endpoint, "://"), "NEBULA_ARTIFACT_S3_ENDPOINT",
+			"must be host:port without a scheme; set NEBULA_ARTIFACT_S3_USE_TLS for https")
+		v.AddIf(c.Artifact.S3Bucket == "", "NEBULA_ARTIFACT_S3_BUCKET", "is required when NEBULA_ARTIFACT_STORE=s3")
+		v.AddIf(c.Artifact.S3AccessKey.IsZero() || c.Artifact.S3SecretKey.IsZero(), "NEBULA_ARTIFACT_S3_ACCESS_KEY",
+			"and NEBULA_ARTIFACT_S3_SECRET_KEY are required when NEBULA_ARTIFACT_STORE=s3")
+	case "file":
+		v.AddIf(c.Artifact.Dir == "", "NEBULA_ARTIFACT_DIR", "is required when NEBULA_ARTIFACT_STORE=file")
+	default:
+		v.Add("NEBULA_ARTIFACT_STORE", "must be s3, file or none (got %q)", c.Artifact.Store)
+	}
+	v.AddIf(c.Artifact.MaxBytes <= 0, "NEBULA_ARTIFACT_MAX_BYTES", "must be positive")
+	v.AddIf(c.Artifact.PresignTTL.Duration() < time.Minute || c.Artifact.PresignTTL.Duration() > 7*24*time.Hour,
+		"NEBULA_ARTIFACT_PRESIGN_TTL", "must be between 1m and 168h (the S3 maximum)")
+	v.AddIf(c.Artifact.VerifyInterval.Duration() <= 0, "NEBULA_ARTIFACT_VERIFY_INTERVAL", "must be positive")
+
 	if c.service == ServiceGateway {
 		c.validateGateway(&v)
+	}
+	if c.service == ServiceController {
+		k := c.Kube
+		v.AddIf(k.WorkloadNamespace == "", "NEBULA_KUBE_WORKLOAD_NAMESPACE", "must not be empty")
+		v.AddIf(k.SystemNamespace == "", "NEBULA_KUBE_SYSTEM_NAMESPACE", "must not be empty")
+		v.AddIf(k.WorkloadNamespace == k.SystemNamespace, "NEBULA_KUBE_WORKLOAD_NAMESPACE",
+			"must differ from NEBULA_KUBE_SYSTEM_NAMESPACE: the controller may write workloads but never NEBULA itself")
+		v.AddIf(k.RenewDeadline.Duration() >= k.LeaseDuration.Duration(), "NEBULA_KUBE_RENEW_DEADLINE",
+			"must be shorter than NEBULA_KUBE_LEASE_DURATION")
+		v.AddIf(k.RetryPeriod.Duration() <= 0 || k.RetryPeriod.Duration() >= k.RenewDeadline.Duration(),
+			"NEBULA_KUBE_RETRY_PERIOD", "must be positive and shorter than NEBULA_KUBE_RENEW_DEADLINE")
+		v.AddIf(k.ResyncInterval.Duration() < time.Second, "NEBULA_KUBE_RESYNC_INTERVAL", "must be at least 1s")
+		v.AddIf(k.PollInterval.Duration() <= 0, "NEBULA_KUBE_POLL_INTERVAL", "must be positive")
+		v.AddIf(k.StartingTimeout.Duration() < time.Minute, "NEBULA_KUBE_STARTING_TIMEOUT", "must be at least 1m")
+		for name, img := range map[string]string{
+			"NEBULA_KUBE_WORKER_IMAGE": k.WorkerImage, "NEBULA_KUBE_MOCK_WORKER_IMAGE": k.MockWorkerImage,
+			"NEBULA_KUBE_PULLER_IMAGE": k.PullerImage,
+		} {
+			if img == "" || !strings.Contains(img, ":") || strings.HasSuffix(img, ":latest") {
+				v.Add(name, "must name an image with an explicit tag, never latest (got %q)", img)
+			}
+		}
+		switch k.ImagePullPolicy {
+		case "Always", "IfNotPresent", "Never":
+		default:
+			v.Add("NEBULA_KUBE_IMAGE_PULL_POLICY", "must be Always, IfNotPresent or Never")
+		}
 	}
 
 	// --- production gating -------------------------------------------------
@@ -171,6 +218,10 @@ func (c *Config) Validate() error {
 			"is required when NEBULA_ENV=production")
 		v.AddIf(isDevPepper(c.Auth.KeyPepper.Reveal()), "NEBULA_AUTH_KEY_PEPPER",
 			"is the well-known development value; refusing to start in production")
+		v.AddIf(c.Artifact.Store == "file", "NEBULA_ARTIFACT_STORE",
+			"must not be file when NEBULA_ENV=production: a directory on one host is not reachable from every node")
+		v.AddIf(c.Artifact.S3SecretKey.Reveal() == "minioadmin", "NEBULA_ARTIFACT_S3_SECRET_KEY",
+			"is MinIO's default; refusing to start in production")
 		v.AddIf(c.Internal.AuthSecret.Reveal() == DevInternalSecret, "NEBULA_INTERNAL_AUTH_SECRET",
 			"is the well-known development value; refusing to start in production")
 		if c.service == ServiceGateway {
@@ -193,6 +244,7 @@ const (
 	ServiceControlPlane = "nebula-controlplane"
 	ServiceGateway      = "nebula-gateway"
 	ServiceMigrate      = "nebula-migrate"
+	ServiceController   = "nebula-controller"
 )
 
 // usesDatabase reports whether the service opens PostgreSQL. An unknown service

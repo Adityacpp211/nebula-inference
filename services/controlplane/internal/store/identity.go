@@ -367,3 +367,33 @@ func (r *RateLimitPolicyRepo) Get(ctx context.Context, q Querier, orgID, id uuid
 	}
 	return &p, nil
 }
+
+// ---------------------------------------------------------------------------
+// nodes (read-only here: the controller's inventory reconciler writes them)
+// ---------------------------------------------------------------------------
+
+// NodeRepo reads the node cache for capacity admission.
+type NodeRepo struct{}
+
+// ListPresent returns nodes currently in the cluster, as last synced.
+func (r *NodeRepo) ListPresent(ctx context.Context, q Querier) ([]*models.Node, error) {
+	rows, err := q.Query(ctx, `
+		SELECT id, name, provider_id, labels, taints, capacity, allocatable, requested,
+		       conditions, schedulable, kubelet_version, first_seen_at, synced_at, removed_at
+		  FROM nodes WHERE removed_at IS NULL ORDER BY name`)
+	if err != nil {
+		return nil, classify(err)
+	}
+	defer rows.Close()
+	var out []*models.Node
+	for rows.Next() {
+		var n models.Node
+		if err := rows.Scan(&n.ID, &n.Name, &n.ProviderID, &n.Labels, &n.Taints, &n.Capacity,
+			&n.Allocatable, &n.Requested, &n.Conditions, &n.Schedulable, &n.KubeletVersion,
+			&n.FirstSeenAt, &n.SyncedAt, &n.RemovedAt); err != nil {
+			return nil, classify(err)
+		}
+		out = append(out, &n)
+	}
+	return out, classify(rows.Err())
+}

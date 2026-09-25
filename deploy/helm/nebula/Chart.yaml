@@ -1,0 +1,7 @@
+apiVersion: v2
+name: nebula
+description: NEBULA — a self-hostable AI inference cloud. Gateway, control plane, controller, and (optionally) the data dependencies they need.
+type: application
+version: 0.5.0
+appVersion: "0.5.0"
+kubeVersion: ">=1.29.0-0"

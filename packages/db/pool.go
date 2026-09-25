@@ -68,6 +68,12 @@ func Open(ctx context.Context, cfg config.DatabaseConfig, appName string, logger
 			strconv.FormatInt(cfg.StatementTimeout.Duration().Milliseconds()*2, 10)
 	}
 
+	if cfg.Role != "" {
+		// A startup parameter rather than a SET after connecting: it applies before
+		// the first statement, on every connection the pool ever opens.
+		poolCfg.ConnConfig.RuntimeParams["role"] = cfg.Role
+	}
+
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return nil, fmt.Errorf("creating connection pool: %w", err)

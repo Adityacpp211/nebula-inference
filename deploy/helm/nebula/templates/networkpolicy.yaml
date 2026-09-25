@@ -1,0 +1,154 @@
+{{- /*
+The network matrix of docs/deployment-architecture.md §4, as policy. Default deny
+where it matters, then explicit allows. Kubelet probes are unaffected: traffic from
+a pod's own node is always allowed by the NetworkPolicy specification.
+
+What these policies prove (tests/e2e/controller asserts the negatives):
+  - only the gateway reaches the control plane;
+  - only the gateway reaches workers, and workers reach nothing but DNS and the
+    artifact store — in particular never PostgreSQL;
+  - only NEBULA's own services reach the data stores.
+*/ -}}
+{{- $sys := .Release.Namespace }}
+{{- $wl := .Values.namespaces.workloads }}
+{{- $data := .Values.namespaces.data }}
+# --- system namespace ---------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: {{ $sys }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway-ingress
+  namespace: {{ $sys }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "nebula.selector" "nebula-gateway" | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - ports: [{port: 8080, protocol: TCP}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: controlplane-ingress
+  namespace: {{ $sys }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "nebula.selector" "nebula-controlplane" | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    # The admin proxy, and nothing else (security-boundaries.md §2, B2).
+    - from:
+        - podSelector:
+            matchLabels: {{- include "nebula.selector" "nebula-gateway" | nindent 14 }}
+      ports: [{port: 8082, protocol: TCP}]
+---
+# --- workload namespace -------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: workers
+  namespace: {{ $wl }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Dispatch from the gateway only. No worker-to-worker traffic exists.
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ $sys }}}
+          podSelector:
+            matchLabels: {{- include "nebula.selector" "nebula-gateway" | nindent 14 }}
+      ports: [{port: 8090, protocol: TCP}]
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+      ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+    {{- if .Values.data.enabled }}
+    # The artifact store, for the puller. Nothing else in the data namespace:
+    # a worker has no business reaching PostgreSQL or Redis.
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ $data }}}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: nebula-s3}}
+      ports: [{port: 8333, protocol: TCP}]
+    {{- else }}
+    # An external artifact store, by address.
+    - ports: [{port: 443, protocol: TCP}]
+    {{- end }}
+{{- if .Values.data.enabled }}
+---
+# --- data namespace -----------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: {{ $data }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-ingress
+  namespace: {{ $data }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: nebula-postgres}}
+  policyTypes: [Ingress]
+  ingress:
+    # The control plane and the controller (and their migrate init containers).
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ $sys }}}}
+          podSelector:
+            matchExpressions:
+              - {key: app.kubernetes.io/name, operator: In, values: [nebula-controlplane, nebula-controller]}
+      ports: [{port: 5432, protocol: TCP}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-ingress
+  namespace: {{ $data }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: nebula-redis}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ $sys }}}}
+          podSelector:
+            matchLabels: {{- include "nebula.selector" "nebula-gateway" | nindent 14 }}
+      ports: [{port: 6379, protocol: TCP}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: s3-ingress
+  namespace: {{ $data }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: nebula-s3}}
+  policyTypes: [Ingress]
+  ingress:
+    # The S3 API is reached by the control plane (verification), workers' pullers,
+    # the bucket job, and clients uploading through the NodePort: the endpoint is
+    # the public upload target by design, authenticated by presigned signatures.
+    - ports: [{port: 8333, protocol: TCP}]
+    # The admin port, for the in-namespace bucket job only.
+    - from: [{podSelector: {}}]
+      ports: [{port: 9333, protocol: TCP}, {port: 19333, protocol: TCP}, {port: 8888, protocol: TCP}, {port: 18888, protocol: TCP}]
+{{- end }}

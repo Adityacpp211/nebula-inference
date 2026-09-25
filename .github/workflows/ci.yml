@@ -142,6 +142,39 @@ jobs:
           PY: python
         run: ./scripts/e2e-gateway.sh
 
+  helm:
+    name: helm chart (lint, render dev and production values)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: lint and render
+        run: make helm-check
+
+  e2e-kind:
+    name: kind end to end (controller, RBAC, network policy, artifacts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - uses: helm/kind-action@v1
+        with:
+          install_only: true
+      # dev-up creates the cluster from deploy/kind/cluster.yaml, builds every image,
+      # loads them into kind and installs the chart; the demo then walks the Phase 5
+      # exit criteria against it.
+      - name: bring NEBULA up
+        run: ./scripts/dev-up.sh
+      - name: phase 5 demo
+        run: python3 tests/e2e/kind/phase5_demo.py
+      - name: diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get all -A
+          kubectl -n nebula-system logs deploy/nebula-controller --tail=200 || true
+          kubectl -n nebula-system logs deploy/nebula-controlplane --tail=200 || true
+
   migrations:
     name: migration cycle (up, down, up)
     runs-on: ubuntu-latest
@@ -313,6 +346,26 @@ jobs:
           file: deploy/docker/Dockerfile.gateway
           push: false
           tags: nebula/gateway:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: build controller image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.controller
+          push: false
+          tags: nebula/controller:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: build artifact-puller image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.puller
+          push: false
+          tags: nebula/artifact-puller:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

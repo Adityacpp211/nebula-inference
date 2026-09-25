@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/adityasatwar321/nebula/packages/artifact"
 	"github.com/adityasatwar321/nebula/packages/auth"
 	"github.com/adityasatwar321/nebula/packages/config"
 	"github.com/adityasatwar321/nebula/packages/telemetry"
@@ -26,6 +27,11 @@ type API struct {
 	// secret is configured, in which case only direct API-key authentication works
 	// and the internal surface is not mounted.
 	Signer *auth.ContextSigner
+	// Artifacts is the model artifact store, nil when none is configured. With a
+	// store, versions get presigned uploads and finalize verifies the bytes.
+	Artifacts artifact.Store
+	// Verifier completes finalize asynchronously; nil without a store.
+	Verifier *Verifier
 
 	keys *keyCache
 }
@@ -49,6 +55,12 @@ func New(cfg *config.Config, logger *slog.Logger, st *store.Store) (*API, error)
 		Store:  st,
 		Hasher: hasher,
 		keys:   newKeyCache(cfg.Auth.KeyCacheSize, nil),
+	}
+	if a.Artifacts, err = NewArtifactStore(cfg.Artifact); err != nil {
+		return nil, err
+	}
+	if a.Artifacts != nil {
+		a.Verifier = NewVerifier(a)
 	}
 	if !cfg.Internal.AuthSecret.IsZero() {
 		a.Signer, err = auth.NewContextSigner(cfg.Internal.AuthSecret.Reveal(), cfg.Internal.AuthMaxAge.Duration(), nil)
