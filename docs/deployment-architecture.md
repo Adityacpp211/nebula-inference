@@ -190,7 +190,12 @@ only component with cluster write permissions, and even then only in `nebula-wor
 | `events` | create, patch |
 
 `ClusterRole` (read-only, cluster-scoped facts only): `nodes` get/list/watch, `namespaces`
-get/list/watch, `nodes/metrics` get. Plus a `Role` in `nebula-system` for `leases`
+get/list/watch, and `pods` get/list/watch **cluster-wide**. The last is a Phase 5 amendment: capacity
+admission sums the requests of every pod on a node, not only NEBULA's, because a node full of someone
+else's pods is still full. Read access to pod specs in other namespaces is the cost; pod specs can
+carry environment values, so the controller is still denied `secrets`, and a cluster that cannot
+accept the read can scope inventory to NEBULA's pods at the price of admission that over-promises.
+`nodes/metrics` is not granted until something reads it (Phase 8/9). Plus a `Role` in `nebula-system` for `leases`
 (get/create/update) for leader election.
 
 Explicitly **not** granted, and stated so reviewers can check: `secrets` (the controller never reads
@@ -256,8 +261,12 @@ Why content-addressed: the cache key is the checksum, so a cache hit is provably
 deployments of the same version on one node download once; and rollback never re-downloads, because
 the old version's artifact is still cached.
 
-- **Dev**: MinIO in `nebula-data` (real S3 semantics on a laptop) and a hostPath-backed cache mapped
-  to a host directory, so `kind delete cluster` does not cost another download.
+- **Dev**: SeaweedFS's S3 gateway in `nebula-data` (real S3 semantics on a laptop; it replaced MinIO in
+  Phase 5, whose images stopped being published — [ADR-0031](./architecture-decisions/0031-artifacts-verified-asynchronously.md))
+  and a hostPath-backed cache mapped to a host directory owned by uid 65532, so `kind delete cluster`
+  does not cost another download and the non-root puller needs no root init container. Because of
+  that hostPath the workload namespace carries Pod Security `restricted` as **warn**, not enforce,
+  in development; production with a PVC cache can enforce.
 - **Production**: any S3-compatible store. The cache is a per-node PVC, or a ReadOnlyMany volume
   where the storage class supports it.
 - The `ArtifactStore` interface has `s3` and `file` implementations; `file` exists for air-gapped
@@ -278,7 +287,7 @@ bottleneck exactly when many pods start at once.
 deploy/helm/nebula/
   Chart.yaml                      # umbrella; subcharts as conditional dependencies
   values.yaml                     # production-shaped defaults
-  values-dev.yaml                 # kind: 1 replica each, no TLS, MinIO, mock runtime enabled
+  values-dev.yaml                 # kind: 1 replica each, no TLS, SeaweedFS S3, mock runtime enabled
   values-gpu.yaml                 # GPU node pool, device plugin, DCGM, vllm runtime
   templates/
     _helpers.tpl                  # names, labels, selector labels — one definition, reused

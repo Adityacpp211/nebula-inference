@@ -318,6 +318,15 @@ type DevConfig struct {
 	Seed bool `json:"seed" yaml:"seed" env:"NEBULA_DEV_SEED" default:"false"`
 	// MockRuntime allows the declared-stub inference runtime (Phase 3).
 	MockRuntime bool `json:"mock_runtime" yaml:"mock_runtime" env:"NEBULA_DEV_MOCK_RUNTIME" default:"false"`
+	// SeedKey, when set, is the plaintext of the seeded API key instead of a random
+	// one, so a development cluster can be recreated without losing its key. It is a
+	// credential everyone who reads the values file knows, which is exactly why the
+	// seed is refused in production.
+	SeedKey Secret `json:"seed_key" yaml:"seed_key" env:"NEBULA_DEV_SEED_KEY"`
+	// CreateBucket makes the control plane create the artifact bucket at startup.
+	// Buckets are otherwise an install-time decision made by an operator; a service
+	// that creates them silently is one that silently writes to the wrong account.
+	CreateBucket bool `json:"create_bucket" yaml:"create_bucket" env:"NEBULA_DEV_CREATE_BUCKET" default:"false"`
 	// DebugEndpoints exposes /debug/pprof.
 	DebugEndpoints bool `json:"debug_endpoints" yaml:"debug_endpoints" env:"NEBULA_DEV_DEBUG_ENDPOINTS" default:"false"`
 }

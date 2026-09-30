@@ -116,6 +116,10 @@ func New(d Deps) http.Handler {
 	// the control plane's registry read (x is a model uuid). The segment decides:
 	// a uuid can never be a route name that a person chose, so the split is exact.
 	mux.Handle("GET /v1/models/{model}", g.authenticate(http.HandlerFunc(g.modelOrRegistry)))
+	// The control plane's registry list shares the prefix. A literal segment is more
+	// specific than a wildcard, so this pattern wins; without it "registry" would be
+	// looked up as a route name and answered 404.
+	mux.Handle("GET /v1/models/registry", g.authenticate(g.admitAdmin(http.HandlerFunc(g.proxy))))
 
 	for _, p := range []string{"/v1/chat/completions", "/v1/completions"} {
 		mux.HandleFunc(p, g.methodNotAllowed("POST"))

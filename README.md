@@ -19,30 +19,28 @@ for chunk in client.chat.completions.create(
 
 ---
 
-> ## Project status — Phase 4 complete
+> ## Project status — Phase 5 complete
 >
-> **The OpenAI Python SDK, unmodified, now streams tokens through the NEBULA gateway. There is still
-> no Kubernetes.** The `nebula deploy` commands above describe the finished system, not what runs
-> today.
+> **NEBULA now runs on Kubernetes.** A deployment created through the gateway becomes real pods on
+> a kind cluster, placed by capacity admission, loaded from a verified artifact, and kept that way:
+> a killed pod is replaced, a Deployment deleted out from under NEBULA is recreated in under a
+> second, and hand edits are reverted. The `nebula deploy` commands above still describe the
+> finished system — the CLI is Phase 14; today the same thing is a `curl`.
 >
-> What works now: everything from Phases 1–3 — the schema with its constraints, triggers and
-> row-level security, API-key authentication with scopes, the model registry, deployment records and
-> the enforced lifecycle, and the inference worker with its llama.cpp and mock runtimes — plus the
-> gateway: OpenAI-compatible `/v1/chat/completions`, `/v1/completions` and `/v1/models`, SSE
-> streaming with keep-alives and terminal error frames, client-disconnect cancellation that still
-> records the tokens spent, Redis rate limiting (requests, tokens and concurrency, per key and per
-> org) with an in-process fallback, usage records, and the admin API proxied to the control plane
-> under a signed identity.
+> What works now: everything from Phases 1–4 (schema and row-level security, API-key auth with
+> scopes, the model registry and enforced lifecycle, the worker with llama.cpp and mock runtimes, the
+> OpenAI-compatible gateway with streaming and Redis rate limiting) plus the deployment controller,
+> node inventory and capacity admission (`422` before anything is created), the artifact store with
+> presigned upload and verification from the stored bytes, the artifact-puller initContainer that
+> re-checks them on every node, and the Helm chart with RBAC and NetworkPolicies.
 >
-> What this deliberately does NOT do yet: routing is a static file on the gateway (dynamic,
-> health-aware routing is Phase 6), there is no gateway queue (Phase 7), no metrics endpoint on the
-> gateway (Phase 8), and no Kubernetes, so `POST /v1/deployments` still answers `202 Accepted` with
-> `status.reconciled` false. Usage records are log lines until NATS arrives. Embeddings are not served.
-> The end-to-end suite ran against the mock runtime; the gateway image is written and built by CI but
-> was not built on the development machine, where Docker could not start.
+> What this deliberately does NOT do yet: routing is still a static file on the gateway (dynamic,
+> health-aware routing is Phase 6), there is no gateway queue (Phase 7), no metrics (Phase 8) and no
+> autoscaling (Phase 9). Usage records are log lines until NATS arrives. The kind demo runs the mock
+> runtime; the llama.cpp worker image builds in CI and with `NEBULA_BUILD_LLAMACPP=1`.
 >
-> Next: [Phase 5](docs/roadmap.md#phase-5--deployment-controller-and-kubernetes-integration) — the
-> deployment controller and Kubernetes. See [Capability status](#capability-status).
+> Next: [Phase 6](docs/roadmap.md#phase-6--router-and-health-aware-routing) — the router and
+> health-aware routing. See [Capability status](#capability-status).
 
 ## Running it today
 
@@ -140,8 +138,29 @@ curl -s -H "Authorization: Bearer $KEY" "$BASE/v1/audit-logs?limit=20" | jq -r '
 
 The `mock` format and runtime are a declared development stub: the registry refuses
 them unless `NEBULA_DEV_MOCK_RUNTIME=true`, and always in production. The checksum
-above is a placeholder because nothing reads artifact bytes yet — `finalize` reports
-`verification: declared_checksum` rather than claiming otherwise.
+above is a placeholder, which works only because `s3://nebula/...` is an external URI:
+`finalize` reports `verification: declared_checksum` rather than claiming the bytes were
+read. A version uploaded to NEBULA's own store is verified from the stored bytes instead
+(below).
+
+### On Kubernetes
+
+A kind cluster with the whole system on it — PostgreSQL, Redis, an S3 store, the control
+plane, the controller and the gateway — from Linux, macOS or WSL with docker, kind,
+kubectl and helm:
+
+```bash
+make dev-up      # builds the images, loads them into kind, helm-installs, prints the dev key
+make e2e-kind    # the Phase 5 demo: 12 steps against the live cluster
+make dev-down
+```
+
+On the cluster, a model is registered by asking for a presigned upload URL, `PUT`ting the
+bytes to it, and calling `finalize`, which answers `202` while the control plane hashes
+what arrived. A deployment of a `ready` version is admitted against real node capacity
+(`422 insufficient_capacity` names the resource that does not fit), and its pods appear in
+`kubectl get deploy,pods -n nebula-workloads`. [tests/e2e/kind/phase5_demo.py](tests/e2e/kind/phase5_demo.py)
+is the worked example.
 
 ---
 
@@ -296,10 +315,10 @@ checkout.
 | Model registry, immutable versions, deployment records, state machine | ✅ **working** | 2 |
 | Runtime abstraction, llama.cpp + mock runtimes, worker API, queue, deadlines, cancellation | ✅ **working** | 3 |
 | Worker container images (mock and llama.cpp variants) | ⚠️ written, **unverified** — no Docker daemon on the development hardware; CI builds both | 3 |
-| Artifact store: presigned upload, streaming checksum, GGUF metadata | ⬜ moved to 5 — needs MinIO and the pull path the controller introduces | 5 |
+| Artifact store: presigned upload, streaming checksum, GGUF metadata | ✅ **working** — verified from stored bytes, re-checked by the puller on every node | 5 |
 | Gateway, OpenAI-compatible API, streaming, rate limiting, admin proxy | ✅ **working** — verified with the unmodified OpenAI SDK; static routes until 6 | 4 |
-| Gateway container image | ⚠️ written, **unverified locally** — Docker could not start on the development machine; CI builds it | 4 |
-| Deployment controller, Kubernetes integration, Helm | ⬜ not started | 5 |
+| Gateway container image | ✅ **working** — built and run on kind in the Phase 5 demo | 4 |
+| Deployment controller, Kubernetes integration, Helm | ✅ **working** — kind demo 12/12: pods replaced, deleted Deployments recreated, drift reverted | 5 |
 | Health-aware routing, routing strategies | ⬜ not started | 6 |
 | Bounded queues, concurrency control, backpressure | ⬜ not started | 7 |
 | Metrics, logs, traces, Grafana dashboards | ⬜ not started | 8 |

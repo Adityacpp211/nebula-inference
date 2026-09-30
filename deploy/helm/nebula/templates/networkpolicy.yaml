@@ -144,11 +144,9 @@ spec:
   podSelector: {matchLabels: {app.kubernetes.io/name: nebula-s3}}
   policyTypes: [Ingress]
   ingress:
-    # The S3 API is reached by the control plane (verification), workers' pullers,
-    # the bucket job, and clients uploading through the NodePort: the endpoint is
-    # the public upload target by design, authenticated by presigned signatures.
+    # The S3 API is reached by the control plane (verification), workers' pullers
+    # and clients uploading through the NodePort: the endpoint is the public upload
+    # target by design, authenticated by presigned signatures. SeaweedFS's admin
+    # ports are not exposed at all.
     - ports: [{port: 8333, protocol: TCP}]
-    # The admin port, for the in-namespace bucket job only.
-    - from: [{podSelector: {}}]
-      ports: [{port: 9333, protocol: TCP}, {port: 19333, protocol: TCP}, {port: 8888, protocol: TCP}, {port: 18888, protocol: TCP}]
 {{- end }}

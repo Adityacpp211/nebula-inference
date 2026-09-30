@@ -45,25 +45,36 @@ type Decision struct {
 	Message string
 }
 
-// Reasons written to deployments.state_reason. A closed set, in CamelCase like
-// Kubernetes condition reasons, so a dashboard can map them to explanations.
-const (
-	ReasonClaimed         = "ClaimedByController"
-	ReasonSpecChanged     = "SpecChanged"
-	ReasonObjectsApplied  = "ObjectsApplied"
-	ReasonReplicasReady   = "ReplicasReady"
-	ReasonPartiallyReady  = "ReplicasPartiallyReady"
-	ReasonReplicaLost     = "ReplicaLost"
-	ReasonRecovered       = "ReplicasRecovered"
-	ReasonStartTimeout    = "StartTimeout"
-	ReasonAllReplicasLost = "AllReplicasLost"
-	ReasonScaledToZero    = "ScaledToZero"
-	ReasonApplyFailed     = "ApplyFailed"
-	ReasonArtifactPrefix  = "Artifact" // + CamelCase(code), e.g. ArtifactChecksumMismatch
-	ReasonObjectsMissing  = "ObjectsMissing"
-	ReasonNewRevision     = "NewRevisionApplied"
-	ReasonInvalidSpec     = "InvalidSpec"
+// Reasons written to deployments.state_reason come from the lifecycle vocabulary
+// (packages/lifecycle), the same closed set the API validates and documents, so a
+// dashboard never meets a reason it has no explanation for.
+var (
+	ReasonClaimed         = string(lifecycle.ReasonClaimed)
+	ReasonSpecChanged     = string(lifecycle.ReasonSpecChanged)
+	ReasonObjectsApplied  = string(lifecycle.ReasonObjectsApplied)
+	ReasonReplicasReady   = string(lifecycle.ReasonReplicasReady)
+	ReasonPartiallyReady  = string(lifecycle.ReasonPartiallyReady)
+	ReasonReplicaLost     = string(lifecycle.ReasonReplicaLost)
+	ReasonRecovered       = string(lifecycle.ReasonReplicasRecovered)
+	ReasonStartTimeout    = string(lifecycle.ReasonStartTimeout)
+	ReasonAllReplicasLost = string(lifecycle.ReasonAllReplicasLost)
+	ReasonScaledToZero    = string(lifecycle.ReasonDrained)
+	ReasonApplyFailed     = string(lifecycle.ReasonApplyFailed)
+	ReasonInvalidSpec     = string(lifecycle.ReasonApplyFailed)
+	ReasonNewRevision     = string(lifecycle.ReasonSpecChanged)
+	// ReasonObjectsMissing is a condition reason, not a state reason.
+	ReasonObjectsMissing = "ObjectsMissing"
 )
+
+// artifactReason maps a puller error code onto the vocabulary: a checksum
+// mismatch has its own reason; anything else about the artifact is a load failure,
+// with the specifics in the message.
+func artifactReason(code string) string {
+	if code == "checksum_mismatch" {
+		return string(lifecycle.ReasonArtifactChecksumError)
+	}
+	return string(lifecycle.ReasonModelLoadFailed)
+}
 
 // Decide chooses the next state after objects have been applied. It covers the
 // states the controller advances by observation: starting, ready, degraded and
@@ -83,7 +94,7 @@ func Decide(d *store.Deployment, obs Observed, now time.Time, startingTimeout ti
 		if obs.ArtifactFailure != nil {
 			// A checksum mismatch will not fix itself by waiting: the bytes in the store
 			// are wrong. Failing now, with the reason, beats a start timeout later.
-			return Decision{To: lifecycle.Failed, Reason: ReasonArtifactPrefix + camel(obs.ArtifactFailure.Code),
+			return Decision{To: lifecycle.Failed, Reason: artifactReason(obs.ArtifactFailure.Code),
 				Message: obs.ArtifactFailure.Message}
 		}
 		if !obs.Current {
@@ -160,7 +171,7 @@ func Conditions(d *store.Deployment, obs Observed, prev []store.Condition, now t
 			fmt.Sprintf("%d/%d replicas ready%s", obs.Ready, want, problems(obs))))
 	}
 	if obs.ArtifactFailure != nil {
-		out = append(out, set("ArtifactReady", "False", ReasonArtifactPrefix+camel(obs.ArtifactFailure.Code), obs.ArtifactFailure.Message))
+		out = append(out, set("ArtifactReady", "False", "Artifact"+camel(obs.ArtifactFailure.Code), obs.ArtifactFailure.Message))
 	}
 	reconciled := "True"
 	if d.ObservedGeneration < d.Generation {

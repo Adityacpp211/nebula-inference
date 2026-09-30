@@ -67,7 +67,7 @@ func TestControllerRoleCanDoItsJob(t *testing.T) {
 		t.Errorf("deployment: %+v", d)
 	}
 
-	ok, err := st.Transition(ctx, id, "pending", "provisioning", "ClaimedByController", "applying")
+	ok, err := st.Transition(ctx, id, "pending", "provisioning", "Claimed", "applying")
 	if err != nil || !ok {
 		t.Fatalf("transition: %v %v", ok, err)
 	}

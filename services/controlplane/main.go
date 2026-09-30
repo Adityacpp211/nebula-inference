@@ -19,6 +19,7 @@ import (
 	"log/slog"
 
 	"github.com/adityasatwar321/nebula/migrations"
+	"github.com/adityasatwar321/nebula/packages/artifact"
 	"github.com/adityasatwar321/nebula/packages/config"
 	"github.com/adityasatwar321/nebula/packages/db"
 	"github.com/adityasatwar321/nebula/packages/db/migrate"
@@ -132,6 +133,26 @@ func run() error {
 			},
 		})
 		logger.Info("artifact store configured", slog.String("store", cfg.Artifact.Store))
+		if s3, ok := cpAPI.Artifacts.(*artifact.S3); ok && cfg.Dev.CreateBucket && !cfg.Env.IsProduction() {
+			// Development only. In the background and retried: the store may still be
+			// starting, and the control plane must not wait on it to serve.
+			go func() {
+				for {
+					cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+					err := s3.EnsureBucket(cctx)
+					cancel()
+					if err == nil {
+						logger.Info("development: artifact bucket present", slog.String("bucket", cfg.Artifact.S3Bucket))
+						return
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(3 * time.Second):
+					}
+				}
+			}()
+		}
 	}
 
 	if result, err := seed.Run(ctx, cfg, st, cpAPI.Hasher, logger); err != nil {

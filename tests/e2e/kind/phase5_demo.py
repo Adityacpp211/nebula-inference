@@ -64,7 +64,8 @@ def kubectl(*args: str, check: bool = True) -> str:
     r = subprocess.run(["kubectl", *args], capture_output=True, text=True, timeout=180)
     if check and r.returncode != 0:
         fail(f"kubectl {' '.join(args)}: {r.stderr.strip()}")
-    return r.stdout.strip() if r.returncode == 0 else r.stderr.strip()
+    # `auth can-i` answers "no" on stdout with exit status 1, so prefer stdout.
+    return r.stdout.strip() if r.returncode == 0 or r.stdout.strip() else r.stderr.strip()
 
 
 def api(method: str, path: str, body: object | None = None, key: str | None = None,
@@ -95,15 +96,12 @@ def wait(what: str, cond, timeout: float = 180, every: float = 2):  # type: igno
     fail(f"timed out waiting for {what} (last: {last})")
 
 
+DEV_KEY = "nbk_devkey0NEBULAdevelopmentKeyDoNotUseInProduction000"
+
+
 def seeded_key() -> str:
-    logs = kubectl("-n", SYS, "logs", "deploy/nebula-controlplane", "-c", "controlplane")
-    for line in logs.splitlines():
-        if '"api_key":"nbk_' in line:
-            return json.loads(line)["api_key"]
-    key = os.environ.get("NEBULA_API_KEY")
-    if not key:
-        fail("no seeded key in the control plane log and NEBULA_API_KEY is unset")
-    return key
+    """The development seed key, fixed in deploy/helm/nebula/values-dev.yaml."""
+    return os.environ.get("NEBULA_API_KEY", DEV_KEY)
 
 
 def gguf_header() -> bytes:
@@ -116,13 +114,25 @@ def gguf_header() -> bytes:
     return out + b"\0" * 64
 
 
-def register(key: str, name: str, fmt: str, runtime: str, payload: bytes) -> dict:
-    code, model = api("POST", "/v1/models", {"name": name, "task": "chat"}, key)
-    if code != 201:
-        fail(f"create model: {code} {model}")
+def find_model(key: str, name: str) -> dict | None:
+    _, page = api("GET", "/v1/models/registry?limit=200", key=key)
+    return next((m for m in page.get("data", []) if m["name"] == name), None)
+
+
+def ready_version(key: str, model: dict, version: str) -> dict | None:
+    _, page = api("GET", f"/v1/models/{model['id']}/versions?limit=200", key=key)
+    return next((v for v in page.get("data", []) if v["version"] == version and v["status"] == "ready"), None)
+
+
+def register(key: str, name: str, fmt: str, runtime: str, payload: bytes, version: str = "v1") -> dict:
+    model = find_model(key, name)
+    if model is None:
+        code, model = api("POST", "/v1/models", {"name": name, "task": "chat"}, key)
+        if code != 201:
+            fail(f"create model: {code} {model}")
     digest = hashlib.sha256(payload).hexdigest()
     code, ver = api("POST", f"/v1/models/{model['id']}/versions", {
-        "version": "v1", "format": fmt, "runtime": runtime, "size_bytes": len(payload),
+        "version": version, "format": fmt, "runtime": runtime, "size_bytes": len(payload),
         "checksum_sha256": digest, "context_window": 4096,
         "hardware_profile": {"min_ram_mib": 128, "min_cpu_milli": 100},
     }, key)
@@ -142,7 +152,9 @@ def register(key: str, name: str, fmt: str, runtime: str, payload: bytes) -> dic
 
 
 def deploy(key: str, name: str, version_id: str, replicas: int, **extra) -> dict:  # type: ignore[no-untyped-def]
+    # Bounds wide enough to scale within: replicas alone sets min = max = replicas.
     body = {"name": name, "model_version_id": version_id, "replicas": replicas,
+            "min_replicas": 1, "max_replicas": 4,
             "resources": {"cpu_milli": 100, "memory_mib": 256}, **extra}
     return api("POST", "/v1/deployments", body, key)
 
@@ -156,15 +168,37 @@ def k8s_ready(name: str) -> str:
                    "jsonpath={.status.readyReplicas}/{.spec.replicas}", check=False)
 
 
+def remove_deployment(key: str, name: str) -> None:
+    """Stop and delete a deployment left by an earlier run, so the demo is rerunnable."""
+    _, page = api("GET", "/v1/deployments?limit=200", key=key)
+    for d in page.get("data", []):
+        if d["name"] != name:
+            continue
+        api("POST", f"/v1/deployments/{d['id']}/stop", {}, key)
+        wait(f"{name} stopped", lambda: status(key, d["id"])["status"]["state"] in ("stopped", "failed"), timeout=180)
+        api("DELETE", f"/v1/deployments/{d['id']}", key=key)
+        wait(f"{name}'s objects removed", lambda: "NotFound" in kubectl(
+            "-n", WL, "get", "deploy", f"nebula-dev-{name}", check=False))
+
+
 def main() -> None:
     key = seeded_key()
     run = uuid.uuid4().hex[:6]
     dep_name = "mock-demo"
     k8s_name = f"nebula-dev-{dep_name}"
+    remove_deployment(key, dep_name)
 
     step("register a model: upload to a presigned URL, verified by reading the bytes")
-    reg = register(key, "mock-model", "mock", "mock", b"mock weights " + run.encode())
-    ok(f"version {reg['version']['id']} ready, sha256 {reg['digest'][:12]}…")
+    # The gateway's development route asserts mock-model:v1, so that exact version
+    # is registered once and reused by later runs.
+    model = find_model(key, "mock-model")
+    existing = ready_version(key, model, "v1") if model else None
+    if existing:
+        reg = {"model": model, "version": existing, "digest": existing["checksum_sha256"]}
+        ok(f"reusing ready version {existing['id']} from an earlier run")
+    else:
+        reg = register(key, "mock-model", "mock", "mock", b"mock weights " + run.encode())
+        ok(f"version {reg['version']['id']} ready, sha256 {reg['digest'][:12]}…")
 
     step("create a deployment through the gateway (202, with a placement decision)")
     code, dep = deploy(key, dep_name, reg["version"]["id"], 2)
@@ -258,8 +292,10 @@ def main() -> None:
     step("network policy: a workload pod cannot reach PostgreSQL, but can reach the artifact store")
     probe = f"netprobe-{run}"
 
-    def reach(host: str, port: int) -> bool:
-        out = kubectl("-n", WL, "run", probe + f"-{port}", "--rm", "-i", "--restart=Never", "--quiet",
+    last = {"out": ""}
+
+    def reach(host: str, port: int, attempt: int = 0) -> bool:
+        out = kubectl("-n", WL, "run", probe + f"-{port}-{attempt}", "--rm", "-i", "--restart=Never", "--quiet",
                       "--image=busybox:1.37", "--overrides",
                       json.dumps({"spec": {"securityContext": {"runAsNonRoot": True, "runAsUser": 65532,
                                                                "seccompProfile": {"type": "RuntimeDefault"}},
@@ -268,15 +304,19 @@ def main() -> None:
                                                            "securityContext": {"allowPrivilegeEscalation": False,
                                                                                "capabilities": {"drop": ["ALL"]}}}]}}),
                       check=False)
+        last["out"] = out
         return "OPEN" in out
     if reach("postgres.nebula-data", 5432):
         fail("a pod in nebula-workloads reached PostgreSQL")
-    if not reach("s3.nebula-data", 8333):
-        fail("the positive control failed: a workload pod could not reach the artifact store")
+    # The positive control retries: a brand-new pod's first connection can race the
+    # CNI programming its policy. Only the "allowed" direction retries, so a retry can
+    # never turn a leak into a pass.
+    if not any(reach("s3.nebula-data", 8333, i) for i in range(4)):
+        fail(f"the positive control failed: a workload pod could not reach the artifact store: {last['out'][-300:]}")
     ok("postgres:5432 CLOSED from nebula-workloads; s3:8333 OPEN (the negative is not vacuous)")
 
     step("tamper with a verified artifact: the puller refuses it and the deployment fails, named")
-    reg2 = register(key, "tamper-model", "gguf", "llamacpp", gguf_header())
+    reg2 = register(key, "tamper-" + run, "gguf", "llamacpp", gguf_header())
     creds = kubectl("-n", WL, "get", "secret", "nebula-artifact-store", "-o", "json")
     _ = creds  # the store is overwritten from inside the cluster, with the same credentials
     evil = gguf_header()[:-1] + b"X"   # same size, different bytes
@@ -309,15 +349,19 @@ def main() -> None:
     wait("stopped", lambda: status(key, dep_id)["status"]["state"] == "stopped", timeout=180)
     ok("mock-demo stopped, pods gone: " + (kubectl("-n", WL, "get", "pods", "-l",
        f"nebula.dev/deployment-id={dep_id}", "-o", "name") or "none"))
+    # Read the history before deleting: a deleted deployment is gone from the API.
+    _, trans = api("GET", f"/v1/deployments/{dep_id}/transitions?limit=100", key=key)
     code, out = api("DELETE", f"/v1/deployments/{dep_id}", key=key)
     if code >= 300:
         fail(f"delete: {code} {out}")
     wait("objects removed", lambda: "NotFound" in kubectl("-n", WL, "get", "deploy", k8s_name, check=False))
     ok("Kubernetes objects removed")
 
-    code, trans = api("GET", f"/v1/deployments/{dep_id}/transitions", key=key)
     print("\nstate history of mock-demo (from the database, attributed):")
-    for t in trans.get("data", []):
+    rows = trans.get("data", [])
+    if not rows:
+        fail(f"no transitions recorded: {trans}")
+    for t in rows:
         print(f"   {t.get('from_state') or '-':>12} -> {t['to_state']:<12} {t.get('reason', ''):<24} {t.get('actor_type', '')}")
     print("\nPHASE 5 DEMO: all steps passed")
 

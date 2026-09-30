@@ -354,7 +354,64 @@ tokens from a worker through the gateway.
 
 ---
 
-## Phase 5 — Deployment controller and Kubernetes integration
+## Phase 5 — Deployment controller and Kubernetes integration ✅
+
+**Status: complete**, with the deviations below.
+
+**Delivered**
+
+- `services/controller`: deployments listed from PostgreSQL as the `nebula_controller` role and
+  watched through informers, a rate-limited work queue with exponential backoff, poll + periodic
+  resync, orphan GC, and leader election on a Lease
+  ([ADR-0032](./architecture-decisions/0032-controller-reconciles-from-postgres.md)). The reconciler
+  server-side-applies a root ConfigMap that owns the Deployment, Service and PDB, reverts drift,
+  recreates deleted objects, writes status back (`observed_generation`, conditions, ready replicas),
+  and moves the state machine only with reasons from `packages/lifecycle`.
+- The inventory reconciler writes `nodes` (capacity, allocatable, requested) and `worker_events`.
+- `packages/scheduler`: hardware profile → node selector, tolerations and requests; capacity
+  admission that refuses with `422 insufficient_capacity` naming the resource before any row exists,
+  treats stale inventory as "could not check" rather than as evidence, and returns the placement
+  decision on `202`.
+- `packages/artifact`: S3 (minio-go) and directory stores, presigned upload with expiry and a size
+  limit, streaming SHA-256, GGUF header parsing, and the node-local content-addressed cache. `finalize`
+  on a store-minted URI answers `202 verifying`; a verifier loop reads the stored bytes and moves the
+  version to `ready` or `failed`, retrying transient store errors instead of deciding on them
+  ([ADR-0031](./architecture-decisions/0031-artifacts-verified-asynchronously.md)).
+- `cmd/nebula-artifact-puller`: the initContainer that re-hashes while filling the cache and reports
+  failures through the termination message, which the controller turns into named failures
+  (`ArtifactChecksumMismatch`).
+- `deploy/helm/nebula` (RBAC, NetworkPolicies, migration Job hook, in-cluster PostgreSQL / Redis / S3
+  for development), `deploy/kind/cluster.yaml`, `scripts/dev-up.sh` / `dev-down.sh`, container images
+  for the gateway, controller and puller. Migration 000011 lets a deleted deployment's name be reused.
+
+**Tests.** Controller decisions table-tested and the reconciler run against the fake clientset and a
+real PostgreSQL; scheduler, artifact store (including an S3 integration test), puller and verifier
+unit and integration tests; admission and name reuse through the API. `tests/e2e/kind/phase5_demo.py`
+(`make e2e-kind`) on a fresh kind cluster, 12/12 green: presigned upload verified from the bytes;
+a deployment created through the gateway reaches `ready` 2/2 with its placement; inference through
+the gateway is served by those pods; a killed pod is replaced; **the Deployment deleted out from
+under NEBULA is recreated in under a second**; hand-edited replicas are reverted; scaling through the
+API is followed; an impossible request is a 422 with nothing created; 12 `kubectl auth can-i`
+assertions (7 negative) plus none for the control plane and gateway; a workload pod cannot reach
+PostgreSQL but can reach the store; a tampered artifact fails the deployment with
+`ArtifactChecksumMismatch`; stop and delete remove pods, then objects. The attributed state history
+is printed from the database at the end.
+
+**Exit:** met — `curl` through the gateway creates real pods on kind, `kubectl get deploy -n
+nebula-workloads` shows them, a killed pod is replaced and a deleted Deployment comes back.
+
+**Deviations.**
+
+- `envtest` was not used: decisions and object shapes are tested against the fake clientset, and
+  the real API server, kubelet and garbage collector are exercised by the kind demo instead.
+- The controller reads `pods` cluster-wide (capacity must count everyone's pods); see
+  [deployment-architecture.md §3](./deployment-architecture.md#3-rbac).
+- SeaweedFS replaced MinIO for development (images unavailable); Pod Security `restricted` is
+  `warn` on the workload namespace because the dev cache is a hostPath.
+- `scripts/dev-up.ps1` was not written: the kind path runs in WSL, which `dev-up.sh` covers.
+- Chat templates from GGUF metadata (TODO(NEB-144)) remain open.
+
+**Original plan**
 
 **Deliverables**
 

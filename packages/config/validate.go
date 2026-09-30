@@ -208,6 +208,8 @@ func (c *Config) Validate() error {
 		v.AddIf(c.Dev.MockRuntime, "NEBULA_DEV_MOCK_RUNTIME",
 			"must be false when NEBULA_ENV=production: the mock runtime is a declared development stub")
 		v.AddIf(c.Dev.DebugEndpoints, "NEBULA_DEV_DEBUG_ENDPOINTS", "must be false when NEBULA_ENV=production")
+		v.AddIf(!c.Dev.SeedKey.IsZero(), "NEBULA_DEV_SEED_KEY", "must not be set when NEBULA_ENV=production")
+		v.AddIf(c.Dev.CreateBucket, "NEBULA_DEV_CREATE_BUCKET", "must be false when NEBULA_ENV=production: create the bucket at install time")
 		v.AddIf(!strings.EqualFold(c.Log.Format, "json"), "NEBULA_LOG_FORMAT",
 			"must be json when NEBULA_ENV=production: text logs are not machine-parseable")
 		if cred, found := defaultCredential(c.Database.URL.Reveal()); found {

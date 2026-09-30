@@ -202,7 +202,7 @@ func constraintDescription(name string) string {
 		return "a model with that name already exists in this organization"
 	case "uq_model_versions__model_version":
 		return "that version already exists for this model"
-	case "uq_deployments__org_name":
+	case "uq_deployments__org_name", "uq_deployments__org_name_live":
 		return "a deployment with that name already exists in this organization"
 	case "uq_deployment_revisions__dep_rev":
 		return "that revision number already exists for this deployment"

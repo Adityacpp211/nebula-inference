@@ -123,7 +123,6 @@ spec:
   selector: {app.kubernetes.io/name: nebula-s3}
   ports:
     - {name: s3, port: 8333, targetPort: 8333, nodePort: {{ .Values.data.s3.nodePort | default 30333 }}}
-    - {name: master, port: 9333, targetPort: 9333}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -141,6 +140,9 @@ spec:
       labels: {app.kubernetes.io/name: nebula-s3}
     spec:
       automountServiceAccountToken: false
+      # The Service is named "s3", so Kubernetes would inject S3_PORT=tcp://...,
+      # which SeaweedFS reads as its -s3.port flag and refuses to start.
+      enableServiceLinks: false
       containers:
         - name: seaweedfs
           image: chrislusf/seaweedfs:3.97
@@ -160,29 +162,4 @@ spec:
           emptyDir: {}
         - name: identities
           secret: {secretName: s3-identities}
----
-# Buckets are an install-time decision, made here rather than by a service that
-# would otherwise create buckets silently (packages/artifact.NewS3).
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: s3-bucket
-  namespace: {{ $ns }}
-  labels: {{- include "nebula.labels" . | nindent 4 }}
-  annotations:
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
-spec:
-  backoffLimit: 30
-  template:
-    spec:
-      restartPolicy: OnFailure
-      automountServiceAccountToken: false
-      containers:
-        - name: bucket
-          image: chrislusf/seaweedfs:3.97
-          command: ["sh", "-c"]
-          args:
-            - echo "s3.bucket.create -name {{ .Values.artifact.bucket }}" | weed shell -master=s3.{{ $ns }}:9333 2>&1 | tee /tmp/out;
-              grep -qiE "error|fail" /tmp/out && ! grep -qi "already exist" /tmp/out && exit 1 || exit 0
 {{- end }}

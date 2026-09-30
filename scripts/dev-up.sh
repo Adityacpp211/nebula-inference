@@ -63,21 +63,15 @@ echo "== install"
 helm upgrade --install nebula deploy/helm/nebula -n nebula-system --create-namespace \
   -f deploy/helm/nebula/values-dev.yaml --set images.tag="$TAG" --wait --timeout 10m
 
-echo "== waiting for the control plane's seed"
-key=""
-for _ in $(seq 1 60); do
-  key=$(kubectl -n nebula-system logs deploy/nebula-controlplane -c controlplane 2>/dev/null |
-    grep -o '"api_key":"nbk_[A-Za-z0-9]*"' | head -1 | cut -d'"' -f4 || true)
-  [ -n "$key" ] && break
-  sleep 2
-done
+# The development seed key is fixed in values-dev.yaml, so it survives restarts.
+key=$(grep -o 'nbk_[A-Za-z0-9]*' deploy/helm/nebula/values-dev.yaml | head -1)
 
 cat <<EOF
 
 NEBULA is up.
   gateway:  http://127.0.0.1:8080
-  api key:  ${key:-<not found: the seed key is printed once, on first start — see the controlplane log>}
+  api key:  $key   (development only)
 
-  curl -H "Authorization: Bearer \$KEY" http://127.0.0.1:8080/v1/me
+  curl -H "Authorization: Bearer $key" http://127.0.0.1:8080/v1/me
   kubectl -n nebula-workloads get deploy,pods
 EOF

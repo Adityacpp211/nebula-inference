@@ -88,3 +88,33 @@ func TestStaleInventoryDoesNotRefuse(t *testing.T) {
 		t.Fatalf("%d %+v", code, out)
 	}
 }
+
+// A deleted deployment's name can be used again (migration 000011), while two live
+// deployments still cannot share one.
+func TestDeletedDeploymentNameCanBeReused(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	_, versionID := f.createReadyVersion(t, "reuse", "v1")
+	id := f.createDeployment(t, "reused", versionID)
+
+	var env apiError
+	if code := f.do(t, "POST", "/v1/deployments", map[string]any{
+		"name": "reused", "model_version_id": versionID, "replicas": 1,
+		"resources": map[string]int{"cpu_milli": 500, "memory_mib": 512},
+	}, &env); code != 409 {
+		t.Fatalf("a second live deployment with the same name: %d", code)
+	}
+
+	if code := f.do(t, "POST", "/v1/deployments/"+id.String()+"/stop", map[string]any{}, nil); code >= 300 {
+		t.Fatalf("stop: %d", code)
+	}
+	// Nothing reconciles here, so the test moves stopping -> stopped as the
+	// controller would once the pods are gone.
+	if code := f.transition(t, id, "stopping", "stopped", "Drained"); code >= 300 {
+		t.Fatalf("transition: %d", code)
+	}
+	if code := f.do(t, "DELETE", "/v1/deployments/"+id.String(), nil, &env); code >= 300 {
+		t.Fatalf("delete: %d %+v", code, env)
+	}
+	f.createDeployment(t, "reused", versionID)
+}

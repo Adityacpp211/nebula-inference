@@ -110,6 +110,17 @@ func (h *Hasher) Generate() (GeneratedKey, error) {
 	}, nil
 }
 
+// FromPlaintext derives the stored form of a key whose plaintext is already known.
+// For the development seed only, where a fixed key lets a cluster be torn down and
+// brought back without hunting for a key that was logged once.
+func (h *Hasher) FromPlaintext(plaintext string) (GeneratedKey, error) {
+	prefix, err := ParsePrefix(plaintext)
+	if err != nil {
+		return GeneratedKey{}, err
+	}
+	return GeneratedKey{Plaintext: plaintext, Prefix: prefix, Hash: h.hash(plaintext)}, nil
+}
+
 // ParsePrefix extracts the lookup prefix from a presented key.
 //
 // It validates the shape completely before returning, so an attacker cannot use

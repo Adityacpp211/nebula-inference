@@ -645,6 +645,19 @@ func TestRegistryReadByUUIDIsProxied(t *testing.T) {
 	}
 }
 
+// Found on kind: the registry list must reach the control plane, not be read as a
+// route called "registry".
+func TestRegistryListIsProxied(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	resp := h.do("GET", "/v1/models/registry?limit=5", keyAdmin, "")
+	resp.Body.Close()
+	calls := h.cp.received()
+	if resp.StatusCode != 200 || len(calls) != 1 || calls[0].Path != "/v1/models/registry" {
+		t.Errorf("status %d, control plane calls %+v", resp.StatusCode, calls)
+	}
+}
+
 func TestMethodNotAllowed(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)

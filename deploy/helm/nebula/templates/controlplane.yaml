@@ -58,8 +58,18 @@ spec:
               value: ":8082"
             - name: NEBULA_DEV_SEED
               value: {{ .Values.controlplane.devSeed | quote }}
+            {{- if and .Values.controlplane.devSeed .Values.controlplane.devSeedKey }}
+            - name: NEBULA_DEV_SEED_KEY
+              value: {{ .Values.controlplane.devSeedKey | quote }}
+            {{- end }}
             - name: NEBULA_DEV_MOCK_RUNTIME
               value: {{ ne .Values.env "production" | quote }}
+            {{- if and .Values.data.enabled (ne .Values.env "production") }}
+            # The in-cluster development store starts empty; production buckets are
+            # created by the operator.
+            - name: NEBULA_DEV_CREATE_BUCKET
+              value: "true"
+            {{- end }}
             - name: NEBULA_ARTIFACT_STORE
               value: {{ .Values.artifact.store | quote }}
             - name: NEBULA_ARTIFACT_S3_ENDPOINT

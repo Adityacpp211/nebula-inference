@@ -165,7 +165,7 @@ func TestLifecycleToReady(t *testing.T) {
 	if res.RequeueAfter == 0 {
 		t.Error("a starting deployment must be looked at again")
 	}
-	if strings.Join(e.st.transitions, ",") != "pending>provisioning:ClaimedByController,provisioning>starting:ObjectsApplied" {
+	if strings.Join(e.st.transitions, ",") != "pending>provisioning:Claimed,provisioning>starting:ObjectsApplied" {
 		t.Errorf("transitions: %v", e.st.transitions)
 	}
 
