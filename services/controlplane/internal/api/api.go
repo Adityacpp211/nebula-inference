@@ -208,6 +208,14 @@ func (a *API) routes() []Route {
 		// Phase 5 controller runs, nothing else advances an in-flight state.
 		{Pattern: "POST /v1/deployments/{deployment_id}/transition", Scope: adminScope, handler: a.transitionDeployment},
 
+		// Routes: the public model names and their weighted targets.
+		{Pattern: "GET /v1/routes", Scope: depsRead, handler: a.listRoutes},
+		{Pattern: "POST /v1/routes", Scope: depsWrite, handler: a.createRoute},
+		{Pattern: "GET /v1/routes/{route_id}", Scope: depsRead, handler: a.getRoute},
+		{Pattern: "PATCH /v1/routes/{route_id}", Scope: depsWrite, handler: a.updateRoute},
+		{Pattern: "DELETE /v1/routes/{route_id}", Scope: depsWrite, handler: a.deleteRoute},
+		{Pattern: "GET /v1/policies/routing", Scope: depsRead, handler: a.listRoutingPolicies},
+
 		{Pattern: "GET /v1/audit-logs", Scope: auditRead, handler: a.listAuditLogs},
 	})
 }

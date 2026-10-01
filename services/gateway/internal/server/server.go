@@ -37,7 +37,7 @@ import (
 	"github.com/adityasatwar321/nebula/services/gateway/internal/credentials"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/dispatch"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/ratelimit"
-	"github.com/adityasatwar321/nebula/services/gateway/internal/routes"
+	"github.com/adityasatwar321/nebula/services/gateway/internal/router"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/usage"
 )
 
@@ -53,8 +53,11 @@ type Deps struct {
 	Probes  *telemetry.Probes
 	Auth    Authenticator
 	Limiter *ratelimit.Limiter
-	Routes  *routes.Table
-	Workers *dispatch.Client
+	// Router holds the route table and endpoint state and places every request.
+	Router *router.Router
+	// RouteSource is "controlplane" or "static", reported in /v1/models.
+	RouteSource string
+	Workers     *dispatch.Client
 	// Proxy forwards the control API. Nil answers 503 for every admin path, which
 	// is the shape of a gateway configured without a control plane.
 	Proxy http.Handler
@@ -97,8 +100,11 @@ func New(d Deps) http.Handler {
 	if d.Usage == nil {
 		d.Usage = usage.LogSink{Logger: d.Logger}
 	}
-	if d.Routes == nil {
-		d.Routes = routes.Empty()
+	if d.Router == nil {
+		d.Router = router.New(router.Options{Now: d.Now})
+	}
+	if d.RouteSource == "" {
+		d.RouteSource = "static"
 	}
 	g := &Gateway{d: d}
 

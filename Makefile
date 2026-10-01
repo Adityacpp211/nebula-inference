@@ -306,10 +306,11 @@ dev-up:
 dev-down:
 	@./scripts/dev-down.sh
 
-## e2e-kind: the Phase 5 demo against the kind cluster dev-up created
+## e2e-kind: the Phase 5 and 6 demos against the kind cluster dev-up created
 .PHONY: e2e-kind
 e2e-kind:
 	@$(PY) tests/e2e/kind/phase5_demo.py
+	@$(PY) tests/e2e/kind/phase6_demo.py
 
 ## helm-check: lint the chart and render it with dev and production-shaped values
 .PHONY: helm-check

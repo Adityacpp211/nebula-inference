@@ -53,6 +53,8 @@ type Settings struct {
 	ArtifactSecretName string
 	StartingTimeoutSec int32
 	MaxArtifactBytes   int64
+	// NATSURL is where workers publish heartbeats; empty for none.
+	NATSURL string
 }
 
 // Ports and paths inside a worker pod.
@@ -234,6 +236,14 @@ func podSpec(d *store.Deployment, s Settings, c scheduler.Constraints, selector 
 		// always sends the full header set; a request without one is refused.
 		{Name: "NEBULA_WORKER_STRICT_HEADERS", Value: "true"},
 		{Name: "NEBULA_WORKER_DRAIN_DELAY_S", Value: "5"},
+		// Heartbeat identity: the router matches a heartbeat to the EndpointSlice
+		// entry by pod name (docs/events.md §3.1).
+		{Name: "NEBULA_WORKER_POD_NAME", ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+		{Name: "NEBULA_WORKER_NODE_NAME", ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"}}},
+		{Name: "NEBULA_WORKER_DEPLOYMENT_ID", Value: d.ID.String()},
+		{Name: "NEBULA_WORKER_MODEL_VERSION_ID", Value: d.Version.ID.String()},
 	}
 	if needsArtifact(d) {
 		env = append(env,
@@ -244,6 +254,9 @@ func podSpec(d *store.Deployment, s Settings, c scheduler.Constraints, selector 
 	runtimeConfig, err := mergeObjects(d.Version.RuntimeConfig, d.RuntimeOverrides)
 	if err != nil {
 		return corev1.PodSpec{}, err
+	}
+	if s.NATSURL != "" {
+		env = append(env, corev1.EnvVar{Name: "NEBULA_NATS_URL", Value: s.NATSURL})
 	}
 	if runtimeConfig != "{}" {
 		env = append(env, corev1.EnvVar{Name: "NEBULA_WORKER_RUNTIME_CONFIG", Value: runtimeConfig})

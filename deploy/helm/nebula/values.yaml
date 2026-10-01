@@ -59,8 +59,15 @@ gateway:
     # No CPU limit on the gateway: throttling is tail latency
     # (docs/deployment-architecture.md §2.1).
     limits: {memory: 512Mi}
-  # Static route table (Phase 4-5); dynamic routing replaces it in Phase 6.
+  # A static route table with endpoints written in. Empty (the default) routes
+  # from the control plane with endpoints discovered from EndpointSlices, which is
+  # what a cluster should run; a table here is for clusters without that.
   routes: []
+  # Default rate limits for keys without a policy and for organizations, as
+  # NEBULA_LIMITS_<NAME> (key_rpm, key_tpm, key_concurrency, org_rpm, ...). Empty
+  # keeps the gateway's built-in defaults. Quote numbers: Helm renders large
+  # integers in exponent form.
+  limits: {}
 
 controlplane:
   replicas: 2
@@ -76,6 +83,12 @@ controller:
   resources:
     requests: {cpu: 100m, memory: 128Mi}
     limits: {cpu: "1", memory: 512Mi}
+
+# NATS carries worker heartbeats to the gateways (ADR-0007). Empty uses the
+# in-cluster server when data.enabled, otherwise no heartbeats: routing then uses
+# readiness and local observation only.
+nats:
+  url: ""
 
 # In-cluster data dependencies. Production usually runs these externally; turning
 # this off is a values change, not a different architecture.

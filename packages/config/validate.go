@@ -273,6 +273,24 @@ func (c *Config) validateGateway(v *ValidationErrors) {
 	v.AddIf(g.StaleKeyGrace.Duration() > time.Hour, "NEBULA_GATEWAY_STALE_KEY_GRACE",
 		"must not exceed 1h: past that a revoked key keeps working through a control-plane outage")
 	v.AddIf(g.DefaultMaxTokens < 1, "NEBULA_GATEWAY_DEFAULT_MAX_TOKENS", "must be at least 1")
+	v.AddIf(g.RoutesRefresh.Duration() < 100*time.Millisecond, "NEBULA_GATEWAY_ROUTES_REFRESH", "must be at least 100ms")
+	switch g.Endpoints {
+	case "static":
+		v.AddIf(g.RoutesFile == "" && c.Env.IsProduction(), "NEBULA_GATEWAY_ENDPOINTS",
+			"is static with no route file: routes from the control plane need kubernetes endpoints")
+	case "kubernetes":
+		v.AddIf(c.Kube.WorkloadNamespace == "", "NEBULA_KUBE_WORKLOAD_NAMESPACE", "must not be empty")
+	default:
+		v.Add("NEBULA_GATEWAY_ENDPOINTS", "must be static or kubernetes (got %q)", g.Endpoints)
+	}
+	v.AddIf(g.HeartbeatStaleAfter.Duration() < time.Second, "NEBULA_GATEWAY_HEARTBEAT_STALE_AFTER", "must be at least 1s")
+	v.AddIf(g.BreakerThreshold < 1, "NEBULA_GATEWAY_BREAKER_THRESHOLD", "must be at least 1")
+	v.AddIf(g.BreakerCooldown.Duration() <= 0, "NEBULA_GATEWAY_BREAKER_COOLDOWN", "must be positive")
+	if c.NATS.URL != "" {
+		if u, err := url.Parse(c.NATS.URL); err != nil || (u.Scheme != "nats" && u.Scheme != "tls") || u.Host == "" {
+			v.Add("NEBULA_NATS_URL", "must be a nats:// or tls:// URL (got %q)", c.NATS.URL)
+		}
+	}
 
 	if c.Internal.AuthSecret.IsZero() {
 		v.Add("NEBULA_INTERNAL_AUTH_SECRET",

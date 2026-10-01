@@ -168,6 +168,28 @@ def k8s_ready(name: str) -> str:
                    "jsonpath={.status.readyReplicas}/{.spec.replicas}", check=False)
 
 
+def remove_route(key: str, model_name: str) -> None:
+    """Delete a route by its model name, if it exists: a routed deployment cannot be deleted."""
+    _, page = api("GET", "/v1/routes?limit=200", key=key)
+    for r in page.get("data", []):
+        if r["model_name"] == model_name:
+            api("DELETE", f"/v1/routes/{r['id']}", key=key)
+
+
+def put_route(key: str, model_name: str, targets: list[dict]) -> dict:
+    """Create a route, or replace an existing one's targets."""
+    _, page = api("GET", "/v1/routes?limit=200", key=key)
+    for r in page.get("data", []):
+        if r["model_name"] == model_name:
+            code, out = api("PATCH", f"/v1/routes/{r['id']}", {"targets": targets}, key)
+            break
+    else:
+        code, out = api("POST", "/v1/routes", {"model_name": model_name, "targets": targets}, key)
+    if code >= 300:
+        fail(f"route {model_name}: {code} {out}")
+    return out
+
+
 def remove_deployment(key: str, name: str) -> None:
     """Stop and delete a deployment left by an earlier run, so the demo is rerunnable."""
     _, page = api("GET", "/v1/deployments?limit=200", key=key)
@@ -186,6 +208,7 @@ def main() -> None:
     run = uuid.uuid4().hex[:6]
     dep_name = "mock-demo"
     k8s_name = f"nebula-dev-{dep_name}"
+    remove_route(key, "nebula-mock")
     remove_deployment(key, dep_name)
 
     step("register a model: upload to a presigned URL, verified by reading the bytes")
@@ -218,8 +241,13 @@ def main() -> None:
     ok(f"pods: {pods}")
 
     step("inference through the gateway, served by those pods")
-    code, out = api("POST", "/v1/chat/completions",
-                    {"model": "nebula-mock", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8}, key)
+    put_route(key, "nebula-mock", [{"deployment": dep_name, "weight": 100, "label": "baseline"}])
+
+    def served():  # type: ignore[no-untyped-def]
+        c, o = api("POST", "/v1/chat/completions",
+                   {"model": "nebula-mock", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8}, key)
+        return (c, o) if c == 200 else None
+    code, out = wait("the gateway to pick up the route", served, timeout=30, every=0.5)
     if code != 200 or out["nebula"]["deployment"] != "mock-demo" or out["nebula"]["runtime"] != "mock":
         fail(f"{code} {out}")
     ok(f"200: {out['usage']['completion_tokens']} tokens from runtime {out['nebula']['runtime']}")
@@ -287,7 +315,14 @@ def main() -> None:
                       f"system:serviceaccount:nebula-system:{sa_name}", check=False).split("\n")[0]
         if got != "no":
             fail(f"{sa_name} can list pods")
-    ok("control plane and gateway have no Kubernetes access")
+    gw = "system:serviceaccount:nebula-system:nebula-gateway"
+    for verb, res, ns, want in (("watch", "endpointslices.discovery.k8s.io", WL, "yes"),
+                                ("list", "endpointslices.discovery.k8s.io", "kube-system", "no"),
+                                ("get", "secrets", WL, "no")):
+        got = kubectl("auth", "can-i", verb, res, "-n", ns, "--as", gw, check=False).split("\n")[0]
+        if got != want:
+            fail(f"gateway can-i {verb} {res} -n {ns}: got {got}, want {want}")
+    ok("control plane: no Kubernetes access; gateway: reads EndpointSlices in the workload namespace, nothing else")
 
     step("network policy: a workload pod cannot reach PostgreSQL, but can reach the artifact store")
     probe = f"netprobe-{run}"
@@ -349,6 +384,7 @@ def main() -> None:
     wait("stopped", lambda: status(key, dep_id)["status"]["state"] == "stopped", timeout=180)
     ok("mock-demo stopped, pods gone: " + (kubectl("-n", WL, "get", "pods", "-l",
        f"nebula.dev/deployment-id={dep_id}", "-o", "name") or "none"))
+    remove_route(key, "nebula-mock")
     # Read the history before deleting: a deleted deployment is gone from the API.
     _, trans = api("GET", f"/v1/deployments/{dep_id}/transitions?limit=100", key=key)
     code, out = api("DELETE", f"/v1/deployments/{dep_id}", key=key)

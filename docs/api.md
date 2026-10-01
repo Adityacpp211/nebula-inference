@@ -158,15 +158,17 @@ data: [DONE]
 `POST /v1/completions` is the legacy text-completion equivalent; `POST /v1/embeddings` returns the
 OpenAI embeddings shape and is available for model versions whose `task` is `embedding`.
 
-> **What is served today (Phase 4).** `POST /v1/chat/completions`, `POST /v1/completions` and
+> **What is served today (Phase 6).** `POST /v1/chat/completions`, `POST /v1/completions` and
 > `GET /v1/models` (plus `GET /v1/models/{route}`) are served by the gateway, exactly as above,
 > including streaming, `stream_options.include_usage`, refusal of unsupported parameters by name, the
 > `nebula` extension block, rate-limit headers (`x-ratelimit-{limit,remaining,reset}-{requests,tokens}`)
 > and client-disconnect cancellation with partial usage. `POST /v1/embeddings` is **not** served: no
 > Phase 3 runtime produces embeddings, and an endpoint with nothing behind it would be a 400 in
-> disguise. Routes come from a static table on the gateway until Phase 6. Chat messages are rendered
+> disguise. Since Phase 6 routes come from the control plane and every response names the deployment that
+> served it; `nebula.attempts` counts the replicas it was offered to, and `nebula.degraded` (and
+> `X-Nebula-Degraded`) names a failover route when one served it. Chat messages are rendered
 > into a prompt by the gateway with the route's declared template (`chatml`, `llama3` or `plain`);
-> reading the template from GGUF metadata arrives with artifact parsing in Phase 5. `estimated_cost`
+> reading the template from GGUF metadata is still open (TODO(NEB-144)). `estimated_cost`
 > is absent from the `nebula` block until the cost engine (Phase 13) can compute it — absent, not
 > zero (axiom A6). `nebula.queue` is accepted and has no effect until the gateway queue (Phase 7).
 
@@ -229,12 +231,20 @@ paths are org-scoped by the caller's credential; `org_id` is never a client-supp
 > the key and forwards a signed identity (§6a); the control plane still accepts API keys directly for
 > development and tests.
 >
-> Not yet implemented: embeddings (§2), routes, rollouts and experiments, usage, costs,
-> nodes, policies, pricing, and the `/replicas`, `/events`, `/metrics` and `/logs` sub-resources of a
-> deployment. Artifact upload has no presigned target: `upload` is `null` and `finalize` compares the
-> client-declared checksum with the one presented, reporting `verification: declared_checksum` rather
-> than claiming the bytes were read. Session tokens are refused with `unsupported_credential`; API
-> keys are the only accepted credential until the dashboard.
+> Since Phase 5, a version whose artifact is uploaded to NEBULA's own store gets a presigned
+> upload target, and `finalize` answers `202` while the control plane hashes the stored bytes
+> ([ADR-0031](./architecture-decisions/0031-artifacts-verified-asynchronously.md)); a version
+> registered against an external URI keeps `verification: declared_checksum`.
+>
+> Since Phase 6: routes (`/v1/routes`, create, read, list, atomic weight and policy replacement,
+> delete) and `GET /v1/policies/routing`. A deployment that a route targets cannot be deleted
+> (`409 in_use`) until the route stops targeting it. The `route` shortcut on `POST /v1/deployments`
+> shown below is not implemented; create the route separately.
+>
+> Not yet implemented: embeddings (§2), rollouts and experiments, usage, costs, nodes, rate-limit
+> policies, pricing, and the `/replicas`, `/events`, `/metrics` and `/logs` sub-resources of a
+> deployment. Session tokens are refused with `unsupported_credential`; API keys are the only
+> accepted credential until the dashboard.
 
 ### Models and versions
 

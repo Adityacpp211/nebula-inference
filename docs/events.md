@@ -93,6 +93,7 @@ carries identity.
   "model_version":        "qwen2.5:0.5b-q4",
   "runtime":              "llamacpp",
   "state":                "ready",
+  "instance":             "5f0c2e9a41d34c0e9b7d6f1a2c3b4d5e",
   "sequence":             48213,
   "emitted_at_ms":        1774189927412,
   "inflight":             3,
@@ -122,8 +123,15 @@ carries identity.
 
 Semantics:
 
-- **Latest-wins per pod.** `sequence` is monotonic per pod; a consumer discards an out-of-order
-  message rather than applying it.
+- **Latest-wins per pod.** `sequence` is monotonic per worker process, which `instance` names; a
+  consumer discards an out-of-order message from the same instance rather than applying it, and a new
+  instance (a container restart in the same pod) replaces the old one.
+- **Draining is published at once**, not at the next tick, with `accepting: false`, so gateways stop
+  sending to a terminating pod before its EndpointSlice changes. A worker's last heartbeat on
+  shutdown also says `accepting: false`.
+- Optional fields: `context_window` (the loaded version's), `kv_cache_used_mib` when the engine
+  reports it, and `advertise_url` for a worker outside Kubernetes, where no EndpointSlice ties the
+  heartbeat to an endpoint.
 - **Staleness is the failure detector.** Older than 3 intervals → endpoint marked `stale` and dropped
   from selection. This is usually *faster* than EndpointSlice removal, which is why it exists.
 - `emitted_at_ms` is the producer's clock, so consumers compare against their own receive time and

@@ -74,7 +74,7 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v7
         with:
           version: v2.1
           args: --timeout=5m
@@ -168,6 +168,8 @@ jobs:
         run: ./scripts/dev-up.sh
       - name: phase 5 demo
         run: python3 tests/e2e/kind/phase5_demo.py
+      - name: Phase 6 demo (routing, traffic shift, cold start from snapshot)
+        run: python3 tests/e2e/kind/phase6_demo.py
       - name: diagnostics on failure
         if: failure()
         run: |

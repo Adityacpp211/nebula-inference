@@ -19,28 +19,29 @@ for chunk in client.chat.completions.create(
 
 ---
 
-> ## Project status — Phase 5 complete
+> ## Project status — Phase 6 complete
 >
-> **NEBULA now runs on Kubernetes.** A deployment created through the gateway becomes real pods on
-> a kind cluster, placed by capacity admission, loaded from a verified artifact, and kept that way:
-> a killed pod is replaced, a Deployment deleted out from under NEBULA is recreated in under a
-> second, and hand edits are reverted. The `nebula deploy` commands above still describe the
-> finished system — the CLI is Phase 14; today the same thing is a `curl`.
+> **Requests are routed by health and load, not by a file.** A route — the public model name — is
+> created through the API over weighted deployments; every gateway picks it up from the control
+> plane within seconds, discovers the pods from EndpointSlices, reads their load from worker
+> heartbeats over NATS, and places each request on the least-loaded replica that can take it. Kill
+> every pod of one target under load and its traffic moves to the others within a second, with no
+> client errors; restart a gateway while the control plane is down and it still routes, from a Redis
+> snapshot. The `nebula` CLI in the examples above is still Phase 14; today it is a `curl`.
 >
-> What works now: everything from Phases 1–4 (schema and row-level security, API-key auth with
-> scopes, the model registry and enforced lifecycle, the worker with llama.cpp and mock runtimes, the
-> OpenAI-compatible gateway with streaming and Redis rate limiting) plus the deployment controller,
-> node inventory and capacity admission (`422` before anything is created), the artifact store with
-> presigned upload and verification from the stored bytes, the artifact-puller initContainer that
-> re-checks them on every node, and the Helm chart with RBAC and NetworkPolicies.
+> What works now: everything from Phases 1–5 (schema and row-level security, API-key auth, the
+> registry and enforced lifecycle, the worker with llama.cpp and mock runtimes, the OpenAI-compatible
+> gateway with streaming and rate limiting, the deployment controller with capacity admission,
+> verified artifacts, Helm and kind) plus routes and routing policies, the router with its
+> filter, strategies, breakers and failover, worker heartbeats, and the cross-replica revocation
+> broadcast.
 >
-> What this deliberately does NOT do yet: routing is still a static file on the gateway (dynamic,
-> health-aware routing is Phase 6), there is no gateway queue (Phase 7), no metrics (Phase 8) and no
-> autoscaling (Phase 9). Usage records are log lines until NATS arrives. The kind demo runs the mock
-> runtime; the llama.cpp worker image builds in CI and with `NEBULA_BUILD_LLAMACPP=1`.
+> What this deliberately does NOT do yet: there is no gateway queue (Phase 7), no metrics endpoint
+> or traces (Phase 8), no autoscaling (Phase 9), and retries only happen before a worker starts
+> work — general retries are Phase 10. Usage records are log lines until the durable event stream.
 >
-> Next: [Phase 6](docs/roadmap.md#phase-6--router-and-health-aware-routing) — the router and
-> health-aware routing. See [Capability status](#capability-status).
+> Next: [Phase 7](docs/roadmap.md#phase-7--request-queue-and-concurrency-control) — the request queue
+> and concurrency control. See [Capability status](#capability-status).
 
 ## Running it today
 
@@ -151,7 +152,7 @@ kubectl and helm:
 
 ```bash
 make dev-up      # builds the images, loads them into kind, helm-installs, prints the dev key
-make e2e-kind    # the Phase 5 demo: 12 steps against the live cluster
+make e2e-kind    # the Phase 5 and 6 demos against the live cluster
 make dev-down
 ```
 
@@ -159,8 +160,16 @@ On the cluster, a model is registered by asking for a presigned upload URL, `PUT
 bytes to it, and calling `finalize`, which answers `202` while the control plane hashes
 what arrived. A deployment of a `ready` version is admitted against real node capacity
 (`422 insufficient_capacity` names the resource that does not fit), and its pods appear in
-`kubectl get deploy,pods -n nebula-workloads`. [tests/e2e/kind/phase5_demo.py](tests/e2e/kind/phase5_demo.py)
-is the worked example.
+`kubectl get deploy,pods -n nebula-workloads`. A route makes it callable:
+
+```bash
+curl -sX POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model_name":"chat","targets":[{"deployment":"blue","weight":90},{"deployment":"green","weight":10}]}' \
+  http://127.0.0.1:8080/v1/routes
+```
+
+[tests/e2e/kind/phase5_demo.py](tests/e2e/kind/phase5_demo.py) and
+[phase6_demo.py](tests/e2e/kind/phase6_demo.py) are the worked examples.
 
 ---
 
@@ -319,7 +328,7 @@ checkout.
 | Gateway, OpenAI-compatible API, streaming, rate limiting, admin proxy | ✅ **working** — verified with the unmodified OpenAI SDK; static routes until 6 | 4 |
 | Gateway container image | ✅ **working** — built and run on kind in the Phase 5 demo | 4 |
 | Deployment controller, Kubernetes integration, Helm | ✅ **working** — kind demo 12/12: pods replaced, deleted Deployments recreated, drift reverted | 5 |
-| Health-aware routing, routing strategies | ⬜ not started | 6 |
+| Health-aware routing, routing strategies | ✅ **working** — kind demo: 50/50 split, all pods of one target killed under load with 0 errors, cold start from snapshot | 6 |
 | Bounded queues, concurrency control, backpressure | ⬜ not started | 7 |
 | Metrics, logs, traces, Grafana dashboards | ⬜ not started | 8 |
 | Autoscaling | ⬜ not started | 9 |

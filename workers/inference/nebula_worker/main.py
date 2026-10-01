@@ -70,8 +70,7 @@ async def _serve(config: WorkerConfig) -> int:
                 }
             },
         )
-        worker.draining = True
-        worker.metrics.draining.set(1)
+        worker.set_draining(release_waiters=False)
 
         async def _finish() -> None:
             # Readiness is already failing. Keep serving for drain_delay so requests

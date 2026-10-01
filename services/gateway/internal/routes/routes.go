@@ -1,22 +1,18 @@
-// Package routes is the gateway's Phase 4 route table: static, loaded from a file.
+// Package routes is the gateway's route table: which routes exist, for which
+// organization, with which weighted targets. It answers "which route does this org
+// mean by this model name?". Which endpoint serves a request is the router's
+// question (services/gateway/internal/router), answered with packages/routing.
 //
-// This is a deliberate, temporary shape. Dynamic routing — routes and weighted
-// targets read from the control plane, endpoints from EndpointSlices, load from
-// worker heartbeats — is Phase 6 (docs/roadmap.md), and it replaces this package's
-// data source without changing the two questions the gateway asks of it: "which
-// route does this org mean by this model name?" and "which endpoint serves this
-// request?". Saying so here is what keeps a temporary shortcut from quietly
-// becoming the design.
+// A table comes from one of two places:
 //
-// Two properties are kept even in the static form, because the rest of the gateway
-// depends on them:
+//   - the control plane's routing table (FromPayload), the normal source since
+//     Phase 6, with endpoints discovered from Kubernetes;
+//   - a static file (Load), with worker endpoints written into it, for running
+//     without Kubernetes or a control plane routing table.
 //
-//   - A route belongs to exactly one organization. A caller asking for another
-//     org's model gets the same answer as for a model that does not exist
-//     (docs/security-boundaries.md §4.2).
-//   - Weighted target selection is deterministic in the bucketing key, so the
-//     canary and experiment machinery of Phase 12 inherits a split that is stable
-//     per request rather than one drawn from a random number generator.
+// Either way a route belongs to exactly one organization: a caller asking for
+// another org's model gets the same answer as for a model that does not exist
+// (docs/security-boundaries.md §4.2).
 package routes
 
 import (
@@ -30,17 +26,18 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/adityasatwar321/nebula/packages/routing"
 )
 
 // Task is what a route's model does.
 type Task string
 
-// Supported tasks. Embeddings are absent because no Phase 3 runtime serves them;
-// a route declaring one is refused at load rather than failing per request.
+// Supported tasks. Embeddings are absent because no runtime serves them; a route
+// declaring one is refused at load rather than failing per request.
 const (
 	TaskChat       Task = "chat"
 	TaskCompletion Task = "completion"
@@ -71,25 +68,41 @@ type Capabilities struct {
 type Target struct {
 	// Deployment is the deployment's name, returned to callers in the nebula block.
 	Deployment string `json:"deployment" yaml:"deployment"`
-	// DeploymentID identifies the deployment for pinning (nebula.deployment_id) and
-	// in usage records. Optional in a static table: a target without one cannot be
-	// pinned by id, only by name.
+	// DeploymentID identifies the deployment for pinning (nebula.deployment_id), in
+	// usage records, and in endpoint discovery. Optional in a static table: a target
+	// without one cannot be pinned by id, only by name.
 	DeploymentID string `json:"deployment_id,omitempty" yaml:"deployment_id,omitempty"`
 	// ModelVersion is asserted to the worker on every request; a worker serving a
 	// different version answers 409 rather than silently serving the wrong model.
 	ModelVersion string `json:"model_version" yaml:"model_version"`
 	Weight       int    `json:"weight" yaml:"weight"`
 	Label        string `json:"label,omitempty" yaml:"label,omitempty"`
-	// Endpoints are worker base URLs, e.g. http://10.0.0.7:8080.
-	Endpoints []string `json:"endpoints" yaml:"endpoints"`
+	// Endpoints are worker base URLs, e.g. http://10.0.0.7:8080, in a static
+	// table. A table from the control plane has none: its endpoints are discovered.
+	Endpoints []string `json:"endpoints,omitempty" yaml:"endpoints,omitempty"`
 
-	next atomic.Uint64
+	// State is the deployment's lifecycle state, reported in /v1/models. It does
+	// not gate traffic; endpoints do.
+	State string `json:"state,omitempty" yaml:"state,omitempty"`
+	// Namespace is where the deployment's pods run.
+	Namespace string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	// ContextWindow of this target's model version; zero means the route's.
+	ContextWindow int `json:"context_window,omitempty" yaml:"context_window,omitempty"`
+}
+
+// Key identifies the target's deployment in the router: its id when known, else
+// a name scoped to the route, which is how a static table without ids works.
+func (t *Target) Key(r *Route) string {
+	if t.DeploymentID != "" {
+		return strings.ToLower(t.DeploymentID)
+	}
+	return "static:" + r.ID + "/" + t.Deployment
 }
 
 // Route is the public identity of a capability: the value of "model" in a request.
 type Route struct {
-	// ID is stable across reloads of the same file. Derived from org and model when
-	// the file does not set one, so it is never random.
+	// ID is stable across reloads of the same source. A static file that does not
+	// set one gets an id derived from org and model, so it is never random.
 	ID    string `json:"id,omitempty" yaml:"id,omitempty"`
 	Model string `json:"model" yaml:"model"`
 	// Org is the owning organization's slug.
@@ -101,8 +114,10 @@ type Route struct {
 	Timeout          time.Duration `json:"-" yaml:"-"`
 	TimeoutRaw       string        `json:"timeout,omitempty" yaml:"timeout,omitempty"`
 	Capabilities     Capabilities  `json:"capabilities" yaml:"capabilities"`
-	Targets          []*Target     `json:"targets" yaml:"targets"`
-	// Created is reported as the OpenAI "created" field. Taken from the file so it
+	// Policy is the routing policy; an empty strategy means the default.
+	Policy  routing.Policy `json:"policy" yaml:"policy"`
+	Targets []*Target      `json:"targets" yaml:"targets"`
+	// Created is reported as the OpenAI "created" field. Taken from the source so it
 	// is stable; defaults to the time the table was loaded.
 	Created int64 `json:"created,omitempty" yaml:"created,omitempty"`
 }
@@ -114,6 +129,9 @@ type file struct {
 
 // Table is an immutable, validated route table.
 type Table struct {
+	// Version identifies the content, for logs and snapshots.
+	Version string
+
 	byOrgModel map[string]*Route
 	byOrg      map[string][]*Route
 }
@@ -149,13 +167,33 @@ func Load(path string, now time.Time) (*Table, error) {
 	return Build(f.Routes, now)
 }
 
+// Payload is the control plane's internal routing table
+// (GET /internal/v1/routing-table).
+type Payload struct {
+	Version string   `json:"version"`
+	Routes  []*Route `json:"routes"`
+}
+
+// FromPayload builds a table from the control plane's routing table. Endpoints
+// are not part of it; the router discovers them.
+func FromPayload(p *Payload, now time.Time) (*Table, error) {
+	t, err := build(p.Routes, now, false)
+	if err != nil {
+		return nil, err
+	}
+	t.Version = p.Version
+	return t, nil
+}
+
 // modelNamePattern matches the routes.model_name CHECK constraint, so a name valid
-// here stays valid when routes move into PostgreSQL in Phase 6.
+// in a file is valid in PostgreSQL too.
 var modelNamePattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._:-]{0,94}[A-Za-z0-9])?$`)
 
-// Build validates routes and indexes them. Every problem is reported, not just the
-// first, matching the configuration package's rule.
-func Build(in []*Route, now time.Time) (*Table, error) {
+// Build validates a static table and indexes it. Every problem is reported, not
+// just the first, matching the configuration package's rule.
+func Build(in []*Route, now time.Time) (*Table, error) { return build(in, now, true) }
+
+func build(in []*Route, now time.Time, static bool) (*Table, error) {
 	var problems []string
 	add := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
 
@@ -233,8 +271,11 @@ func Build(in []*Route, now time.Time) (*Table, error) {
 				add("%s: weight must be between 0 and 100", tw)
 			}
 			sum += tg.Weight
-			if len(tg.Endpoints) == 0 {
+			if static && len(tg.Endpoints) == 0 {
 				add("%s: at least one endpoint is required", tw)
+			}
+			if !static && tg.DeploymentID == "" {
+				add("%s: deployment_id is required", tw)
 			}
 			for k, ep := range tg.Endpoints {
 				u, err := url.Parse(ep)
@@ -285,50 +326,37 @@ func (t *Table) Lookup(org, model string) (*Route, bool) {
 // ForOrg lists org's routes, sorted by model name.
 func (t *Table) ForOrg(org string) []*Route { return t.byOrg[org] }
 
+// All lists every route, sorted by org then model name.
+func (t *Table) All() []*Route {
+	out := make([]*Route, 0, len(t.byOrgModel))
+	for _, org := range routing.SortedKeys(t.byOrg) {
+		out = append(out, t.byOrg[org]...)
+	}
+	return out
+}
+
 // Len counts routes across all orgs.
 func (t *Table) Len() int { return len(t.byOrgModel) }
 
 // ErrNoTarget means a pin named a deployment the route does not have.
 var ErrNoTarget = errors.New("the route has no such deployment")
 
-// Pick chooses a target. A pin (deployment name or id) bypasses weighting;
-// otherwise the bucketing key decides, deterministically: the same key always lands
-// on the same target for the same weights, which is what makes an experiment's
-// assignment sticky (ADR-0009).
-func (r *Route) Pick(bucketKey, pin string) (*Target, error) {
-	if pin != "" {
-		for _, tg := range r.Targets {
-			if tg.Deployment == pin || (tg.DeploymentID != "" && strings.EqualFold(tg.DeploymentID, pin)) {
-				return tg, nil
-			}
-		}
-		return nil, ErrNoTarget
-	}
-	b := Bucket(bucketKey)
-	acc := 0
+// Pinned returns the target a pin (deployment name or id) names.
+func (r *Route) Pinned(pin string) (*Target, error) {
 	for _, tg := range r.Targets {
-		acc += tg.Weight
-		if b < acc {
+		if tg.Deployment == pin || (tg.DeploymentID != "" && strings.EqualFold(tg.DeploymentID, pin)) {
 			return tg, nil
 		}
 	}
-	// Unreachable when weights sum to 100, which Build guarantees.
-	return r.Targets[len(r.Targets)-1], nil
+	return nil, ErrNoTarget
 }
 
-// Bucket maps a key onto [0, 100). FNV-1a rather than a cryptographic hash: the
-// distribution only has to be uniform, not unpredictable, and it runs per request.
-func Bucket(key string) int {
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(key))
-	return int(h.Sum64() % 100)
-}
-
-// Endpoint returns the next endpoint of a target in round-robin order.
-// Load-aware selection is Phase 6's LeastLoaded strategy.
-func (t *Target) Endpoint() string {
-	n := t.next.Add(1) - 1
-	return t.Endpoints[n%uint64(len(t.Endpoints))]
+// TargetContext is a target's context window, falling back to the route's.
+func (r *Route) TargetContext(t *Target) int {
+	if t.ContextWindow > 0 {
+		return t.ContextWindow
+	}
+	return r.ContextWindow
 }
 
 // derivedID makes a stable identifier from org and model.

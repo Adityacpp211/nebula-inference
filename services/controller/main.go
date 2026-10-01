@@ -112,6 +112,7 @@ func runMain() error {
 			ArtifactSecretName: cfg.Kube.ArtifactSecretName,
 			StartingTimeoutSec: int32(cfg.Kube.StartingTimeout.Duration().Seconds()),
 			MaxArtifactBytes:   cfg.Artifact.MaxBytes,
+			NATSURL:            cfg.NATS.URL,
 		},
 		StartingTimeout: cfg.Kube.StartingTimeout.Duration(),
 		Logger:          logger,

@@ -15,10 +15,10 @@ import (
 // deployment — "model" in a request names a route.
 func (g *Gateway) listModels(w http.ResponseWriter, r *http.Request) {
 	ident := auth.MustFromContext(r.Context())
-	rs := g.d.Routes.ForOrg(ident.OrgSlug)
+	rs := g.d.Router.Table().ForOrg(ident.OrgSlug)
 	out := openai.ModelList{Object: openai.ObjectList, Data: make([]openai.Model, 0, len(rs))}
 	for _, rt := range rs {
-		out.Data = append(out.Data, modelOf(rt))
+		out.Data = append(out.Data, g.modelOf(rt))
 	}
 	_ = httpx.WriteJSON(w, http.StatusOK, out)
 }
@@ -27,7 +27,7 @@ func (g *Gateway) listModels(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) retrieveModel(w http.ResponseWriter, r *http.Request) {
 	ident := auth.MustFromContext(r.Context())
 	name := r.PathValue("model")
-	rt, ok := g.d.Routes.Lookup(ident.OrgSlug, name)
+	rt, ok := g.d.Router.Table().Lookup(ident.OrgSlug, name)
 	if !ok {
 		g.fail(w, r, &httpx.APIError{
 			Status:  http.StatusNotFound,
@@ -38,14 +38,15 @@ func (g *Gateway) retrieveModel(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	_ = httpx.WriteJSON(w, http.StatusOK, modelOf(rt))
+	_ = httpx.WriteJSON(w, http.StatusOK, g.modelOf(rt))
 }
 
-func modelOf(rt *routes.Route) openai.Model {
+func (g *Gateway) modelOf(rt *routes.Route) openai.Model {
 	targets := make([]openai.ModelTarget, 0, len(rt.Targets))
 	for _, t := range rt.Targets {
 		targets = append(targets, openai.ModelTarget{
 			Deployment: t.Deployment, ModelVersion: t.ModelVersion, Weight: t.Weight, Label: t.Label,
+			State: t.State, ReadyEndpoints: g.d.Router.Eligible(rt, t),
 		})
 	}
 	return openai.Model{
@@ -60,7 +61,7 @@ func modelOf(rt *routes.Route) openai.Model {
 			Targets:       targets,
 			Streaming:     rt.Capabilities.Streaming,
 			Embeddings:    false,
-			Source:        "static",
+			Source:        g.d.RouteSource,
 		},
 	}
 }

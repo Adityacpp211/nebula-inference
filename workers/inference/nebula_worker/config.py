@@ -95,6 +95,18 @@ class WorkerConfig:
 
     runtime_config: Mapping[str, Any] = field(default_factory=dict)
 
+    #: Heartbeats (docs/events.md §3.1). No NATS URL, no heartbeats: the gateway then
+    #: routes on readiness alone. Identity comes from the downward API in a pod.
+    nats_url: str = ""
+    heartbeat_interval_s: float = 1.0
+    pod_name: str = "local"
+    node_name: str = ""
+    deployment_id: str = ""
+    model_version_id: str = ""
+    #: The URL a gateway reaches this worker at, for static routing outside
+    #: Kubernetes, where no EndpointSlice ties a heartbeat to an endpoint.
+    advertise_url: str = ""
+
     @classmethod
     def from_env(cls, getenv: Mapping[str, str] | None = None) -> WorkerConfig:
         source: Mapping[str, str] = getenv if getenv is not None else os.environ
@@ -118,6 +130,15 @@ class WorkerConfig:
             drain_delay_s=_env_float(source, "NEBULA_WORKER_DRAIN_DELAY_S", 5.0, problems),
             shutdown_grace_s=_env_float(source, "NEBULA_WORKER_SHUTDOWN_GRACE_S", 25.0, problems),
             runtime_config=_runtime_config(source, problems),
+            nats_url=_env(source, "NEBULA_NATS_URL"),
+            heartbeat_interval_s=_env_float(
+                source, "NEBULA_WORKER_HEARTBEAT_INTERVAL_S", 1.0, problems
+            ),
+            pod_name=_env(source, "NEBULA_WORKER_POD_NAME") or _env(source, "HOSTNAME") or "local",
+            node_name=_env(source, "NEBULA_WORKER_NODE_NAME"),
+            deployment_id=_env(source, "NEBULA_WORKER_DEPLOYMENT_ID"),
+            model_version_id=_env(source, "NEBULA_WORKER_MODEL_VERSION_ID"),
+            advertise_url=_env(source, "NEBULA_WORKER_ADVERTISE_URL").rstrip("/"),
         )
 
         if cfg.env not in {"dev", "staging", "production"}:
@@ -135,6 +156,10 @@ class WorkerConfig:
             problems.append("NEBULA_WORKER_MAX_QUEUE_DEPTH: must not be negative")
         if cfg.default_timeout_s <= 0:
             problems.append("NEBULA_WORKER_DEFAULT_TIMEOUT_S: must be positive")
+        if cfg.nats_url and not cfg.nats_url.startswith(("nats://", "tls://")):
+            problems.append(f"NEBULA_NATS_URL: {cfg.nats_url!r} is not a nats:// or tls:// URL")
+        if not 0.1 <= cfg.heartbeat_interval_s <= 10:
+            problems.append("NEBULA_WORKER_HEARTBEAT_INTERVAL_S: must be between 0.1 and 10")
 
         if cfg.env == "production":
             # The same posture the Go services take: development affordances are a

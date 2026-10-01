@@ -293,3 +293,36 @@ func TestCacheIsBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A replica that starts while the control plane is down authenticates from the
+// shared tier past its TTL, as a degraded request, until the stale grace runs
+// out — and then fails closed (axiom A8, docs/architecture.md §8.4).
+func TestColdReplicaUsesTheSharedTierDuringAnOutage(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, true)
+	if _, err := f.r.Authenticate(context.Background(), f.key); err != nil {
+		t.Fatal(err)
+	}
+	f.cp.set(true)
+	f.clk.advance(45 * time.Second) // past the 30s shared TTL, within the 1m grace
+
+	h, _ := auth.NewHasher(pepper)
+	cold := credentials.New(credentials.Options{
+		Hasher: h, Lookup: f.cp, Redis: f.redis, RedisPrefix: "t:", RedisTTL: 30 * time.Second,
+		OpTimeout: time.Second, LocalTTL: 5 * time.Second, NegativeTTL: 5 * time.Second,
+		StaleGrace: time.Minute, Now: f.clk.now,
+	})
+	p, err := cold.Authenticate(context.Background(), f.key)
+	if err != nil || !p.Degraded {
+		t.Fatalf("cold replica during an outage: %+v %v", p, err)
+	}
+	f.clk.advance(10 * time.Second) // its local copy keeps the original age
+	if p, err := cold.Authenticate(context.Background(), f.key); err != nil || !p.Degraded {
+		t.Fatalf("second request: %+v %v", p, err)
+	}
+
+	f.clk.advance(time.Minute) // past TTL + grace: fail closed
+	if c := code(t, errNot(cold.Authenticate(context.Background(), f.key))); c != "credential_verification_unavailable" {
+		t.Fatalf("past the cap: %q", c)
+	}
+}

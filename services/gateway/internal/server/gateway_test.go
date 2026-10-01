@@ -420,15 +420,17 @@ func TestWorkerErrorMapping(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			h := newHarness(t)
-			h.worker.handle = func(w http.ResponseWriter, _ *http.Request, _ workerReq) {
-				for k, v := range tc.headers {
-					w.Header().Set(k, v)
-				}
-				w.WriteHeader(tc.status)
-				_, _ = io.WriteString(w, `{"error":{"message":"SECRET internal worker detail pod-7f9","type":"x","code":"y"}}`)
-			}
 			for _, stream := range []bool{false, true} {
+				// A harness per request: a saturated answer marks the endpoint full,
+				// which would change how the next request is admitted.
+				h := newHarness(t)
+				h.worker.handle = func(w http.ResponseWriter, _ *http.Request, _ workerReq) {
+					for k, v := range tc.headers {
+						w.Header().Set(k, v)
+					}
+					w.WriteHeader(tc.status)
+					_, _ = io.WriteString(w, `{"error":{"message":"SECRET internal worker detail pod-7f9","type":"x","code":"y"}}`)
+				}
 				body := `{"model":"tiny","messages":[{"role":"user","content":"x"}],"stream":` + strconv.FormatBool(stream) + `}`
 				resp := h.do("POST", "/v1/chat/completions", keyAcme, body)
 				e := errorOf(t, resp)

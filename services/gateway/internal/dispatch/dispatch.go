@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -133,6 +134,25 @@ func (e *Error) Error() string {
 }
 
 func (e *Error) Unwrap() error { return e.Transport }
+
+// Unreachable reports a failure to connect at all: the request never reached the
+// worker, so nothing was generated and nothing was charged.
+func (e *Error) Unreachable() bool {
+	var op *net.OpError
+	return e.Transport != nil && errors.As(e.Transport, &op) && op.Op == "dial"
+}
+
+// BeforeWork reports a failure that happened before the worker started
+// generating: it could not be reached, or it declined (saturated, draining,
+// loading). Such a request can be placed on another replica without any risk of
+// generating twice, which is the only kind of retry the router makes; general
+// retries are Phase 10's.
+func (e *Error) BeforeWork() bool {
+	if e.MidStream {
+		return false
+	}
+	return e.Unreachable() || e.Status == http.StatusServiceUnavailable || e.Status == http.StatusTooManyRequests
+}
 
 // ErrStreamTruncated means the stream ended without a final chunk or [DONE]: the
 // worker died or the connection was cut mid-generation.
@@ -277,7 +297,9 @@ func (c *Client) Cancel(ctx context.Context, endpoint, requestID, traceparent st
 type Stream struct {
 	body   io.ReadCloser
 	reader *bufio.Reader
-	done   bool
+	// done is set by the reader goroutine at [DONE] and read by Close on the
+	// handler goroutine, hence atomic.
+	done atomic.Bool
 }
 
 // maxEventBytes bounds one SSE event. A single token chunk is tiny; the final
@@ -288,7 +310,7 @@ const maxEventBytes = 1 << 20
 // ErrStreamTruncated if the body ends before a final chunk; and an *Error with
 // MidStream set for an error event.
 func (s *Stream) Next() (Chunk, error) {
-	if s.done {
+	if s.done.Load() {
 		return Chunk{}, io.EOF
 	}
 	for {
@@ -303,7 +325,7 @@ func (s *Stream) Next() (Chunk, error) {
 			continue // comment or empty event
 		}
 		if string(data) == "[DONE]" {
-			s.done = true
+			s.done.Store(true)
 			return Chunk{}, io.EOF
 		}
 		// An error event is {"error": {...}}; a chunk never has that key.
@@ -374,7 +396,7 @@ func (s *Stream) readEvent() ([]byte, error) {
 // Close releases the connection. Closing before [DONE] aborts the request at the
 // worker, which is how a stream is cancelled for certain.
 func (s *Stream) Close() error {
-	if s.done {
+	if s.done.Load() {
 		drainClose(s.body)
 		return nil
 	}

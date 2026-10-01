@@ -447,7 +447,75 @@ brings it back.
 
 ---
 
-## Phase 6 — Router and health-aware routing
+## Phase 6 — Router and health-aware routing ✅
+
+**Status: complete**, with the deviations below.
+
+**Delivered**
+
+- `packages/routing`: the endpoint snapshot, the mandatory `Filter` (readiness, breaker, heartbeat
+  staleness while heartbeats flow, acceptance, loaded model version, context window), the
+  `RoundRobin`, `LeastLoaded` (default), `LatencyAware` and `CapabilityBased` strategies, `Failover`
+  as a policy that wraps a primary strategy and names a fallback route, per-endpoint breakers and
+  EWMAs, and deterministic weighted resolution that gives an unusable target's share to the others
+  in proportion — the same key always lands on the same target, and keys on healthy targets never
+  move. Pure functions over an injected clock.
+- Control plane: `/v1/routes` (create, read, list, atomic replacement of weights and policy,
+  delete; weights must total 100, all targets one task) and `GET /v1/policies/routing`, audited;
+  the internal routing table (`GET /internal/v1/routing-table`, ETag-versioned, 304 when unchanged).
+- Gateway router (`services/gateway/internal/router`): routes polled from the control plane every 2 s,
+  endpoints from an EndpointSlice informer (RBAC: `endpointslices` get/list/watch in the workload
+  namespace only), heartbeats from core NATS, local observation per dispatch, and a Redis snapshot
+  written by every replica and loaded on a cold start when the control plane does not answer
+  ([ADR-0033](./architecture-decisions/0033-router-state-and-before-work-retries.md)). A request
+  whose endpoint fails *before any work started* (unreachable, draining, loading, saturated) is
+  re-placed on another endpoint, at most three attempts; `nebula.attempts` reports it. `/v1/models`
+  shows each target's state and eligible endpoints; `/healthz` shows each source.
+- Worker heartbeat publisher (`nats-py`), once a second and immediately on drain, with an `instance`
+  id so a container restart is not mistaken for a stale sequence; the controller gives every worker
+  its pod name, node, deployment and version ids through the downward API.
+- NATS in the development chart; NetworkPolicies for workers → NATS and gateway → NATS.
+- The revocation broadcast (TODO(NEB-143)): a revocation proxied by one gateway replica evicts the
+  key from every replica's in-process cache over NATS.
+- A static route file remains for running without Kubernetes (`make run-gateway`,
+  `make e2e-gateway`); the chart uses the control plane unless values supply routes.
+
+**Tests.** Strategy and filter tables with an injected clock and no sleeps; the staleness window
+exact to the millisecond (eligible at 3 s, gone at 3.001 s, back on the next heartbeat); weighted
+resolution within ±2 % over 10 000 keys, stable per key, and a dead target's share redistributed
+60/40 by weight with no healthy key moving; breakers (connection failure opens at once, one probe
+after the cooldown, doubling on a failed probe); heartbeat ordering across restarts; EndpointSlice
+merging (a terminating endpoint takes no new work); heartbeats and the revocation broadcast over an
+embedded NATS server; **a cold replica with the control plane down routing from the snapshot
+another replica left in Redis**; the gateway skipping an unreachable replica, answering 503
+`no_healthy_endpoint` with `Retry-After` when nothing is eligible (and charging nothing), and failing
+over to a fallback route with `X-Nebula-Degraded`. Control-plane integration tests for the route API,
+its refusals, auditing, the routed-deployment delete guard, and the internal table with its 304.
+Worker tests for the heartbeat payload, the immediate drain heartbeat and the final one. The OpenAI
+SDK suite (`make e2e-gateway`, SDK 3.22.1) still passes 13/13 against the static-file path.
+
+`tests/e2e/kind/phase6_demo.py` (`make e2e-kind`) on kind: two deployments behind one route created
+through the API; the gateway converges in about 2 s with 2 + 2 endpoints; routing table, endpoint
+discovery and heartbeats all live; 400 requests split 47.8 % / 52.2 %; every pod of one target
+deleted under load from four clients — **0 errors in 488 requests**, the last request placed on the
+old pods 0.25 s after the delete, traffic back on the replacements at 6.1 s; then the control plane
+scaled to zero and the gateway restarted — 20/20 requests served from the Redis snapshot, `/healthz`
+saying so, and back on the live table once the control plane returns.
+
+**Exit:** met — 50/50 over two deployments, observed split matching, and killing every pod of one
+target shifts its traffic within a second with no client errors.
+
+**Deviations.**
+
+- The snapshot is written by gateways, not the controller (ADR-0033).
+- `CostAware` resolves to `LeastLoaded` with a logged note until the cost engine (Phase 13).
+- `LatencyAware` uses the worker's own time-to-first-token as the local sample; gateway-side TTFT
+  arrives with the Phase 8 histograms.
+- The `route` shortcut on `POST /v1/deployments` (docs/api.md) is not implemented.
+- The controller still polls PostgreSQL rather than reacting to `nebula.control.reconcile`; the poll
+  is 2 s and nothing in this phase needed it sooner.
+
+**Original plan**
 
 **Deliverables**
 

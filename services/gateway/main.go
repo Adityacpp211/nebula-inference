@@ -1,11 +1,12 @@
 // Command nebula-gateway is NEBULA's data plane: the only public entry point.
 //
-// Phase 4 scope: API-key authentication against the control plane, Redis-backed
-// rate limiting with an in-process fallback, the OpenAI-compatible inference API
-// over a static route table, SSE streaming with keep-alives and terminal error
-// frames, client-disconnect cancellation, usage records, and the admin proxy to
-// the control plane. Dynamic routing is Phase 6 and the admission queue Phase 7
-// (docs/roadmap.md).
+// It authenticates API keys against the control plane, rate-limits in Redis with
+// an in-process fallback, serves the OpenAI-compatible inference API with SSE
+// streaming and client-disconnect cancellation, emits usage records, proxies the
+// admin API, and routes every request through the router: routes from the
+// control plane (snapshotted to Redis for cold starts), endpoints from
+// EndpointSlices, load from worker heartbeats over NATS. The admission queue is
+// Phase 7 (docs/roadmap.md).
 //
 // The gateway holds no database credential and imports no database package
 // (docs/repository-structure.md §4, rule 3). Its only hard dependency is the
@@ -28,6 +29,8 @@ import (
 	"github.com/adityasatwar321/nebula/packages/auth"
 	"github.com/adityasatwar321/nebula/packages/config"
 	"github.com/adityasatwar321/nebula/packages/httpx"
+	"github.com/adityasatwar321/nebula/packages/k8s"
+	"github.com/adityasatwar321/nebula/packages/routing"
 	"github.com/adityasatwar321/nebula/packages/telemetry"
 	"github.com/adityasatwar321/nebula/packages/version"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/adminproxy"
@@ -35,6 +38,7 @@ import (
 	"github.com/adityasatwar321/nebula/services/gateway/internal/credentials"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/dispatch"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/ratelimit"
+	"github.com/adityasatwar321/nebula/services/gateway/internal/router"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/routes"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/server"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/usage"
@@ -89,16 +93,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-
-	table := routes.Empty()
-	if cfg.Gateway.RoutesFile != "" {
-		table, err = routes.Load(cfg.Gateway.RoutesFile, time.Now())
-		if err != nil {
-			return err
-		}
-	}
-	logger.Info("route table loaded", slog.Int("routes", table.Len()), slog.String("source", "static"),
-		slog.String("file", cfg.Gateway.RoutesFile))
 
 	var rdb redis.UniversalClient
 	if !cfg.Redis.URL.IsZero() {
@@ -174,24 +168,133 @@ func run() error {
 		})
 	}
 
+	// ROUTING. Three sources feed the router; each is optional and each degrades
+	// to the next rather than failing the gateway (docs/architecture.md §6.2).
+	var heartbeats *router.Heartbeats
+	rtOpts := router.Options{
+		StaleAfter: cfg.Gateway.HeartbeatStaleAfter.Duration(),
+		Breaker: routing.BreakerConfig{Threshold: cfg.Gateway.BreakerThreshold,
+			Cooldown: cfg.Gateway.BreakerCooldown.Duration(), MaxCooldown: 30 * time.Second},
+		Logger: logger,
+	}
+	if cfg.NATS.URL != "" {
+		heartbeats = &router.Heartbeats{URL: cfg.NATS.URL, Logger: logger, Settle: cfg.Gateway.HeartbeatStaleAfter.Duration(),
+			Also: map[string]func([]byte){
+				// A revocation another replica proxied: drop it from this replica's
+				// in-process cache now rather than when its TTL runs out.
+				credentials.RevokedSubject: func(b []byte) { resolver.InvalidateLocal(string(b)) },
+			}}
+		rtOpts.HeartbeatsLive = heartbeats.Live
+	}
+	rt := router.New(rtOpts)
+
+	routeSource := "controlplane"
+	var tables *router.TableSource
+	if cfg.Gateway.RoutesFile != "" {
+		routeSource = "static"
+		table, err := routes.Load(cfg.Gateway.RoutesFile, time.Now())
+		if err != nil {
+			return err
+		}
+		rt.SetTable(table)
+		logger.Info("route table loaded", slog.Int("routes", table.Len()), slog.String("source", routeSource),
+			slog.String("file", cfg.Gateway.RoutesFile))
+	} else {
+		tables = &router.TableSource{
+			Fetch: cp.RoutingTable, NotModified: controlplane.ErrNotModified,
+			Router: rt, Interval: cfg.Gateway.RoutesRefresh.Duration(), Logger: logger,
+		}
+		if rdb != nil {
+			tables.Snapshots = router.RedisSnapshots{Client: rdb, Key: cfg.Redis.KeyPrefix + "routing:snapshot",
+				OpTimeout: cfg.Redis.OpTimeout.Duration()}
+		}
+		go tables.Run(ctx)
+		probes.Register(telemetry.CheckFunc{
+			CheckName: "routing_table", IsCritical: false, CheckTimeout: time.Second,
+			Fn: func(context.Context) error {
+				switch {
+				case !tables.Synced.Load():
+					return errors.New("no routing table yet: the control plane has not answered and there is no snapshot")
+				case tables.FromSnapshot.Load():
+					return errors.New("serving the Redis snapshot: the control plane is unreachable")
+				}
+				return nil
+			},
+		})
+	}
+
+	var slices *router.EndpointSlices
+	if cfg.Gateway.Endpoints == "kubernetes" {
+		restCfg, err := k8s.RestConfig(cfg.Kube.Kubeconfig)
+		if err != nil {
+			return err
+		}
+		kube, err := k8s.NewClient(restCfg, serviceName+"/"+info.Version)
+		if err != nil {
+			return err
+		}
+		slices = &router.EndpointSlices{Client: kube, Namespace: cfg.Kube.WorkloadNamespace, Router: rt,
+			Logger: logger, Resync: 5 * time.Minute}
+		go func() {
+			if err := slices.Run(ctx); err != nil && ctx.Err() == nil {
+				logger.Error("endpoint discovery stopped", slog.String("cause", err.Error()))
+			}
+		}()
+		probes.Register(telemetry.CheckFunc{
+			CheckName: "endpoint_discovery", IsCritical: false, CheckTimeout: time.Second,
+			Fn: func(context.Context) error {
+				if !slices.Synced() {
+					return errors.New("EndpointSlices not synced yet")
+				}
+				return nil
+			},
+		})
+	}
+	if heartbeats != nil {
+		heartbeats.Router = rt
+		go func() {
+			if err := heartbeats.Run(ctx); err != nil && ctx.Err() == nil {
+				logger.Error("heartbeat subscription stopped", slog.String("cause", err.Error()))
+			}
+		}()
+		probes.Register(telemetry.CheckFunc{
+			CheckName: "heartbeats", IsCritical: false, CheckTimeout: time.Second,
+			Fn: func(context.Context) error {
+				if !heartbeats.Live() {
+					return errors.New("not receiving heartbeats: routing on readiness and local observation")
+				}
+				return nil
+			},
+		})
+	}
+
 	proxy := adminproxy.New(adminproxy.Options{
-		Target:     cp.BaseURL(),
-		Signer:     signer,
-		Issuer:     serviceName,
-		Logger:     logger,
-		Invalidate: resolver.Invalidate,
+		Target: cp.BaseURL(),
+		Signer: signer,
+		Issuer: serviceName,
+		Logger: logger,
+		Invalidate: func(ctx context.Context, prefix string) {
+			resolver.Invalidate(ctx, prefix)
+			if heartbeats != nil {
+				if err := heartbeats.Publish(credentials.RevokedSubject, []byte(prefix)); err != nil {
+					logger.Warn("revocation broadcast failed; other replicas evict the key when its local TTL ends",
+						slog.String("cause", err.Error()))
+				}
+			}
+		},
 	})
 
 	handler := server.New(server.Deps{
-		Config:  cfg,
-		Logger:  logger,
-		Probes:  probes,
-		Auth:    resolver,
-		Limiter: limiter,
-		Routes:  table,
-		Workers: dispatch.New(dispatch.Options{}),
-		Proxy:   proxy,
-		Usage:   usage.LogSink{Logger: logger},
+		Config:      cfg,
+		Logger:      logger,
+		Probes:      probes,
+		Auth:        resolver,
+		Limiter:     limiter,
+		Router:      rt,
+		RouteSource: routeSource,
+		Workers:     dispatch.New(dispatch.Options{}),
+		Proxy:       proxy,
+		Usage:       usage.LogSink{Logger: logger},
 	})
 
 	// Streams outlive the server's WriteTimeout by design; the gateway sets a
@@ -207,7 +310,8 @@ func run() error {
 	probes.MarkReady()
 	logger.Info("ready", slog.String("addr", cfg.HTTP.Addr),
 		slog.String("controlplane", cfg.Gateway.ControlPlaneURL),
-		slog.Bool("redis", rdb != nil))
+		slog.Bool("redis", rdb != nil), slog.String("routes", routeSource),
+		slog.String("endpoints", cfg.Gateway.Endpoints), slog.Bool("heartbeats", heartbeats != nil))
 
 	if err := srv.Run(ctx); err != nil {
 		return err

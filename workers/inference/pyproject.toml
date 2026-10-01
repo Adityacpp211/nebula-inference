@@ -16,6 +16,8 @@ dependencies = [
     "httpx>=0.27",
     "prometheus-client>=0.20",
     "pydantic>=2.6",
+    # Heartbeats to the gateway's router. Imported only when NEBULA_NATS_URL is set.
+    "nats-py>=2.6",
 ]
 
 [project.optional-dependencies]

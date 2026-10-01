@@ -138,6 +138,11 @@ spec:
               value: {{ .Release.Namespace | quote }}
             - name: NEBULA_KUBE_STARTING_TIMEOUT
               value: {{ .Values.controller.startingTimeout | quote }}
+            {{- with include "nebula.natsURL" . }}
+            # Passed to worker pods, which publish heartbeats there.
+            - name: NEBULA_NATS_URL
+              value: {{ . | quote }}
+            {{- end }}
             - name: NEBULA_KUBE_WORKER_IMAGE
               value: {{ include "nebula.image" (dict "root" . "name" "workerLlamacpp") }}
             - name: NEBULA_KUBE_MOCK_WORKER_IMAGE

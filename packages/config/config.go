@@ -57,6 +57,7 @@ type Config struct {
 	Limits   LimitsConfig   `json:"limits" yaml:"limits"`
 	Artifact ArtifactConfig `json:"artifact" yaml:"artifact"`
 	Kube     KubeConfig     `json:"kube" yaml:"kube"`
+	NATS     NATSConfig     `json:"nats" yaml:"nats"`
 	Dev      DevConfig      `json:"dev" yaml:"dev"`
 
 	// service is set by the binary, never by configuration.
@@ -181,9 +182,25 @@ type GatewayConfig struct {
 	// ControlPlaneTimeout bounds one call to the control plane.
 	ControlPlaneTimeout Duration `json:"controlplane_timeout" yaml:"controlplane_timeout" env:"NEBULA_GATEWAY_CONTROLPLANE_TIMEOUT" default:"5s"`
 
-	// RoutesFile is the static route table (Phase 4 only; dynamic routing is
-	// Phase 6). YAML or JSON. Empty means no inference routes.
-	RoutesFile string `json:"routes_file" yaml:"routes_file" env:"NEBULA_GATEWAY_ROUTES_FILE" flag:"routes-file" usage:"static route table (YAML or JSON)"`
+	// RoutesFile is a static route table, YAML or JSON, with worker endpoints
+	// written into it: for running without Kubernetes and without a control plane
+	// routing table. Empty (the default) reads routes from the control plane.
+	RoutesFile string `json:"routes_file" yaml:"routes_file" env:"NEBULA_GATEWAY_ROUTES_FILE" flag:"routes-file" usage:"static route table (YAML or JSON); empty reads routes from the control plane"`
+	// RoutesRefresh is how often the routing table is re-read from the control
+	// plane. A route change reaches this gateway within it.
+	RoutesRefresh Duration `json:"routes_refresh" yaml:"routes_refresh" env:"NEBULA_GATEWAY_ROUTES_REFRESH" default:"2s"`
+	// Endpoints is where worker endpoints come from: "static" (the route file) or
+	// "kubernetes" (EndpointSlices in NEBULA_KUBE_WORKLOAD_NAMESPACE).
+	Endpoints string `json:"endpoints" yaml:"endpoints" env:"NEBULA_GATEWAY_ENDPOINTS" default:"static"`
+	// HeartbeatStaleAfter drops an endpoint whose heartbeat is older than this
+	// while heartbeats are flowing: three one-second intervals by default
+	// (docs/architecture.md §6.2).
+	HeartbeatStaleAfter Duration `json:"heartbeat_stale_after" yaml:"heartbeat_stale_after" env:"NEBULA_GATEWAY_HEARTBEAT_STALE_AFTER" default:"3s"`
+	// BreakerThreshold consecutive upstream failures open an endpoint's breaker; a
+	// failure to connect opens it at once. BreakerCooldown is the first opening's
+	// length, doubling on each failed probe up to 30s.
+	BreakerThreshold int      `json:"breaker_threshold" yaml:"breaker_threshold" env:"NEBULA_GATEWAY_BREAKER_THRESHOLD" default:"3"`
+	BreakerCooldown  Duration `json:"breaker_cooldown" yaml:"breaker_cooldown" env:"NEBULA_GATEWAY_BREAKER_COOLDOWN" default:"2s"`
 
 	// DefaultTimeout is a request's budget when neither the client nor the route
 	// sets one. MaxTimeout caps whatever the client asks for.
@@ -272,6 +289,15 @@ type ArtifactConfig struct {
 	// VerifyInterval is how often the registry looks for versions to verify, as a
 	// backstop to the immediate verification finalize starts.
 	VerifyInterval Duration `json:"verify_interval" yaml:"verify_interval" env:"NEBULA_ARTIFACT_VERIFY_INTERVAL" default:"5s"`
+}
+
+// NATSConfig locates the signalling bus (ADR-0007). Worker heartbeats travel on
+// core NATS; nothing durable depends on it yet.
+type NATSConfig struct {
+	// URL is nats://host:port. Empty disables heartbeats: routing then uses
+	// endpoint readiness and local observation only, which is correct but less
+	// informed (docs/events.md §3.1).
+	URL string `json:"url" yaml:"url" env:"NEBULA_NATS_URL" flag:"nats-url" usage:"NATS server URL (empty: no heartbeats)"`
 }
 
 // KubeConfig configures the controller's view of Kubernetes.

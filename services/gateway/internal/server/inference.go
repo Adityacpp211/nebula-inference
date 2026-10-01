@@ -17,6 +17,7 @@ import (
 	"github.com/adityasatwar321/nebula/services/gateway/internal/dispatch"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/openai"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/ratelimit"
+	"github.com/adityasatwar321/nebula/services/gateway/internal/router"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/routes"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/usage"
 )
@@ -38,6 +39,16 @@ type exchange struct {
 	ident   auth.Identity
 	id      string // response id: chatcmpl-<request id> or cmpl-<request id>
 	timing  *dispatch.Timing
+
+	// sel is the endpoint of the current attempt; placement is what selected it.
+	sel       *router.Selection
+	placement router.Request
+	attempts  int
+	// verdict is what this request says about the endpoint's health, reported to
+	// the router when the request finishes.
+	verdict router.Outcome
+	// degraded names a degradation the response carries (a failover route).
+	degraded string
 
 	// record is filled as the request progresses and emitted exactly once.
 	record usage.Record
@@ -89,7 +100,7 @@ func (g *Gateway) prepare(w http.ResponseWriter, r *http.Request, kind openai.Ki
 	}
 
 	// RESOLVE. A route in another org is reported exactly as a missing one.
-	route, ok := g.d.Routes.Lookup(ident.OrgSlug, req.Model)
+	route, ok := g.d.Router.Table().Lookup(ident.OrgSlug, req.Model)
 	if !ok {
 		return nil, &httpx.APIError{
 			Status:  http.StatusNotFound,
@@ -147,13 +158,27 @@ func (g *Gateway) prepare(w http.ResponseWriter, r *http.Request, kind openai.Ki
 	}
 	deadline := started.Add(timeout)
 
+	// SELECT, before admission: a request nothing can serve is refused without
+	// being charged to the caller's limits.
 	requestID := telemetry.RequestID(ctx)
-	target, err := route.Pick(requestID, req.Nebula.DeploymentID)
-	if err != nil {
-		return nil, httpx.ErrInvalidRequest(
-			fmt.Sprintf("nebula.deployment_id %q is not a deployment of %s", req.Nebula.DeploymentID, route.Model),
-			"deployment_not_in_route", "nebula.deployment_id")
+	placement := router.Request{
+		Key:             requestID,
+		Pin:             req.Nebula.DeploymentID,
+		RequiredContext: (len(prompt)+openai.MaxBytesPerToken-1)/openai.MaxBytesPerToken + *req.MaxTokens,
+		Exclude:         map[string]bool{},
 	}
+	sel, degraded, err := g.place(ident.OrgSlug, route, placement)
+	if err != nil {
+		if errors.Is(err, router.ErrNoTarget) {
+			return nil, httpx.ErrInvalidRequest(
+				fmt.Sprintf("nebula.deployment_id %q is not a deployment of %s", req.Nebula.DeploymentID, route.Model),
+				"deployment_not_in_route", "nebula.deployment_id")
+		}
+		g.logger(ctx).WarnContext(ctx, "no endpoint can serve the request", slog.String("cause", err.Error()))
+		w.Header().Set("Retry-After", "1")
+		return nil, noHealthyEndpoint(err)
+	}
+	route, target := sel.Route, sel.Target
 
 	// ADMIT. The reservation is an upper bound on what this request can consume:
 	// every token covers at least one byte of prompt, plus the completion's ceiling,
@@ -161,6 +186,7 @@ func (g *Gateway) prepare(w http.ResponseWriter, r *http.Request, kind openai.Ki
 	reserve := len(prompt) + *req.MaxTokens + 8
 	lease, err := g.admit(w, r, reserve, timeout+time.Minute, false)
 	if err != nil {
+		sel.Done(router.Abandoned)
 		return nil, err
 	}
 
@@ -184,8 +210,14 @@ func (g *Gateway) prepare(w http.ResponseWriter, r *http.Request, kind openai.Ki
 		reserve: reserve,
 		started: started,
 		ident:   ident,
+
+		sel:       sel,
+		placement: placement,
+		attempts:  1,
+		verdict:   router.Succeeded,
+		degraded:  degraded,
 		call: dispatch.Call{
-			Endpoint:     target.Endpoint(),
+			Endpoint:     sel.URL,
 			RequestID:    requestID,
 			Traceparent:  traceparent,
 			Deadline:     deadline,
@@ -293,7 +325,7 @@ func (g *Gateway) generate(w http.ResponseWriter, r *http.Request, ex *exchange)
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		res, err := g.d.Workers.Generate(wctx, ex.call)
+		res, err := g.generateOnce(wctx, ex)
 		done <- outcome{res, err}
 	}()
 
@@ -313,10 +345,12 @@ func (g *Gateway) generate(w http.ResponseWriter, r *http.Request, ex *exchange)
 		ex.absorb(out.res)
 		ex.record.StatusCode = StatusClientClosedRequest
 		ex.record.Outcome = usage.OutcomeClientCancelled
+		ex.verdict = router.Abandoned
 		return
 	}
 
 	if out.err != nil {
+		ex.verdict = verdictOf(out.err)
 		apiErr := g.workerError(w, ctx, out.err)
 		ex.record.StatusCode = apiErr.Status
 		ex.record.ErrorClass = string(apiErr.Type)
@@ -339,6 +373,7 @@ func (g *Gateway) generate(w http.ResponseWriter, r *http.Request, ex *exchange)
 		ex.record.Outcome = usage.OutcomeFailed
 		ex.record.StatusCode = http.StatusBadGateway
 		ex.record.ErrorClass = string(httpx.TypeUpstream)
+		ex.verdict = router.Failed
 		g.fail(w, r, (&httpx.APIError{
 			Status: http.StatusBadGateway, Type: httpx.TypeUpstream, Code: "generation_failed",
 			Message: "the model runtime could not complete the generation",
@@ -401,6 +436,9 @@ func (ex *exchange) absorbFinal(u *dispatch.Usage, t *dispatch.Timing, rt *dispa
 	if t != nil {
 		ex.record.QueueWait = t.QueueMS
 		ex.record.TTFT = t.TTFTMS
+		if t.TTFTMS != nil && ex.sel != nil {
+			ex.sel.FirstToken(time.Duration(*t.TTFTMS) * time.Millisecond)
+		}
 		if t.PrefillMS != nil && t.DecodeMS != nil {
 			c := *t.PrefillMS + *t.DecodeMS
 			ex.record.ComputeMS = &c
@@ -422,7 +460,8 @@ func (ex *exchange) meta(now time.Time) *openai.Meta {
 		ModelVersion: ex.target.ModelVersion,
 		Variant:      ex.target.Label,
 		DurationMS:   &d,
-		Attempts:     1,
+		Attempts:     ex.attempts,
+		Degraded:     ex.degraded,
 		Runtime:      ex.record.Runtime,
 		QueueWaitMS:  ex.record.QueueWait,
 		TTFTMS:       ex.record.TTFT,
@@ -443,6 +482,9 @@ const (
 	HeaderDeployment   = "X-Nebula-Deployment"
 	HeaderModelVersion = "X-Nebula-Model-Version"
 	HeaderVariant      = "X-Nebula-Variant"
+	// HeaderDegraded names a degradation that served this response, such as
+	// "failover:<route>". Absent when nothing was degraded.
+	HeaderDegraded = "X-Nebula-Degraded"
 )
 
 func setRoutingHeaders(h http.Header, ex *exchange) {
@@ -451,6 +493,9 @@ func setRoutingHeaders(h http.Header, ex *exchange) {
 	h.Set(HeaderModelVersion, ex.target.ModelVersion)
 	if ex.target.Label != "" {
 		h.Set(HeaderVariant, ex.target.Label)
+	}
+	if ex.degraded != "" {
+		h.Set(HeaderDegraded, ex.degraded)
 	}
 }
 
@@ -474,7 +519,99 @@ func (g *Gateway) finish(ctx context.Context, ex *exchange) {
 		actual = *ex.record.PromptTokens + *ex.record.CompletionTokens
 	}
 	ex.lease.Release(ctx, actual)
+	ex.record.Attempts = ex.attempts
+	if ex.sel != nil {
+		ex.sel.Done(ex.verdict)
+	}
 	g.d.Usage.Emit(context.WithoutCancel(ctx), ex.record)
+}
+
+// place selects an endpoint for a route, following a failover policy to its
+// fallback route when the route itself has nothing eligible. It returns the
+// degradation to report, if any.
+func (g *Gateway) place(org string, route *routes.Route, req router.Request) (*router.Selection, string, error) {
+	sel, err := g.d.Router.Select(route, req)
+	if err == nil {
+		return sel, "", nil
+	}
+	var none *router.NoEndpointError
+	fallback := route.Policy.Fallback()
+	if !errors.As(err, &none) || fallback == "" || req.Pin != "" {
+		return nil, "", err
+	}
+	alt, ok := g.d.Router.Table().Lookup(org, fallback)
+	if !ok || alt.Task != route.Task {
+		return nil, "", err
+	}
+	sel, ferr := g.d.Router.Select(alt, req)
+	if ferr != nil {
+		return nil, "", err
+	}
+	return sel, "failover:" + alt.Model, nil
+}
+
+// maxAttempts bounds how many replicas one request is offered to. Only failures
+// before any work started are retried (dispatch.Error.BeforeWork), so an attempt
+// never generates twice.
+const maxAttempts = 3
+
+// replace moves the exchange to another endpoint after a before-work failure,
+// reporting the failed one to the router. It returns false when there is none.
+func (g *Gateway) replace(ex *exchange, cause error) bool {
+	var we *dispatch.Error
+	if !errors.As(cause, &we) || !we.BeforeWork() || ex.attempts >= maxAttempts || ex.placement.Pin != "" {
+		return false
+	}
+	ex.placement.Exclude[ex.sel.EndpointID] = true
+	sel, err := g.d.Router.Select(ex.route, ex.placement)
+	if err != nil {
+		// Nothing else is eligible: the original failure stands, and finish()
+		// reports it against the endpoint that failed.
+		return false
+	}
+	ex.sel.Done(verdictOf(cause))
+	ex.sel, ex.target = sel, sel.Target
+	ex.call.Endpoint, ex.call.ModelVersion = sel.URL, sel.Target.ModelVersion
+	ex.attempts++
+	ex.record.Deployment, ex.record.DeploymentID = sel.Target.Deployment, sel.Target.DeploymentID
+	ex.record.ModelVersion, ex.record.Variant = sel.Target.ModelVersion, sel.Target.Label
+	return true
+}
+
+// generateOnce performs a non-streamed generation, moving to another replica
+// when the chosen one fails before starting work.
+func (g *Gateway) generateOnce(ctx context.Context, ex *exchange) (*dispatch.Result, error) {
+	for {
+		res, err := g.d.Workers.Generate(ctx, ex.call)
+		if err == nil || ctx.Err() != nil || !g.replace(ex, err) {
+			return res, err
+		}
+	}
+}
+
+// verdictOf classifies a dispatch failure for the endpoint's breaker.
+func verdictOf(err error) router.Outcome {
+	var we *dispatch.Error
+	switch {
+	case !errors.As(err, &we):
+		return router.Abandoned
+	case we.Unreachable():
+		return router.Unreachable
+	case we.BeforeWork():
+		return router.Refused
+	case we.Status >= 500 || we.Transport != nil || we.MidStream:
+		return router.Failed
+	}
+	return router.Abandoned
+}
+
+// noHealthyEndpoint is the 503 for a request nothing can serve right now.
+func noHealthyEndpoint(cause error) *httpx.APIError {
+	return (&httpx.APIError{
+		Status: http.StatusServiceUnavailable, Type: httpx.TypeServiceUnavailable, Code: "no_healthy_endpoint",
+		Message: "no replica of this model is ready right now; retry shortly",
+		Reason:  "no_healthy_endpoint",
+	}).WithInternal(cause)
 }
 
 // workerError maps a dispatch failure that happened before any byte reached the

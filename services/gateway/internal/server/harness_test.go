@@ -19,6 +19,7 @@ import (
 	"github.com/adityasatwar321/nebula/packages/config"
 	"github.com/adityasatwar321/nebula/packages/db/models"
 	"github.com/adityasatwar321/nebula/packages/httpx"
+	"github.com/adityasatwar321/nebula/packages/routing"
 	"github.com/adityasatwar321/nebula/packages/telemetry"
 	"github.com/adityasatwar321/nebula/packages/testsupport/netx"
 	"github.com/adityasatwar321/nebula/packages/version"
@@ -27,6 +28,7 @@ import (
 	"github.com/adityasatwar321/nebula/services/gateway/internal/credentials"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/dispatch"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/ratelimit"
+	"github.com/adityasatwar321/nebula/services/gateway/internal/router"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/routes"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/server"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/usage"
@@ -209,6 +211,7 @@ type harness struct {
 	signer      *auth.ContextSigner
 	auth        fakeAuth
 	invalidated []string
+	router      *router.Router
 }
 
 type option func(*config.Config)
@@ -263,6 +266,9 @@ func newHarness(t *testing.T, opts ...option) *harness {
 		keyTight:   tight,
 	}
 
+	h.router = router.New(router.Options{Breaker: routing.BreakerConfig{Threshold: 1000, Cooldown: time.Millisecond}})
+	h.router.SetTable(tbl)
+
 	h.signer, _ = auth.NewContextSigner(internalSecret, 10*time.Second, nil)
 	h.cp = newFakeControlPlane(t, h.signer)
 	logger := telemetry.Discard()
@@ -276,7 +282,7 @@ func newHarness(t *testing.T, opts ...option) *harness {
 	handler := server.New(server.Deps{
 		Config: cfg, Logger: logger, Probes: probes, Auth: h.auth,
 		Limiter: ratelimit.New(ratelimit.Options{FallbackFraction: 1}),
-		Routes:  tbl, Workers: dispatch.New(dispatch.Options{}), Proxy: proxy, Usage: h.usage,
+		Router:  h.router, Workers: dispatch.New(dispatch.Options{}), Proxy: proxy, Usage: h.usage,
 	})
 	h.gw = netx.NewServer(t, handler)
 	return h

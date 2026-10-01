@@ -27,19 +27,15 @@ gateway:
   service:
     type: NodePort
     nodePort: 30080
-  routes:
-    - model: nebula-mock
-      org: dev
-      context_window: 4096
-      chat_template: plain
-      default_max_tokens: 32
-      capabilities: {streaming: true}
-      targets:
-        - deployment: mock-demo
-          model_version: "mock-model:v1"
-          weight: 100
-          label: baseline
-          endpoints: ["http://nebula-dev-mock-demo.nebula-workloads:8090"]
+  # No static routes: routes come from the control plane (POST /v1/routes) and
+  # endpoints from EndpointSlices, as on any cluster.
+  routes: []
+  # The kind demos drive a few thousand requests a minute through one key.
+  limits:
+    key_rpm: "20000"
+    key_tpm: "5000000"
+    org_rpm: "100000"
+    org_tpm: "50000000"
 
 controlplane:
   replicas: 1

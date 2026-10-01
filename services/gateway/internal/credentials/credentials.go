@@ -20,9 +20,10 @@
 //     A key the gateway has never seen cannot be verified and gets a 503 — failing
 //     closed, never open.
 //
-// Other replicas' in-process entries are not reached by a revocation until their
-// short TTL passes; the NATS invalidation broadcast of Phase 6 closes that window.
-// TODO(NEB-143).
+// A revocation made through one replica's admin proxy is broadcast to the others
+// over NATS (RevokedSubject), which evict it from their in-process tier at once.
+// Without NATS, or for a revocation made directly at the control plane, other
+// replicas' in-process entries last until their short TTL passes.
 //
 // A cache hit never decides whether a secret is right: the stored hash is verified
 // on every request. The cache only decides whether the record must be re-read.
@@ -160,9 +161,15 @@ func (r *Resolver) record(ctx context.Context, prefix string) (*controlplane.Cre
 		}
 	}
 
-	if cred := r.fromRedis(ctx, prefix); cred != nil {
-		r.store(prefix, &entry{cred: cred, fetched: now})
-		return cred, false, false, nil
+	// The shared tier keeps a record for its TTL plus the stale grace. Within the
+	// TTL it is simply used; past it, only as a fallback when the control plane
+	// cannot answer — which is what lets a replica that restarts during a
+	// control-plane outage keep authenticating keys it has never seen itself
+	// (axiom A8), with the same hard cap as the in-process tier.
+	shared, sharedAt := r.fromRedis(ctx, prefix)
+	if shared != nil && now.Sub(sharedAt) < r.o.RedisTTL {
+		r.store(prefix, &entry{cred: shared, fetched: now})
+		return shared, false, false, nil
 	}
 
 	// One control-plane call per prefix at a time, however many requests are
@@ -191,6 +198,15 @@ func (r *Resolver) record(ctx context.Context, prefix string) (*controlplane.Cre
 				slog.Duration("age", now.Sub(e.fetched)),
 				slog.String("cause", err.Error()))
 			return e.cred, false, true, nil
+		}
+		if shared != nil && now.Sub(sharedAt) < r.o.RedisTTL+r.o.StaleGrace {
+			r.o.Logger.WarnContext(ctx, "serving a shared cached credential past its TTL: the control plane is unreachable",
+				slog.String("key_prefix", prefix),
+				slog.Duration("age", now.Sub(sharedAt)),
+				slog.String("cause", err.Error()))
+			// Kept locally with its original age, so the grace stays bounded.
+			r.store(prefix, &entry{cred: shared, fetched: sharedAt.Add(r.o.RedisTTL - r.o.LocalTTL)})
+			return shared, false, true, nil
 		}
 		r.o.Logger.ErrorContext(ctx, "cannot verify a credential: the control plane is unreachable",
 			slog.String("key_prefix", prefix), slog.String("cause", err.Error()))
@@ -223,11 +239,29 @@ func (r *Resolver) Invalidate(ctx context.Context, prefix string) {
 	}
 }
 
+// RevokedSubject carries a revoked key's prefix between gateway replicas.
+const RevokedSubject = "nebula.gateway.credentials.revoked"
+
+// InvalidateLocal drops a key from this replica's in-process tier only: the
+// receiving end of the broadcast, where the shared tier is already evicted.
+func (r *Resolver) InvalidateLocal(prefix string) {
+	r.mu.Lock()
+	delete(r.entries, prefix)
+	r.mu.Unlock()
+}
+
 func (r *Resolver) redisKey(prefix string) string { return r.o.RedisPrefix + "cred:" + prefix }
 
-func (r *Resolver) fromRedis(ctx context.Context, prefix string) *controlplane.Credential {
+// sharedRecord is the shared tier's value: the record and when it was fetched
+// from the control plane.
+type sharedRecord struct {
+	FetchedAtMS int64                    `json:"fetched_at_ms"`
+	Cred        *controlplane.Credential `json:"cred"`
+}
+
+func (r *Resolver) fromRedis(ctx context.Context, prefix string) (*controlplane.Credential, time.Time) {
 	if r.o.Redis == nil {
-		return nil
+		return nil, time.Time{}
 	}
 	ctx, cancel := context.WithTimeout(ctx, r.o.OpTimeout)
 	defer cancel()
@@ -237,26 +271,26 @@ func (r *Resolver) fromRedis(ctx context.Context, prefix string) *controlplane.C
 			r.o.Logger.DebugContext(ctx, "credential cache read failed; falling through to the control plane",
 				slog.String("cause", err.Error()))
 		}
-		return nil
+		return nil, time.Time{}
 	}
-	var cred controlplane.Credential
-	if err := json.Unmarshal(b, &cred); err != nil || cred.Prefix != prefix {
-		return nil
+	var rec sharedRecord
+	if err := json.Unmarshal(b, &rec); err != nil || rec.Cred == nil || rec.Cred.Prefix != prefix {
+		return nil, time.Time{}
 	}
-	return &cred
+	return rec.Cred, time.UnixMilli(rec.FetchedAtMS)
 }
 
 func (r *Resolver) toRedis(ctx context.Context, prefix string, cred *controlplane.Credential) {
 	if r.o.Redis == nil {
 		return
 	}
-	b, err := json.Marshal(cred)
+	b, err := json.Marshal(sharedRecord{FetchedAtMS: r.o.Now().UnixMilli(), Cred: cred})
 	if err != nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.o.OpTimeout)
 	defer cancel()
-	if err := r.o.Redis.Set(ctx, r.redisKey(prefix), b, r.o.RedisTTL).Err(); err != nil {
+	if err := r.o.Redis.Set(ctx, r.redisKey(prefix), b, r.o.RedisTTL+r.o.StaleGrace).Err(); err != nil {
 		r.o.Logger.DebugContext(ctx, "credential cache write failed", slog.String("cause", err.Error()))
 	}
 }

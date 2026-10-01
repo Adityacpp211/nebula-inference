@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 from .cancel import CancelRegistry
 from .config import WorkerConfig
 from .deadline import DeadlineError, budget_for, parse_deadline
+from .heartbeat import HeartbeatPublisher
 from .queue import AdmissionQueue, DeadlineUnreachable, QueueFull
 from .runtimes import build as build_runtime
 from .runtimes.base import (
@@ -174,6 +175,58 @@ class Worker:
         # allowed and what the adapter declares, because either being exceeded is a
         # different kind of failure and neither is worth discovering under load.
         self.queue: AdmissionQueue | None = None
+        #: Smoothed load signals for heartbeats, in the worker's own measurements.
+        self.ttft_ms_ewma = 0.0
+        self.tokens_per_second_ewma = 0.0
+        self.heartbeat: HeartbeatPublisher | None = None
+        self._heartbeat_task: asyncio.Task[None] | None = None
+
+    def set_draining(self, *, release_waiters: bool = True) -> bool:
+        """Stop accepting work, and say so on the heartbeat at once.
+
+        ``release_waiters`` also fails requests still queued for a slot. The SIGTERM
+        path keeps them: they are served during the drain delay.
+
+        Returns whether the worker was already draining.
+        """
+        was = self.draining
+        self.draining = True
+        self.metrics.draining.set(1)
+        if release_waiters and self.queue is not None:
+            self.queue.drain_waiters()
+        if self.heartbeat is not None:
+            self.heartbeat.kick()
+        return was
+
+    def observe_timing(self, ttft_ms: float | None, tokens: int, decode_ms: float | None) -> None:
+        alpha = 0.2
+        if ttft_ms:
+            self.ttft_ms_ewma = (
+                ttft_ms
+                if not self.ttft_ms_ewma
+                else alpha * ttft_ms + (1 - alpha) * self.ttft_ms_ewma
+            )
+        if decode_ms and tokens > 0:
+            tps = tokens / (decode_ms / 1000)
+            self.tokens_per_second_ewma = (
+                tps
+                if not self.tokens_per_second_ewma
+                else alpha * tps + (1 - alpha) * self.tokens_per_second_ewma
+            )
+
+    def start_heartbeats(self) -> None:
+        if not self.config.nats_url or self.heartbeat is not None:
+            return
+        self.heartbeat = HeartbeatPublisher(self)
+        self._heartbeat_task = asyncio.get_running_loop().create_task(self.heartbeat.run())
+
+    async def stop_heartbeats(self) -> None:
+        if self.heartbeat is not None:
+            await self.heartbeat.close()
+        if self._heartbeat_task is not None:
+            self._heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._heartbeat_task
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -218,8 +271,7 @@ class Worker:
         unload. Unloading first would leave callers blocked on an iterator that has
         gone away.
         """
-        self.draining = True
-        self.metrics.draining.set(1)
+        self.set_draining(release_waiters=False)
         if self.queue is not None:
             woken = self.queue.drain_waiters()
             if woken:
@@ -234,6 +286,7 @@ class Worker:
         deadline = time.monotonic() + self.config.shutdown_grace_s
         while self.cancels and time.monotonic() < deadline:  # noqa: ASYNC110
             await asyncio.sleep(0.05)
+        await self.stop_heartbeats()
         await self.runtime.unload()
         self.log.info("engine unloaded")
 
@@ -402,6 +455,7 @@ def create_app(config: WorkerConfig, runtime: InferenceRuntime | None = None) ->
         # The model is loaded before the server reports ready, so Kubernetes never
         # routes traffic to a replica that would answer 503.
         await worker.load()
+        worker.start_heartbeats()
         try:
             yield
         finally:
@@ -567,11 +621,7 @@ def create_app(config: WorkerConfig, runtime: InferenceRuntime | None = None) ->
         Called from a preStop hook. Idempotent, because a preStop hook that runs twice
         must not be a second kind of event.
         """
-        was = worker.draining
-        worker.draining = True
-        worker.metrics.draining.set(1)
-        if worker.queue is not None:
-            worker.queue.drain_waiters()
+        was = worker.set_draining()
         return JSONResponse(
             content={
                 "draining": True,
@@ -736,6 +786,9 @@ def create_app(config: WorkerConfig, runtime: InferenceRuntime | None = None) ->
             worker.metrics.tokens_prompt_total.inc(chunk.usage.prompt_tokens)
         if chunk is not None and chunk.timing is not None and chunk.timing.ttft_ms:
             worker.metrics.ttft.observe(chunk.timing.ttft_ms / 1000)
+        if chunk is not None and chunk.timing is not None and outcome == "ok":
+            tokens = chunk.usage.completion_tokens if chunk.usage is not None else 0
+            worker.observe_timing(chunk.timing.ttft_ms, tokens, chunk.timing.decode_ms)
         if outcome == "cancelled":
             worker.metrics.cancellations_total.inc()
         elif outcome == "deadline":

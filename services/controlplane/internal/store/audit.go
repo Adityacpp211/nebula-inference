@@ -65,6 +65,10 @@ const (
 	ActionDeploymentStart      = "deployment.start"
 	ActionDeploymentTransition = "deployment.transition"
 	ActionDeploymentDelete     = "deployment.delete"
+
+	ActionRouteCreate = "route.create"
+	ActionRouteUpdate = "route.update"
+	ActionRouteDelete = "route.delete"
 )
 
 // Audit resource types.
@@ -75,6 +79,7 @@ const (
 	ResourceModel        = "model"
 	ResourceModelVersion = "model_version"
 	ResourceDeployment   = "deployment"
+	ResourceRoute        = "route"
 )
 
 // Entry is one audit record.

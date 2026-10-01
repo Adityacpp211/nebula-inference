@@ -51,14 +51,16 @@ tags:
   - name: inference
     description: |
       OpenAI-compatible, served by the gateway. `model` names a route, not a
-      deployment. In Phase 4 routes come from a static table on the gateway;
-      dynamic routing from the control plane is Phase 6.
+      deployment. Routes are managed under `routing` and served from every
+      gateway's copy of the routing table.
   - name: identity
     description: Who the caller is, plus users and credentials.
   - name: registry
     description: Models and their immutable versions.
   - name: deployments
     description: Deployment records and the deployment state machine.
+  - name: routing
+    description: Routes (public model names), their weighted targets, and routing policies.
   - name: audit
     description: The append-only record of every change.
   - name: meta
@@ -1001,6 +1003,119 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
 
+  /v1/routes:
+    get:
+      tags: [routing]
+      operationId: listRoutes
+      summary: List the organization's routes.
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: A page of routes.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Route" }
+    post:
+      tags: [routing]
+      operationId: createRoute
+      summary: Create a route (a public model name) over weighted deployments.
+      description: |
+        `model_name` is what clients put in `"model"`. Target weights must total
+        exactly 100; a route that totals less would silently drop traffic, so it is
+        refused here and again by the database at commit. All targets must serve the
+        same task. Gateways pick the route up within their refresh interval.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateRouteRequest" }
+      responses:
+        "201":
+          description: The route.
+          headers:
+            Location: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Route" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /v1/routes/{route_id}:
+    parameters:
+      - name: route_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [routing]
+      operationId: getRoute
+      summary: One route with its targets and their deployments' states.
+      responses:
+        "200":
+          description: The route.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Route" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [routing]
+      operationId: updateRoute
+      summary: Replace the targets (weights) and/or the routing policy, atomically.
+      description: |
+        `targets` is always the complete set, never a delta, so the result never
+        depends on what another writer did in between. `routing_policy: null`
+        returns the route to the default policy.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateRouteRequest" }
+      responses:
+        "200":
+          description: The updated route.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Route" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+    delete:
+      tags: [routing]
+      operationId: deleteRoute
+      summary: Delete a route. Its model name stops resolving on every gateway.
+      responses:
+        "204": { description: Deleted. }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/policies/routing:
+    get:
+      tags: [routing]
+      operationId: listRoutingPolicies
+      summary: The routing policies this organization can use, built-ins first.
+      responses:
+        "200":
+          description: The policies.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/RoutingPolicy" }
+
   /v1/audit-logs:
     get:
       tags: [audit]
@@ -1428,6 +1543,82 @@ components:
             param: { type: string }
             request_id: { type: string }
 
+    RouteTargetRequest:
+      type: object
+      additionalProperties: false
+      required: [weight]
+      description: Exactly one of `deployment_id` or `deployment` (the name).
+      properties:
+        deployment_id: { type: string, format: uuid }
+        deployment: { type: string }
+        weight: { type: integer, minimum: 0, maximum: 100 }
+        label: { type: string, maxLength: 64, examples: ["baseline", "canary"] }
+        is_baseline: { type: boolean }
+    CreateRouteRequest:
+      type: object
+      additionalProperties: false
+      required: [model_name, targets]
+      properties:
+        model_name: { type: string, examples: ["qwen2.5-chat"] }
+        routing_policy:
+          type: string
+          description: A policy name; omit for the default.
+          examples: ["least-loaded"]
+        targets:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/RouteTargetRequest" }
+    UpdateRouteRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        routing_policy: { type: [string, "null"] }
+        targets:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/RouteTargetRequest" }
+    Route:
+      type: object
+      required: [id, object, model_name, routing_policy, targets, created_at, updated_at, note]
+      properties:
+        id: { type: string, format: uuid }
+        object: { type: string, const: route }
+        model_name: { type: string }
+        routing_policy:
+          oneOf:
+            - type: "null"
+            - type: object
+              properties:
+                id: { type: string, format: uuid }
+                name: { type: string }
+                strategy: { type: string }
+        targets:
+          type: array
+          items:
+            type: object
+            properties:
+              deployment_id: { type: string, format: uuid }
+              deployment: { type: string }
+              model_version_id: { type: string, format: uuid }
+              model_version: { type: string }
+              weight: { type: integer }
+              label: { type: [string, "null"] }
+              is_baseline: { type: boolean }
+              state: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        note: { type: string }
+    RoutingPolicy:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        strategy:
+          type: string
+          examples: [least_loaded, round_robin, latency_aware, capability_based, failover, cost_aware]
+        config: { type: object }
+        is_default: { type: boolean }
+        built_in: { type: boolean }
     Page:
       type: object
       required: [data, next_cursor, has_more]

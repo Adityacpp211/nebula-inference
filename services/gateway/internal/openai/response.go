@@ -30,6 +30,9 @@ type Meta struct {
 	DurationMS      *int64   `json:"duration_ms,omitempty"`
 	TokensPerSecond *float64 `json:"tokens_per_second,omitempty"`
 	Attempts        int      `json:"attempts,omitempty"`
+	// Degraded names a degradation that served the response, such as a failover
+	// to another route. Absent when none did.
+	Degraded string `json:"degraded,omitempty"`
 	// Runtime names the engine that produced the tokens, so a response from the
 	// declared mock stub can never be mistaken for a real model's.
 	Runtime string `json:"runtime,omitempty"`
@@ -119,6 +122,10 @@ type ModelTarget struct {
 	ModelVersion string `json:"model_version"`
 	Weight       int    `json:"weight"`
 	Label        string `json:"label,omitempty"`
+	// State is the deployment's lifecycle state; ReadyEndpoints counts the
+	// replicas this gateway could send a request to right now.
+	State          string `json:"state,omitempty"`
+	ReadyEndpoints int    `json:"ready_endpoints"`
 }
 
 // ModelExtension is the nebula block on a model entry.
@@ -129,8 +136,8 @@ type ModelExtension struct {
 	Targets       []ModelTarget `json:"targets"`
 	Streaming     bool          `json:"streaming"`
 	Embeddings    bool          `json:"embeddings"`
-	// Source says where the route came from. "static" until Phase 6 reads routes
-	// from the control plane; stated so nobody mistakes a file for the registry.
+	// Source says where the route came from: "controlplane", or "static" for a
+	// route file, stated so nobody mistakes a file for the registry.
 	Source string `json:"source"`
 }
 

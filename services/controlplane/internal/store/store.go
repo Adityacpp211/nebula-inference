@@ -51,6 +51,8 @@ type Store struct {
 	Models        *ModelRepo
 	Versions      *ModelVersionRepo
 	Deployments   *DeploymentRepo
+	Routes        *RouteRepo
+	Policies      *RoutingPolicyRepo
 	Audit         *AuditRepo
 }
 
@@ -66,6 +68,8 @@ func New(pool *db.Pool) *Store {
 		Models:        &ModelRepo{},
 		Versions:      &ModelVersionRepo{},
 		Deployments:   &DeploymentRepo{},
+		Routes:        &RouteRepo{},
+		Policies:      &RoutingPolicyRepo{},
 		Audit:         &AuditRepo{},
 	}
 }
@@ -210,6 +214,14 @@ func constraintDescription(name string) string {
 		return "replica counts must satisfy min <= desired <= max"
 	case "ck_deployments__delete_only_when_resting":
 		return "a deployment must be stopped before it can be deleted"
+	case "uq_routes__org_model_name":
+		return "a route with that model name already exists in this organization"
+	case "uq_route_targets__route_dep":
+		return "a deployment may appear only once in a route"
+	case "uq_route_targets__one_baseline":
+		return "a route may have only one baseline target"
+	case "ck_routes__model_name_format":
+		return "model_name must be letters, digits, dots, dashes, colons or underscores"
 	case "ck_model_versions__ready_fields":
 		return "a ready model version must record when it became ready"
 	case "":

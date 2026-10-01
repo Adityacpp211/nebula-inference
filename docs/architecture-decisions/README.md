@@ -47,7 +47,8 @@ Status values: `Proposed` · `Accepted` · `Rejected` · `Superseded` · `Deprec
 | [0030](./0030-gateway-credentials-through-the-control-plane.md) | The gateway resolves credentials through the control plane, and verifies them itself | Accepted | 4 |
 | [0031](./0031-artifacts-verified-asynchronously.md) | Artifacts are verified asynchronously, from the stored bytes | Accepted | 5 |
 | [0032](./0032-controller-reconciles-from-postgres.md) | The controller reconciles from PostgreSQL with server-side apply | Accepted | 5 |
-| 0033+ | reserved — written in the phase that makes the decision | — | — |
+| [0033](./0033-router-state-and-before-work-retries.md) | Router state: gateways snapshot it themselves, and re-place only before work starts | Accepted | 6 |
+| 0034+ | reserved — written in the phase that makes the decision | — | — |
 
 ADRs 0001, 0003, 0004, 0005, 0006, 0025 and 0027 have full files because their reasoning is long and they are the
 ones a reviewer is most likely to challenge. The rest are recorded below in full-enough form to be

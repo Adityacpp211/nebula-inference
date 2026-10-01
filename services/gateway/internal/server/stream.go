@@ -12,6 +12,7 @@ import (
 	"github.com/adityasatwar321/nebula/packages/httpx"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/dispatch"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/openai"
+	"github.com/adityasatwar321/nebula/services/gateway/internal/router"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/usage"
 )
 
@@ -43,13 +44,22 @@ func (g *Gateway) stream(w http.ResponseWriter, r *http.Request, ex *exchange) {
 	wctx, wcancel := g.workerContext(ctx, ex)
 	defer wcancel()
 
-	st, err := g.d.Workers.Stream(wctx, ex.call)
+	var st *dispatch.Stream
+	var err error
+	for {
+		st, err = g.d.Workers.Stream(wctx, ex.call)
+		if err == nil || ctx.Err() != nil || !g.replace(ex, err) {
+			break
+		}
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			ex.record.StatusCode = StatusClientClosedRequest
 			ex.record.Outcome = usage.OutcomeClientCancelled
+			ex.verdict = router.Abandoned
 			return
 		}
+		ex.verdict = verdictOf(err)
 		apiErr := g.workerError(w, ctx, err)
 		ex.record.StatusCode = apiErr.Status
 		ex.record.ErrorClass = string(apiErr.Type)
@@ -92,6 +102,7 @@ func (g *Gateway) stream(w http.ResponseWriter, r *http.Request, ex *exchange) {
 		g.drainAfterDisconnect(ctx, ex, events)
 		ex.record.StatusCode = StatusClientClosedRequest
 		ex.record.Outcome = usage.OutcomeClientCancelled
+		ex.verdict = router.Abandoned
 	}
 
 	meta := openai.Meta{
@@ -100,7 +111,8 @@ func (g *Gateway) stream(w http.ResponseWriter, r *http.Request, ex *exchange) {
 		Deployment:   ex.target.Deployment,
 		ModelVersion: ex.target.ModelVersion,
 		Variant:      ex.target.Label,
-		Attempts:     1,
+		Attempts:     ex.attempts,
+		Degraded:     ex.degraded,
 	}
 	if err := sw.metaComment(meta); err != nil {
 		clientGone()
@@ -225,6 +237,7 @@ func (g *Gateway) completeStream(sw *sseWriter, ex *exchange, created int64, rea
 // then [DONE], and no finish_reason.
 func (g *Gateway) interrupted(ctx context.Context, sw *sseWriter, ex *exchange, cause error) {
 	g.logger(ctx).WarnContext(ctx, "stream interrupted", slog.String("cause", cause.Error()))
+	ex.verdict = router.Failed
 	ex.record.Outcome = usage.OutcomeStreamInterrupted
 	ex.record.ErrorClass = string(httpx.TypeUpstream)
 	_ = sw.data(openai.StreamError{Error: openai.StreamErrorBody{

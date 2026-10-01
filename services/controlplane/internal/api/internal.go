@@ -75,6 +75,7 @@ func (a *API) requireService(next http.HandlerFunc) http.Handler {
 func (a *API) InternalRoutes() []Route {
 	return build([]Route{
 		{Pattern: "GET /internal/v1/credentials/{prefix}", handler: a.lookupCredential},
+		{Pattern: "GET /internal/v1/routing-table", handler: a.routingTable},
 	})
 }
 

@@ -63,3 +63,13 @@ livenessProbe:
 - name: NEBULA_LOG_FORMAT
   value: json
 {{- end -}}
+
+{{/* The NATS URL services and workers use: the configured one, else the in-cluster
+development server, else none (no heartbeats). */}}
+{{- define "nebula.natsURL" -}}
+{{- if .Values.nats.url -}}
+{{ .Values.nats.url }}
+{{- else if .Values.data.enabled -}}
+nats://nats.{{ .Values.namespaces.data }}:4222
+{{- end -}}
+{{- end -}}
