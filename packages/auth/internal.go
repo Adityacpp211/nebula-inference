@@ -100,9 +100,9 @@ func NewContextSigner(secret string, maxAge time.Duration, now func() time.Time)
 	return &ContextSigner{secret: []byte(secret), maxAge: maxAge, now: now}, nil
 }
 
-// Audience names the service a context is minted for. A context minted for one
-// audience does not verify at another, so a header lifted from a control-plane
-// call cannot be presented elsewhere.
+// AudienceControlPlane is the audience of contexts minted for the control plane.
+// A context minted for one audience does not verify at another, so a header lifted
+// from a control-plane call cannot be presented elsewhere.
 const AudienceControlPlane = "nebula-controlplane"
 
 // Sign encodes an identity for one call. issuer names the signing service and is

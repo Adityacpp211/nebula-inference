@@ -135,7 +135,9 @@ func (v *Verifier) one(ctx context.Context, p store.Verifying) {
 		return
 	}
 	defer conn.Release()
-	lockKey := int32(ver.ID.ID()) // uuid's first 32 bits: enough to spread, collisions only delay
+	// The uuid's first 32 bits, reinterpreted: enough to spread, and a collision
+	// only delays one verification behind another.
+	lockKey := int32(ver.ID.ID()) //nolint:gosec // wrap-around is intended
 	var got bool
 	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1, $2)`, advisoryClass, lockKey).Scan(&got); err != nil || !got {
 		return // another replica is verifying it
@@ -239,12 +241,12 @@ func (v *Verifier) inspect(ctx context.Context, ver *models.ModelVersion) (
 	if err != nil {
 		return result, nil, "", true
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	meta, err = artifact.ParseGGUF(rc)
 	if err != nil {
 		return result, nil, "the artifact is registered as gguf but is not a readable GGUF file: " + err.Error(), false
 	}
-	if meta.ContextLength > 0 && uint64(ver.ContextWindow) > meta.ContextLength {
+	if meta.ContextLength > 0 && ver.ContextWindow > 0 && uint64(ver.ContextWindow) > meta.ContextLength {
 		return result, meta, fmt.Sprintf("context_window %d exceeds the model's own context length %d",
 			ver.ContextWindow, meta.ContextLength), false
 	}

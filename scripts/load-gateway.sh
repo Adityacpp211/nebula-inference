@@ -13,6 +13,9 @@ set -euo pipefail
 export GATEWAY_ENV="NEBULA_LIMITS_KEY_RPM=1000000 NEBULA_LIMITS_KEY_TPM=100000000 NEBULA_LIMITS_KEY_CONCURRENCY=10000 NEBULA_LIMITS_ORG_RPM=1000000 NEBULA_LIMITS_ORG_TPM=100000000 NEBULA_LIMITS_ORG_CONCURRENCY=10000 NEBULA_LOG_LEVEL=warn"
 export WORKER_RUNTIME_CONFIG='{"tokens_per_second": 400, "parallel_slots": 32}'
 export WORKER_QUEUE_DEPTH=256
+# The gateway admits as much as the worker has slots: the baseline measures
+# serving, not queueing.
+export ROUTE_SLOTS=32
 # shellcheck source=lib/stack.sh
 source "$(dirname "$0")/lib/stack.sh"
 

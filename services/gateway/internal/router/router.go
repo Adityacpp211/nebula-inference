@@ -45,6 +45,11 @@ type Options struct {
 	// channel is configured, which is "not live": silence then proves nothing.
 	HeartbeatsLive func() bool
 	Logger         *slog.Logger
+	// DefaultSlots is an endpoint's concurrency when no heartbeat says otherwise;
+	// Overcommit multiplies slots into the requests the admission queue lets reach
+	// one endpoint at once, leaving the worker's own queue something to do.
+	DefaultSlots int
+	Overcommit   int
 }
 
 // Discovered is one endpoint as a discovery source reports it.
@@ -53,6 +58,9 @@ type Discovered struct {
 	ID    string `json:"id"`
 	URL   string `json:"url"`
 	Ready bool   `json:"ready"`
+	// Slots overrides DefaultSlots for an endpoint without heartbeats (a static
+	// table's target may declare it).
+	Slots int `json:"slots,omitempty"`
 }
 
 // Router holds routing state for one gateway replica. Safe for concurrent use.
@@ -79,9 +87,12 @@ type deployment struct {
 type endpoint struct {
 	id, url  string
 	ready    bool
+	slots    int
 	breaker  *routing.Breaker
 	inflight atomic.Int64
 	ttft     *routing.EWMA
+	// saturatedUntil is unix nanos; zero when not saturated.
+	saturatedUntil atomic.Int64
 }
 
 type heard struct {
@@ -99,6 +110,12 @@ func New(o Options) *Router {
 	}
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)
+	}
+	if o.DefaultSlots <= 0 {
+		o.DefaultSlots = 4
+	}
+	if o.Overcommit <= 0 {
+		o.Overcommit = 2
 	}
 	r := &Router{
 		o: o, deps: map[string]*deployment{}, heartbeats: map[string]*heard{}, byURL: map[string]string{},
@@ -127,7 +144,7 @@ func (r *Router) SetTable(t *routes.Table) {
 			live[key] = true
 			eps := make([]Discovered, 0, len(tg.Endpoints))
 			for _, u := range tg.Endpoints {
-				eps = append(eps, Discovered{ID: u, URL: u, Ready: true})
+				eps = append(eps, Discovered{ID: u, URL: u, Ready: true, Slots: tg.Slots})
 			}
 			r.setLocked(key, eps, true)
 		}
@@ -170,7 +187,7 @@ func (r *Router) setLocked(key string, eps []Discovered, static bool) {
 		if ep == nil {
 			ep = &endpoint{id: e.ID, breaker: routing.NewBreaker(r.o.Breaker), ttft: routing.NewEWMA(0.2)}
 		}
-		ep.url, ep.ready = e.URL, e.Ready
+		ep.url, ep.ready, ep.slots = e.URL, e.Ready, e.Slots
 		next[e.ID] = ep
 	}
 	d.endpoints = next
@@ -187,7 +204,7 @@ func (r *Router) Endpoints() map[string][]Discovered {
 		}
 		for _, id := range routing.SortedKeys(d.endpoints) {
 			ep := d.endpoints[id]
-			out[key] = append(out[key], Discovered{ID: ep.id, URL: ep.url, Ready: ep.ready})
+			out[key] = append(out[key], Discovered{ID: ep.id, URL: ep.url, Ready: ep.ready, Slots: ep.slots})
 		}
 	}
 	return out
@@ -242,6 +259,7 @@ func (r *Router) snapshotLocked(d *deployment, contextWindow int) []routing.Endp
 			LocalInFlight: int(ep.inflight.Load()),
 			TTFTEWMA:      ep.ttft.Value(),
 			ContextWindow: contextWindow,
+			Saturated:     now.UnixNano() < ep.saturatedUntil.Load(),
 		}
 		h := r.heartbeats[ep.id]
 		if h == nil {
@@ -268,6 +286,10 @@ type Request struct {
 	RequiredContext int
 	// Exclude lists endpoint ids already tried for this request.
 	Exclude map[string]bool
+	// Target restricts selection to one target, by its key. Unlike Pin it is the
+	// gateway's own choice (a request that queued for a deployment is placed on
+	// that deployment), so it never changes what the caller asked for.
+	Target string
 }
 
 // NoEndpointError means nothing can serve the request now. Reasons counts why
@@ -305,6 +327,13 @@ func (r *Router) Select(route *routes.Route, req Request) (*Selection, error) {
 			return nil, err
 		}
 		targets, weights = []*routes.Target{t}, []int{100}
+	} else if req.Target != "" {
+		for _, t := range route.Targets {
+			if t.Key(route) == req.Target {
+				targets, weights = []*routes.Target{t}, []int{100}
+				break
+			}
+		}
 	}
 
 	now := r.o.Now()
@@ -426,6 +455,26 @@ type Selection struct {
 	done atomic.Bool
 }
 
+// Saturated records that the endpoint answered "at capacity". Until retryAfter
+// passes (clamped to [1s, 10s]) it counts as full: strategies prefer others and the
+// admission queue gives it no room, so requests wait at the gateway rather than
+// being bounced between replicas that are all full.
+func (s *Selection) Saturated(retryAfter time.Duration) {
+	if s.ep == nil {
+		return
+	}
+	switch {
+	case retryAfter < time.Second:
+		retryAfter = time.Second
+	case retryAfter > 10*time.Second:
+		retryAfter = 10 * time.Second
+	}
+	s.ep.saturatedUntil.Store(s.r.o.Now().Add(retryAfter).UnixNano())
+}
+
+// Key is the selected target's key, which names its admission queue.
+func (s *Selection) Key() string { return s.Target.Key(s.Route) }
+
 // FirstToken records the time to first token this gateway observed.
 func (s *Selection) FirstToken(d time.Duration) {
 	if s.ep != nil && d > 0 {
@@ -499,4 +548,38 @@ func (r *Router) Eligible(route *routes.Route, t *routes.Target) int {
 	r.mu.RUnlock()
 	ok, _ := routing.Filter(eps, routing.Request{}, fo)
 	return len(ok)
+}
+
+// Capacity is how many requests the admission queue lets this gateway have in
+// flight to one deployment: every endpoint that could take work now contributes
+// its slots (from its heartbeat, else the default) times the overcommit factor. A
+// saturated endpoint contributes nothing until its Retry-After passes.
+func (r *Router) Capacity(key string) int {
+	now := r.o.Now()
+	fo := routing.FilterOptions{Now: now, StaleAfter: r.o.StaleAfter, HeartbeatsLive: r.live()}
+	r.mu.RLock()
+	eps := r.snapshotLocked(r.deps[strings.ToLower(key)], 0)
+	slotsOf := map[string]int{}
+	if d := r.deps[strings.ToLower(key)]; d != nil {
+		for id, ep := range d.endpoints {
+			slotsOf[id] = ep.slots
+		}
+	}
+	r.mu.RUnlock()
+	ok, _ := routing.Filter(eps, routing.Request{}, fo)
+	total := 0
+	for _, e := range ok {
+		if e.Saturated {
+			continue
+		}
+		slots := r.o.DefaultSlots
+		if slotsOf[e.ID] > 0 {
+			slots = slotsOf[e.ID]
+		}
+		if routing.Fresh(&e, fo) && e.Heartbeat.ParallelSlots > 0 {
+			slots = e.Heartbeat.ParallelSlots
+		}
+		total += slots * r.o.Overcommit
+	}
+	return total
 }

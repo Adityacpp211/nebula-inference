@@ -120,7 +120,7 @@ func TestTextCompletion(t *testing.T) {
 		t.Errorf("a text completion's prompt must be sent verbatim, got %q", p)
 	}
 	// A completion-only route refuses the chat endpoint.
-	e := errorOf(t, h.do("POST", "/v1/chat/completions", keyAcme,
+	e := errorOf(t, h.do("POST", "/v1/chat/completions", keyAcme, //nolint:bodyclose // errorOf closes it
 		`{"model":"tiny-text","messages":[{"role":"user","content":"x"}]}`))
 	if e.Code != "unsupported_endpoint" {
 		t.Errorf("chat on a text route: %+v", e)
@@ -369,7 +369,7 @@ func TestClientDisconnectNonStreaming(t *testing.T) {
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "POST", h.gw.URL+"/v1/chat/completions", strings.NewReader(chatBody))
 	req.Header.Set("Authorization", "Bearer "+keyAcme)
-	if _, err := http.DefaultClient.Do(req); err == nil {
+	if _, err := http.DefaultClient.Do(req); err == nil { //nolint:bodyclose // the request is expected to fail
 		t.Fatal("expected the client to time out")
 	}
 	rec := h.usage.Wait(1, 5*time.Second)
@@ -431,7 +431,10 @@ func TestWorkerErrorMapping(t *testing.T) {
 					w.WriteHeader(tc.status)
 					_, _ = io.WriteString(w, `{"error":{"message":"SECRET internal worker detail pod-7f9","type":"x","code":"y"}}`)
 				}
-				body := `{"model":"tiny","messages":[{"role":"user","content":"x"}],"stream":` + strconv.FormatBool(stream) + `}`
+				// "reject" so a saturated worker's 429 is reported, not waited out in the
+				// admission queue (TestSaturatedWorkerIsWaitedOut covers waiting).
+				body := `{"model":"tiny","messages":[{"role":"user","content":"x"}],"nebula":{"queue":"reject"},"stream":` +
+					strconv.FormatBool(stream) + `}`
 				resp := h.do("POST", "/v1/chat/completions", keyAcme, body)
 				e := errorOf(t, resp)
 				if resp.StatusCode != tc.wantStatus || e.Code != tc.wantCode || resp.Header.Get("X-Nebula-Reason") != tc.wantReason {
@@ -561,7 +564,7 @@ func TestModelsList(t *testing.T) {
 	if one.StatusCode != 200 {
 		t.Errorf("retrieve by route name: %d", one.StatusCode)
 	}
-	if e := errorOf(t, h.do("GET", "/v1/models/secret", keyAcme, "")); e.Code != "model_not_found" {
+	if e := errorOf(t, h.do("GET", "/v1/models/secret", keyAcme, "")); e.Code != "model_not_found" { //nolint:bodyclose // errorOf closes it
 		t.Errorf("retrieve another org's route: %+v", e)
 	}
 	if n := len(h.cp.received()); n != 0 {

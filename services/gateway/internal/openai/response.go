@@ -20,12 +20,15 @@ func NewUsage(prompt, completion int) *Usage {
 // stream event (docs/api.md §2). Every field is measured; a value that could not be
 // measured is absent rather than zero (axiom A6).
 type Meta struct {
-	RequestID       string   `json:"request_id"`
-	Route           string   `json:"route,omitempty"`
-	Deployment      string   `json:"deployment"`
-	ModelVersion    string   `json:"model_version"`
-	Variant         string   `json:"variant,omitempty"`
-	QueueWaitMS     *int64   `json:"queue_wait_ms,omitempty"`
+	RequestID    string `json:"request_id"`
+	Route        string `json:"route,omitempty"`
+	Deployment   string `json:"deployment"`
+	ModelVersion string `json:"model_version"`
+	Variant      string `json:"variant,omitempty"`
+	QueueWaitMS  *int64 `json:"queue_wait_ms,omitempty"`
+	// GatewayQueueMS is the wait in the gateway's admission queue; QueueWaitMS is
+	// the worker's own queue. Absent when the request did not wait.
+	GatewayQueueMS  *int64   `json:"gateway_queue_ms,omitempty"`
 	TTFTMS          *int64   `json:"ttft_ms,omitempty"`
 	DurationMS      *int64   `json:"duration_ms,omitempty"`
 	TokensPerSecond *float64 `json:"tokens_per_second,omitempty"`

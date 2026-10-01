@@ -24,6 +24,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 	"github.com/adityasatwar321/nebula/packages/config"
 	"github.com/adityasatwar321/nebula/packages/httpx"
 	"github.com/adityasatwar321/nebula/packages/telemetry"
+	"github.com/adityasatwar321/nebula/services/gateway/internal/admission"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/credentials"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/dispatch"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/ratelimit"
@@ -57,7 +59,9 @@ type Deps struct {
 	Router *router.Router
 	// RouteSource is "controlplane" or "static", reported in /v1/models.
 	RouteSource string
-	Workers     *dispatch.Client
+	// Queues are the per-deployment admission queues.
+	Queues  *admission.Queues
+	Workers *dispatch.Client
 	// Proxy forwards the control API. Nil answers 503 for every admin path, which
 	// is the shape of a gateway configured without a control plane.
 	Proxy http.Handler
@@ -106,6 +110,13 @@ func New(d Deps) http.Handler {
 	if d.RouteSource == "" {
 		d.RouteSource = "static"
 	}
+	if d.Queues == nil {
+		// Real time, so every waiter also keeps its own deadline timer; the sweeper
+		// grants waiters when capacity returns. The process owns its lifetime.
+		d.Queues = admission.New(admission.Options{MaxDepth: 128, AgingStep: 5 * time.Second,
+			Capacity: d.Router.Capacity})
+		go d.Queues.Run(context.Background())
+	}
 	g := &Gateway{d: d}
 
 	mux := http.NewServeMux()
@@ -129,6 +140,20 @@ func New(d Deps) http.Handler {
 
 	for _, p := range []string{"/v1/chat/completions", "/v1/completions"} {
 		mux.HandleFunc(p, g.methodNotAllowed("POST"))
+	}
+
+	// Admission queue state, for load tests and development. Never in production:
+	// Dev.DebugEndpoints is refused there (packages/config).
+	if d.Config != nil && d.Config.Dev.DebugEndpoints {
+		mux.HandleFunc("GET /debug/queues", func(w http.ResponseWriter, _ *http.Request) {
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			_ = httpx.WriteJSON(w, http.StatusOK, map[string]any{
+				"queues":           d.Queues.Stats(),
+				"heap_alloc_bytes": m.HeapAlloc,
+				"goroutines":       runtime.NumGoroutine(),
+			})
+		})
 	}
 
 	// The internal surface of the control plane is never reachable through the

@@ -99,8 +99,6 @@ func newFixtureWith(t *testing.T, pool *pgxpool.Pool, extra map[string]string) *
 	return f
 }
 
-func testConfig(t *testing.T) *config.Config { return testConfigWith(t, nil) }
-
 func testConfigWith(t *testing.T, extra map[string]string) *config.Config {
 	t.Helper()
 	cfg, err := config.Loader{

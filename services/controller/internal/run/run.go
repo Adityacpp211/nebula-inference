@@ -203,7 +203,7 @@ func (c *Controller) work(ctx context.Context) error {
 		}
 	}
 	c.synced.Store(true)
-	log.Info("informer caches synced; reconciling")
+	log.InfoContext(ctx, "informer caches synced; reconciling")
 
 	var wg sync.WaitGroup
 	for range c.o.Workers {

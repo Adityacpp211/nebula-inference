@@ -13,6 +13,7 @@ import (
 	"github.com/adityasatwar321/nebula/packages/auth"
 	"github.com/adityasatwar321/nebula/packages/db/models"
 	"github.com/adityasatwar321/nebula/packages/httpx"
+	"github.com/adityasatwar321/nebula/packages/queue"
 	"github.com/adityasatwar321/nebula/packages/telemetry"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/dispatch"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/openai"
@@ -49,6 +50,14 @@ type exchange struct {
 	verdict router.Outcome
 	// degraded names a degradation the response carries (a failover route).
 	degraded string
+
+	// ticket is the admission queue slot this request holds; queueWait is how long
+	// it waited for it, requeues how often a saturated deployment sent it back.
+	ticket    *queue.Ticket
+	queueWait time.Duration
+	requeues  int
+	reject    bool
+	prio      queue.Priority
 
 	// record is filled as the request progresses and emitted exactly once.
 	record usage.Record
@@ -194,6 +203,30 @@ func (g *Gateway) prepare(w http.ResponseWriter, r *http.Request, kind openai.Ki
 	if priority == "" {
 		priority = string(models.PriorityNormal)
 	}
+
+	// QUEUE. Wait for room on the chosen deployment, within the request's deadline
+	// (docs/architecture.md §6.3). A request that runs at once never waits here; a
+	// full queue sheds with Retry-After instead of growing.
+	reject := req.Nebula.Queue == "reject"
+	ticket, err := g.d.Queues.Gate(sel.Key()).Acquire(ctx, queue.ParsePriority(priority), deadline, reject)
+	if err != nil {
+		sel.Done(router.Abandoned)
+		lease.Release(ctx, 0)
+		return nil, g.queueError(w, r, err)
+	}
+	if ticket.Waited > 0 {
+		// The deployment's endpoints may have changed while the request waited:
+		// place it again, on the same deployment.
+		sel.Done(router.Abandoned)
+		placement.Target = sel.Key()
+		if sel, err = g.d.Router.Select(sel.Route, placement); err != nil {
+			ticket.Release()
+			lease.Release(ctx, 0)
+			w.Header().Set("Retry-After", "1")
+			return nil, noHealthyEndpoint(err)
+		}
+		route, target = sel.Route, sel.Target
+	}
 	traceparent := ""
 	if tc, ok := telemetry.Trace(ctx); ok {
 		if child, err := tc.Child(); err == nil {
@@ -212,6 +245,10 @@ func (g *Gateway) prepare(w http.ResponseWriter, r *http.Request, kind openai.Ki
 		ident:   ident,
 
 		sel:       sel,
+		ticket:    ticket,
+		queueWait: ticket.Waited,
+		reject:    reject,
+		prio:      queue.ParsePriority(priority),
 		placement: placement,
 		attempts:  1,
 		verdict:   router.Succeeded,
@@ -351,7 +388,7 @@ func (g *Gateway) generate(w http.ResponseWriter, r *http.Request, ex *exchange)
 
 	if out.err != nil {
 		ex.verdict = verdictOf(out.err)
-		apiErr := g.workerError(w, ctx, out.err)
+		apiErr := g.workerError(ctx, w, out.err)
 		ex.record.StatusCode = apiErr.Status
 		ex.record.ErrorClass = string(apiErr.Type)
 		ex.record.Outcome = outcomeOf(apiErr)
@@ -454,17 +491,18 @@ func (ex *exchange) absorbFinal(u *dispatch.Usage, t *dispatch.Timing, rt *dispa
 func (ex *exchange) meta(now time.Time) *openai.Meta {
 	d := now.Sub(ex.started).Milliseconds()
 	m := &openai.Meta{
-		RequestID:    ex.call.RequestID,
-		Route:        ex.route.Model,
-		Deployment:   ex.target.Deployment,
-		ModelVersion: ex.target.ModelVersion,
-		Variant:      ex.target.Label,
-		DurationMS:   &d,
-		Attempts:     ex.attempts,
-		Degraded:     ex.degraded,
-		Runtime:      ex.record.Runtime,
-		QueueWaitMS:  ex.record.QueueWait,
-		TTFTMS:       ex.record.TTFT,
+		RequestID:      ex.call.RequestID,
+		Route:          ex.route.Model,
+		Deployment:     ex.target.Deployment,
+		ModelVersion:   ex.target.ModelVersion,
+		Variant:        ex.target.Label,
+		DurationMS:     &d,
+		Attempts:       ex.attempts,
+		Degraded:       ex.degraded,
+		GatewayQueueMS: gatewayQueueMS(ex),
+		Runtime:        ex.record.Runtime,
+		QueueWaitMS:    ex.record.QueueWait,
+		TTFTMS:         ex.record.TTFT,
 	}
 	if ex.timing != nil && ex.timing.DecodeMS != nil && *ex.timing.DecodeMS > 0 && ex.record.CompletionTokens != nil {
 		tps := float64(*ex.record.CompletionTokens) / (float64(*ex.timing.DecodeMS) / 1000)
@@ -519,6 +557,7 @@ func (g *Gateway) finish(ctx context.Context, ex *exchange) {
 		actual = *ex.record.PromptTokens + *ex.record.CompletionTokens
 	}
 	ex.lease.Release(ctx, actual)
+	ex.ticket.Release()
 	ex.record.Attempts = ex.attempts
 	if ex.sel != nil {
 		ex.sel.Done(ex.verdict)
@@ -555,16 +594,40 @@ func (g *Gateway) place(org string, route *routes.Route, req router.Request) (*r
 // never generates twice.
 const maxAttempts = 3
 
+// maxRequeues bounds how often one request goes back to the admission queue
+// because every replica it was offered to was saturated.
+const maxRequeues = 2
+
 // replace moves the exchange to another endpoint after a before-work failure,
 // reporting the failed one to the router. It returns false when there is none.
-func (g *Gateway) replace(ex *exchange, cause error) bool {
+//
+// A saturated replica (429) is marked so the router and the admission queue treat
+// it as full until its Retry-After. When every replica has refused as saturated,
+// the request goes back to the admission queue — backpressure becomes waiting,
+// within the deadline, instead of an error.
+func (g *Gateway) replace(ctx context.Context, ex *exchange, cause error) bool {
 	var we *dispatch.Error
-	if !errors.As(cause, &we) || !we.BeforeWork() || ex.attempts >= maxAttempts || ex.placement.Pin != "" {
+	if !errors.As(cause, &we) || !we.BeforeWork() {
 		return false
+	}
+	if we.Status == http.StatusTooManyRequests {
+		ex.sel.Saturated(we.RetryAfter)
+	}
+	if ex.attempts >= maxAttempts || ex.placement.Pin != "" {
+		return we.Status == http.StatusTooManyRequests && g.requeue(ctx, ex, cause)
 	}
 	ex.placement.Exclude[ex.sel.EndpointID] = true
 	sel, err := g.d.Router.Select(ex.route, ex.placement)
+	if err == nil && sel.Target.Key(sel.Route) != ex.sel.Key() && we.Status == http.StatusTooManyRequests {
+		// The only replicas left are on another target; the saturated deployment's
+		// own queue is the fairer place to wait.
+		sel.Done(router.Abandoned)
+		err = errors.New("no other replica of this deployment")
+	}
 	if err != nil {
+		if we.Status == http.StatusTooManyRequests {
+			return g.requeue(ctx, ex, cause)
+		}
 		// Nothing else is eligible: the original failure stands, and finish()
 		// reports it against the endpoint that failed.
 		return false
@@ -578,18 +641,95 @@ func (g *Gateway) replace(ex *exchange, cause error) bool {
 	return true
 }
 
+// requeue returns a request whose deployment is saturated to its admission queue
+// and places it again once granted. False means it could not wait (asked not to,
+// requeued too often, or the queue refused), and the saturation error stands.
+func (g *Gateway) requeue(ctx context.Context, ex *exchange, cause error) bool {
+	if ex.reject || ex.requeues >= maxRequeues {
+		return false
+	}
+	key := ex.sel.Key()
+	ex.sel.Done(verdictOf(cause))
+	ex.ticket.Release()
+	ex.ticket = nil
+	ex.requeues++
+	ticket, err := g.d.Queues.Gate(key).Acquire(ctx, ex.prio, ex.call.Deadline, false)
+	if err != nil {
+		ex.sel = nil
+		return false
+	}
+	ex.ticket = ticket
+	ex.queueWait += ticket.Waited
+	placement := ex.placement
+	placement.Target, placement.Exclude = key, map[string]bool{}
+	sel, err := g.d.Router.Select(ex.route, placement)
+	if err != nil {
+		ex.sel = nil
+		return false
+	}
+	ex.sel, ex.target = sel, sel.Target
+	ex.call.Endpoint = sel.URL
+	ex.attempts++
+	return true
+}
+
 // generateOnce performs a non-streamed generation, moving to another replica
 // when the chosen one fails before starting work.
 func (g *Gateway) generateOnce(ctx context.Context, ex *exchange) (*dispatch.Result, error) {
 	for {
 		res, err := g.d.Workers.Generate(ctx, ex.call)
-		if err == nil || ctx.Err() != nil || !g.replace(ex, err) {
+		if err == nil || ctx.Err() != nil || !g.replace(ctx, ex, err) {
 			return res, err
 		}
 	}
 }
 
+// gatewayQueueMS reports the admission queue wait, absent when the request did
+// not wait (axiom A6: measured or absent, never a made-up zero).
+func gatewayQueueMS(ex *exchange) *int64 {
+	if ex.queueWait <= 0 {
+		return nil
+	}
+	ms := ex.queueWait.Milliseconds()
+	return &ms
+}
+
+// queueError maps an admission queue refusal onto the public error.
+func (g *Gateway) queueError(w http.ResponseWriter, r *http.Request, err error) error {
+	var full *queue.FullError
+	switch {
+	case errors.As(err, &full) && full.WouldWait:
+		w.Header().Set("Retry-After", seconds(full.RetryAfter))
+		return &httpx.APIError{
+			Status: http.StatusTooManyRequests, Type: httpx.TypeRateLimit, Code: "capacity_exhausted",
+			Message: "no capacity is free now and the request set nebula.queue to reject; retry after the interval in Retry-After",
+			Reason:  "capacity_exhausted",
+		}
+	case errors.As(err, &full):
+		w.Header().Set("Retry-After", seconds(full.RetryAfter))
+		return &httpx.APIError{
+			Status: http.StatusTooManyRequests, Type: httpx.TypeRateLimit, Code: "queue_full",
+			Message: "this model's queue is full; retry after the interval in Retry-After",
+			Reason:  "queue_full",
+		}
+	case errors.Is(err, queue.ErrTimeout):
+		// A queue timeout, not an inference error: nothing was dispatched.
+		return &httpx.APIError{
+			Status: http.StatusGatewayTimeout, Type: httpx.TypeTimeout, Code: "queue_timeout",
+			Message: "the request's timeout passed while it waited for capacity",
+			Reason:  "queue_timeout",
+		}
+	case errors.Is(err, queue.ErrCancelled):
+		g.logger(r.Context()).InfoContext(r.Context(), "client left while queued")
+		return &httpx.APIError{Status: StatusClientClosedRequest, Type: httpx.TypeInvalidRequest,
+			Code: "client_cancelled", Message: "the client closed the request"}
+	}
+	return httpx.ErrInternal(err)
+}
+
 // verdictOf classifies a dispatch failure for the endpoint's breaker.
+//
+// Saturation (429) is Refused: a full replica is healthy.
 func verdictOf(err error) router.Outcome {
 	var we *dispatch.Error
 	switch {
@@ -617,7 +757,7 @@ func noHealthyEndpoint(cause error) *httpx.APIError {
 // workerError maps a dispatch failure that happened before any byte reached the
 // client onto the public error it becomes. Worker message text is never passed
 // through: it is upstream detail, which never crosses B1 outward.
-func (g *Gateway) workerError(w http.ResponseWriter, ctx context.Context, err error) *httpx.APIError {
+func (g *Gateway) workerError(ctx context.Context, w http.ResponseWriter, err error) *httpx.APIError {
 	var we *dispatch.Error
 	if !errors.As(err, &we) {
 		return httpx.ErrInternal(err)
@@ -687,10 +827,10 @@ func deadlineError() *httpx.APIError {
 }
 
 func outcomeOf(e *httpx.APIError) string {
-	switch {
-	case e.Status == http.StatusGatewayTimeout:
+	switch e.Status {
+	case http.StatusGatewayTimeout:
 		return usage.OutcomeDeadlineExceeded
-	case e.Status == http.StatusTooManyRequests:
+	case http.StatusTooManyRequests:
 		return usage.OutcomeRejected
 	}
 	return usage.OutcomeFailed

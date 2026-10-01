@@ -72,6 +72,11 @@ type Endpoint struct {
 	Breaker BreakerState
 	// LocalInFlight counts requests this gateway has in flight to the endpoint.
 	LocalInFlight int
+	// Saturated is set while the endpoint's last answer was "at capacity" (429)
+	// and its Retry-After has not passed. A saturated endpoint stays eligible — it
+	// is healthy — but every strategy prefers any other, and the admission queue
+	// counts it as having no room.
+	Saturated bool
 	// TTFTEWMA is this gateway's own time-to-first-token average in ms; zero means
 	// no sample yet.
 	TTFTEWMA float64
@@ -87,6 +92,9 @@ type Endpoint struct {
 // of this gateway's requests and double counting them would steer traffic away
 // from exactly the replicas this gateway just used.
 func (e *Endpoint) Load(fresh bool) float64 {
+	if e.Saturated {
+		return math.Inf(1)
+	}
 	slots := 1
 	reported := 0
 	if fresh && e.Heartbeat != nil {
@@ -213,7 +221,7 @@ func SortByID(eps []Endpoint) {
 // argmin returns the index of the smallest score, breaking ties by rotating from
 // start so equal endpoints share load instead of the first one taking it all.
 func argmin(n, start int, score func(int) float64) int {
-	best, bestScore := -1, math.Inf(1)
+	best, bestScore := start%n, math.Inf(1)
 	for k := 0; k < n; k++ {
 		i := (start + k) % n
 		if s := score(i); s < bestScore {

@@ -34,6 +34,7 @@ import (
 	"github.com/adityasatwar321/nebula/packages/telemetry"
 	"github.com/adityasatwar321/nebula/packages/version"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/adminproxy"
+	"github.com/adityasatwar321/nebula/services/gateway/internal/admission"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/controlplane"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/credentials"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/dispatch"
@@ -172,7 +173,9 @@ func run() error {
 	// to the next rather than failing the gateway (docs/architecture.md §6.2).
 	var heartbeats *router.Heartbeats
 	rtOpts := router.Options{
-		StaleAfter: cfg.Gateway.HeartbeatStaleAfter.Duration(),
+		StaleAfter:   cfg.Gateway.HeartbeatStaleAfter.Duration(),
+		DefaultSlots: cfg.Gateway.DefaultSlots,
+		Overcommit:   cfg.Gateway.SlotOvercommit,
 		Breaker: routing.BreakerConfig{Threshold: cfg.Gateway.BreakerThreshold,
 			Cooldown: cfg.Gateway.BreakerCooldown.Duration(), MaxCooldown: 30 * time.Second},
 		Logger: logger,
@@ -268,6 +271,14 @@ func run() error {
 		})
 	}
 
+	// ADMISSION. One bounded, prioritised queue per deployment, sized by the
+	// router's view of its free capacity.
+	queues := admission.New(admission.Options{
+		MaxDepth: cfg.Gateway.QueueMaxDepth, AgingStep: cfg.Gateway.QueueAging.Duration(),
+		Capacity: rt.Capacity,
+	})
+	go queues.Run(ctx)
+
 	proxy := adminproxy.New(adminproxy.Options{
 		Target: cp.BaseURL(),
 		Signer: signer,
@@ -292,6 +303,7 @@ func run() error {
 		Limiter:     limiter,
 		Router:      rt,
 		RouteSource: routeSource,
+		Queues:      queues,
 		Workers:     dispatch.New(dispatch.Options{}),
 		Proxy:       proxy,
 		Usage:       usage.LogSink{Logger: logger},

@@ -196,17 +196,17 @@ func (p *ggufParser) value(typ uint32, depth int) (any, error) {
 		case ggufUint16:
 			return uint64(binary.LittleEndian.Uint16(b)), nil
 		case ggufInt16:
-			return int64(int16(binary.LittleEndian.Uint16(b))), nil
+			return int64(int16(binary.LittleEndian.Uint16(b))), nil //nolint:gosec // two's-complement reinterpretation is the format
 		case ggufUint32:
 			return uint64(binary.LittleEndian.Uint32(b)), nil
 		case ggufInt32:
-			return int64(int32(binary.LittleEndian.Uint32(b))), nil
+			return int64(int32(binary.LittleEndian.Uint32(b))), nil //nolint:gosec // two's-complement reinterpretation is the format
 		case ggufFloat32:
 			return float64(math.Float32frombits(binary.LittleEndian.Uint32(b))), nil
 		case ggufUint64:
 			return binary.LittleEndian.Uint64(b), nil
 		case ggufInt64:
-			return int64(binary.LittleEndian.Uint64(b)), nil
+			return int64(binary.LittleEndian.Uint64(b)), nil //nolint:gosec // two's-complement reinterpretation is the format
 		case ggufFloat64:
 			return math.Float64frombits(binary.LittleEndian.Uint64(b)), nil
 		}

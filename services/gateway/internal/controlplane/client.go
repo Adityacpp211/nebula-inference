@@ -73,7 +73,7 @@ func New(baseURL string, signer *auth.ContextSigner, timeout time.Duration, hc *
 		return nil, fmt.Errorf("control plane URL: %w", err)
 	}
 	if hc == nil {
-		hc = &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
+		hc = &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()} //nolint:errcheck // always *http.Transport
 	}
 	return &Client{base: u, http: hc, signer: signer, timeout: timeout}, nil
 }
@@ -87,7 +87,7 @@ func (c *Client) LookupCredential(ctx context.Context, prefix string) (*Credenti
 	defer cancel()
 
 	u := c.base.JoinPath("/internal/v1/credentials", prefix)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -106,23 +106,23 @@ func (c *Client) LookupCredential(ctx context.Context, prefix string) (*Credenti
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		_ = resp.Body.Close()
 	}()
 
-	switch {
-	case resp.StatusCode == http.StatusOK:
+	switch resp.StatusCode {
+	case http.StatusOK:
 		var cred Credential
 		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&cred); err != nil {
-			return nil, fmt.Errorf("%w: undecodable credential: %v", ErrUnavailable, err)
+			return nil, fmt.Errorf("%w: undecodable credential: %w", ErrUnavailable, err)
 		}
 		return &cred, nil
-	case resp.StatusCode == http.StatusNotFound:
+	case http.StatusNotFound:
 		return nil, ErrNotFound
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+	case http.StatusUnauthorized, http.StatusForbidden:
 		// The control plane refused the gateway itself: a secret mismatch between
 		// the two services. Reported as unavailability, not as the caller's fault,
 		// and loudly, because every request will fail the same way.

@@ -295,7 +295,7 @@ func Parse(kind Kind, body []byte) (*Request, error) {
 // client that asks for exactly what NEBULA does must not be refused.
 func isOff(name string, v json.RawMessage) bool {
 	s := strings.TrimSpace(string(v))
-	if s == "null" {
+	if s == jsonNull {
 		return true
 	}
 	switch name {
@@ -330,7 +330,7 @@ func unsupportedHint(name string) string {
 // parseMessages accepts string content, or the array-of-parts form restricted to
 // text parts, which the SDKs send for multi-part messages.
 func parseMessages(v json.RawMessage) ([]Message, error) {
-	if len(v) == 0 || string(v) == "null" {
+	if len(v) == 0 || string(v) == jsonNull {
 		return nil, invalid("messages is required", "missing_field", "messages")
 	}
 	var raw []map[string]json.RawMessage
@@ -350,7 +350,7 @@ func parseMessages(v json.RawMessage) ([]Message, error) {
 			switch k {
 			case "role", "content", "name":
 			case "tool_calls", "tool_call_id", "function_call", "audio", "refusal":
-				if strings.TrimSpace(string(m[k])) == "null" {
+				if strings.TrimSpace(string(m[k])) == jsonNull {
 					continue
 				}
 				return nil, unsupportedParam(param+"."+k, fmt.Sprintf("%s.%s is not supported", param, k))
@@ -377,7 +377,7 @@ func parseMessages(v json.RawMessage) ([]Message, error) {
 			return nil, err
 		}
 		msg.Content = content
-		if n, ok := m["name"]; ok && string(n) != "null" {
+		if n, ok := m["name"]; ok && string(n) != jsonNull {
 			if err := json.Unmarshal(n, &msg.Name); err != nil {
 				return nil, invalid(param+".name must be a string", "invalid_type", param+".name")
 			}
@@ -388,7 +388,7 @@ func parseMessages(v json.RawMessage) ([]Message, error) {
 }
 
 func parseContent(v json.RawMessage, param string) (string, error) {
-	if len(v) == 0 || string(v) == "null" {
+	if len(v) == 0 || string(v) == jsonNull {
 		return "", invalid(param+" is required", "missing_field", param)
 	}
 	var s string
@@ -416,7 +416,7 @@ func parseContent(v json.RawMessage, param string) (string, error) {
 // parsePrompt accepts a string or a one-element array of strings. Batched prompts
 // would return several choices, which is n>1 by another name.
 func parsePrompt(v json.RawMessage) (string, error) {
-	if len(v) == 0 || string(v) == "null" {
+	if len(v) == 0 || string(v) == jsonNull {
 		return "", invalid("prompt is required", "missing_field", "prompt")
 	}
 	var s string
@@ -434,7 +434,7 @@ func parsePrompt(v json.RawMessage) (string, error) {
 }
 
 func parseStop(v json.RawMessage) ([]string, error) {
-	if len(v) == 0 || string(v) == "null" {
+	if len(v) == 0 || string(v) == jsonNull {
 		return nil, nil
 	}
 	var s string
@@ -462,7 +462,7 @@ func parseStop(v json.RawMessage) ([]string, error) {
 
 func present(raw map[string]json.RawMessage, name string) (json.RawMessage, bool) {
 	v, ok := raw[name]
-	if !ok || strings.TrimSpace(string(v)) == "null" {
+	if !ok || strings.TrimSpace(string(v)) == jsonNull {
 		return nil, false
 	}
 	return v, true
@@ -544,6 +544,9 @@ func unsupportedParam(param, message string) *httpx.APIError {
 // route-dependent checks
 // ---------------------------------------------------------------------------
 
+// jsonNull is JSON's null literal, which several fields treat as "absent".
+const jsonNull = "null"
+
 // Limits are what a route allows, supplied by the caller so this package does not
 // import the route table.
 type Limits struct {
@@ -589,9 +592,9 @@ func (r *Request) Check(model string, l Limits) error {
 		return invalid(fmt.Sprintf("max_tokens (%d) exceeds the context window (%d) of %s",
 			*r.MaxTokens, l.ContextWindow, model), ErrContextLength, "max_tokens")
 	}
-	if min := r.minPromptTokens(); *r.MaxTokens+min > l.ContextWindow {
+	if least := r.minPromptTokens(); *r.MaxTokens+least > l.ContextWindow {
 		return invalid(fmt.Sprintf("max_tokens (%d) plus the prompt (at least %d tokens) exceeds the context window (%d) of %s",
-			*r.MaxTokens, min, l.ContextWindow, model), ErrContextLength, "max_tokens")
+			*r.MaxTokens, least, l.ContextWindow, model), ErrContextLength, "max_tokens")
 	}
 	return nil
 }

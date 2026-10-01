@@ -307,3 +307,22 @@ func TestEWMA(t *testing.T) {
 		t.Fatalf("%v", e.Value())
 	}
 }
+
+// A saturated endpoint is avoided while any other exists, and still chosen when it
+// is the only one: saturation is "full", not "broken".
+func TestSaturatedEndpointIsAvoided(t *testing.T) {
+	t.Parallel()
+	eps := []Endpoint{
+		{ID: "a", Ready: true, Saturated: true},
+		{ID: "b", Ready: true, LocalInFlight: 5},
+	}
+	for _, s := range []Strategy{&LeastLoaded{}, &LatencyAware{}} {
+		if got := eps[s.Select(Request{}, eps, opts(t0))].ID; got != "b" {
+			t.Errorf("%s picked the saturated endpoint", s.Name())
+		}
+	}
+	only := []Endpoint{{ID: "a", Ready: true, Saturated: true}}
+	if got := (&LeastLoaded{}).Select(Request{}, only, opts(t0)); got != 0 {
+		t.Fatalf("%d", got)
+	}
+}

@@ -21,7 +21,7 @@ func (c *Client) RoutingTable(ctx context.Context, etag string) (body []byte, ne
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	u := c.base.JoinPath("/internal/v1/routing-table")
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
 	if err != nil {
 		return nil, "", err
 	}
@@ -35,7 +35,7 @@ func (c *Client) RoutingTable(ctx context.Context, etag string) (body []byte, ne
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, "", fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return nil, "", fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
@@ -45,7 +45,7 @@ func (c *Client) RoutingTable(ctx context.Context, etag string) (body []byte, ne
 	case http.StatusOK:
 		b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 		if err != nil {
-			return nil, "", fmt.Errorf("%w: reading the routing table: %v", ErrUnavailable, err)
+			return nil, "", fmt.Errorf("%w: reading the routing table: %w", ErrUnavailable, err)
 		}
 		return b, resp.Header.Get("ETag"), nil
 	case http.StatusNotModified:

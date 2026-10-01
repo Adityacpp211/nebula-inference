@@ -53,7 +53,7 @@ func New(o Options) http.Handler {
 	}
 	transport := o.Transport
 	if transport == nil {
-		t := http.DefaultTransport.(*http.Transport).Clone()
+		t := http.DefaultTransport.(*http.Transport).Clone() //nolint:errcheck // the default transport is always *http.Transport
 		t.Proxy = nil
 		t.ResponseHeaderTimeout = 30 * time.Second
 		transport = t

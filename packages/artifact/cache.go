@@ -88,16 +88,17 @@ func Fetch(ctx context.Context, open func(context.Context) (io.ReadCloser, error
 		}
 		return finish(FetchFailed, code, err)
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	// Owner-only: the puller and the worker run as the same non-root uid.
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return finish(FetchFailed, "io", err)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".partial-"+sha256Hex[:12]+"-*")
 	if err != nil {
 		return finish(FetchFailed, "io", err)
 	}
-	defer os.Remove(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }() // a no-op after a successful rename
 
 	v, err := Hash(io.TeeReader(body, tmp), maxBytes)
 	if cerr := tmp.Close(); err == nil {
@@ -137,17 +138,18 @@ func cachedAndVerified(path, sha256Hex string, maxBytes int64) (bool, error) {
 		}
 		return false, err
 	}
-	if b, err := os.ReadFile(path + ".verified"); err == nil {
+	// The path is content-addressed under the cache root, never caller-chosen.
+	if b, err := os.ReadFile(path + ".verified"); err == nil { //nolint:gosec // see above
 		var m marker
 		if json.Unmarshal(b, &m) == nil && m.SHA256 == sha256Hex && m.Size == st.Size() && m.ModTime.Equal(st.ModTime()) {
 			return true, nil
 		}
 	}
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // content-addressed path under the cache root
 	if err != nil {
 		return false, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	h := sha256.New()
 	if _, err := io.Copy(h, io.LimitReader(f, maxBytes+1)); err != nil {
 		return false, err
@@ -167,7 +169,7 @@ func writeMarker(path, sha256Hex string) error {
 		return err
 	}
 	b, _ := json.Marshal(marker{SHA256: sha256Hex, Size: st.Size(), ModTime: st.ModTime(), VerifiedAt: time.Now().UTC()})
-	return os.WriteFile(path+".verified", b, 0o644)
+	return os.WriteFile(path+".verified", b, 0o600)
 }
 
 // WriteResult writes a FetchResult as JSON, atomically.

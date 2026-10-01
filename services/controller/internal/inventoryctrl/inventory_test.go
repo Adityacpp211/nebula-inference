@@ -16,7 +16,7 @@ import (
 	"github.com/adityasatwar321/nebula/services/controller/internal/store"
 )
 
-func node(name string, cpu, mem string, unschedulable bool) *corev1.Node {
+func node(name, cpu, mem string, unschedulable bool) *corev1.Node {
 	return &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{"nebula.dev/accelerator": "cpu"}},
 		Spec:       corev1.NodeSpec{Unschedulable: unschedulable, Taints: []corev1.Taint{{Key: "k", Effect: corev1.TaintEffectNoSchedule}}},
@@ -28,7 +28,7 @@ func node(name string, cpu, mem string, unschedulable bool) *corev1.Node {
 	}
 }
 
-func pod(nodeName string, phase corev1.PodPhase, cpu, mem string, initCPU string) *corev1.Pod {
+func pod(nodeName string, phase corev1.PodPhase, cpu, mem, initCPU string) *corev1.Pod {
 	p := &corev1.Pod{
 		Spec: corev1.PodSpec{NodeName: nodeName, Containers: []corev1.Container{{Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(cpu), corev1.ResourceMemory: resource.MustParse(mem)},

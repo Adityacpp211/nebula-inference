@@ -227,7 +227,7 @@ func (c *Client) Generate(ctx context.Context, call Call) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.http.Do(req) //nolint:bodyclose // closed by the deferred drainClose
 	if err != nil {
 		return nil, &Error{Transport: err}
 	}
@@ -257,7 +257,8 @@ func (c *Client) Stream(ctx context.Context, call Call) (*Stream, error) {
 		return nil, err
 	}
 	req.Header.Set("Accept", "text/event-stream")
-	resp, err := c.http.Do(req)
+	// The body is handed to the Stream on success, which closes it in Close.
+	resp, err := c.http.Do(req) //nolint:bodyclose // owned by the returned Stream
 	if err != nil {
 		return nil, &Error{Transport: err}
 	}
@@ -282,7 +283,7 @@ func (c *Client) Cancel(ctx context.Context, endpoint, requestID, traceparent st
 	req.Header.Set(HeaderRequestID, requestID)
 	req.Header.Set(HeaderTraceparent, traceparent)
 	req.Header.Set(HeaderProtocol, ProtocolVersion)
-	resp, err := c.http.Do(req)
+	resp, err := c.http.Do(req) //nolint:bodyclose // closed by drainClose below
 	if err != nil {
 		return err
 	}
@@ -388,7 +389,9 @@ func (s *Stream) readEvent() ([]byte, error) {
 			data = append(data, value...)
 		}
 		if err != nil {
-			return data, nil
+			// A last line without a newline is still a line; the read error
+			// surfaces on the next call, which has nothing left to return.
+			return data, nil //nolint:nilerr // see above
 		}
 	}
 }

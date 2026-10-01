@@ -91,7 +91,7 @@ func (*RoundRobin) Name() string { return StrategyRoundRobin }
 
 // Select implements Strategy.
 func (s *RoundRobin) Select(_ Request, eligible []Endpoint, _ FilterOptions) int {
-	return int((s.next.Add(1) - 1) % uint64(len(eligible)))
+	return rotate(&s.next, len(eligible), 0)
 }
 
 // LeastLoaded picks the endpoint with the fewest requests per slot. The default:
@@ -104,7 +104,7 @@ func (*LeastLoaded) Name() string { return StrategyLeastLoaded }
 
 // Select implements Strategy.
 func (s *LeastLoaded) Select(_ Request, eligible []Endpoint, o FilterOptions) int {
-	start := int(s.next.Add(1) % uint64(len(eligible)))
+	start := rotate(&s.next, len(eligible), 1)
 	return argmin(len(eligible), start, func(i int) float64 {
 		return eligible[i].Load(Fresh(&eligible[i], o))
 	})
@@ -123,7 +123,7 @@ func (*LatencyAware) Name() string { return StrategyLatencyAware }
 
 // Select implements Strategy.
 func (s *LatencyAware) Select(_ Request, eligible []Endpoint, o FilterOptions) int {
-	start := int(s.next.Add(1) % uint64(len(eligible)))
+	start := rotate(&s.next, len(eligible), 1)
 	return argmin(len(eligible), start, func(i int) float64 {
 		e := &eligible[i]
 		fresh := Fresh(e, o)
@@ -146,7 +146,7 @@ func (*CapabilityBased) Name() string { return StrategyCapabilityBased }
 
 // Select implements Strategy.
 func (s *CapabilityBased) Select(_ Request, eligible []Endpoint, o FilterOptions) int {
-	start := int(s.next.Add(1) % uint64(len(eligible)))
+	start := rotate(&s.next, len(eligible), 1)
 	return argmin(len(eligible), start, func(i int) float64 {
 		e := &eligible[i]
 		// Window dominates; load breaks ties within one window size.
@@ -163,7 +163,7 @@ func (s *CapabilityBased) Select(_ Request, eligible []Endpoint, o FilterOptions
 func Bucket(key string) int {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(key))
-	return int(h.Sum64() % 100)
+	return modulo(h.Sum64(), 100)
 }
 
 // PickWeighted chooses among weighted targets for a key.
@@ -207,7 +207,7 @@ func PickWeighted(weights []int, key string, usable func(int) bool) int {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(key))
 	_, _ = h.Write([]byte{0xff})
-	r := int(h.Sum64() % uint64(total))
+	r := modulo(h.Sum64(), total)
 	acc = 0
 	for i, w := range weights {
 		if w <= 0 || !usable(i) {
@@ -229,4 +229,15 @@ func SortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// rotate advances a cursor and maps it into [0, n). n is a slice length, so it
+// is positive and the result fits an int.
+func rotate(c *atomic.Uint64, n, offset int) int {
+	return modulo(c.Add(1)-1+uint64(offset), n) //nolint:gosec // offset is 0 or 1
+}
+
+// modulo reduces v into [0, n) for a positive n.
+func modulo(v uint64, n int) int {
+	return int(v % uint64(n)) //nolint:gosec // n > 0, and the result is below n
 }

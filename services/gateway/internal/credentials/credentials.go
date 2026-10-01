@@ -145,7 +145,7 @@ func (r *Resolver) Authenticate(ctx context.Context, presented string) (Principa
 }
 
 // record finds a credential through the three tiers.
-func (r *Resolver) record(ctx context.Context, prefix string) (*controlplane.Credential, bool, bool, error) {
+func (r *Resolver) record(ctx context.Context, prefix string) (cred *controlplane.Credential, negative, degraded bool, err error) {
 	now := r.o.Now()
 
 	r.mu.Lock()
@@ -180,7 +180,7 @@ func (r *Resolver) record(ctx context.Context, prefix string) (*controlplane.Cre
 	})
 	switch {
 	case err == nil:
-		cred := v.(*controlplane.Credential)
+		cred, _ := v.(*controlplane.Credential)
 		r.toRedis(ctx, prefix, cred)
 		r.store(prefix, &entry{cred: cred, fetched: now})
 		return cred, false, false, nil

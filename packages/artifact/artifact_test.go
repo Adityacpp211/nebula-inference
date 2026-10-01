@@ -184,7 +184,6 @@ func TestFetchNotFound(t *testing.T) {
 
 // ggufBuilder writes a GGUF header the way the specification lays it out.
 type ggufBuilder struct {
-	buf bytes.Buffer
 	kvs int
 	kv  bytes.Buffer
 }

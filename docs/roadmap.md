@@ -537,7 +537,57 @@ pods of one target shifts traffic within seconds without client errors.
 
 ---
 
-## Phase 7 — Request queue and concurrency control
+## Phase 7 — Request queue and concurrency control ✅
+
+**Status: complete**, with the deviations below.
+
+**Delivered**
+
+- `packages/queue`: a concurrency gate with a bounded waiting room — three priorities with aging
+  (one level per `NEBULA_GATEWAY_QUEUE_AGING`, default 5 s), absolute deadlines enforced by a
+  sweeper and by each waiter, cancellation that removes the entry at once, a newcomer never
+  overtaking a waiter, a `Retry-After` estimate from the queue ahead and observed service time, and
+  per-gate stats (depth by priority, oldest age, wait p50/p95/p99, drops by reason). Injected clock.
+- Gateway admission (`services/gateway/internal/admission`): one gate per deployment, sized on every
+  decision by the router — each eligible endpoint's slots (heartbeat, route, or default) times an
+  overcommit factor ([ADR-0034](./architecture-decisions/0034-admission-queue-per-deployment.md)).
+  The order is resolve → rate limit → queue → place → dispatch; a request that waited is placed
+  again on its deployment, because endpoints may have changed while it waited.
+- Backpressure end to end: a worker's 429 marks the endpoint saturated until its `Retry-After`; it
+  contributes no capacity and strategies avoid it; when every replica refuses, the request returns
+  to its queue (at most twice) instead of failing.
+- `nebula.queue: "reject"` fast-fail (`429 capacity_exhausted`), `429 queue_full` with
+  `Retry-After`, `504 queue_timeout` (not an inference error), and `nebula.gateway_queue_ms`.
+- `/debug/queues` (development only) with queue stats, heap and goroutines; `make load-overload`.
+- CI made green: golangci-lint v2 now actually runs and reports 0 issues (67 findings fixed or
+  annotated with their reason), and the whole Go suite passes under `-race` on Linux.
+
+**Tests.** Deterministic queue tests on a simulated clock: immediate admission and FIFO, a full
+queue shedding with `Retry-After` and never growing, deadline expiry by the sweeper counted as
+`queue_timeout`, cancellation removing the entry, strict priority order, **LOW served despite a
+sustained stream of HIGH** (aging), reject mode never waiting, capacity growth admitting waiters, and
+64 clients hammering a gate of capacity 4 and depth 16 — depth never above 16, heap flat across 4×
+the requests. Gateway tests: a saturated worker waited out and served on the second attempt, error
+mapping under `reject`. The OpenAI SDK suite still passes 13/13.
+
+**Load test** (`make load-overload`, `tests/load/results/phase7-overload.json`): one mock worker with
+4 slots, gateway admitting 4 at a time with a queue of 16, 75 requests/s offered for 60 s — three times
+what the stack serves. 1 052 served (17/s), 3 449 shed, **every shed a 429 with `Retry-After`, 0
+unexpected statuses**, queue depth at most 16, gateway heap 2.5–7.5 MiB with growth after warm-up of
+about 1 MiB, served-request latency p99 1.16 s.
+
+**Exit:** met — at 3× capacity memory is stable, queue depth bounded, and shedding correct with
+`Retry-After`.
+
+**Deviations.**
+
+- Queue metrics are in-process and at `/debug/queues`; the Prometheus export is Phase 8.
+- The per-deployment `queue_config.max_depth` sizes the *worker's* queue; the gateway queue depth is
+  a gateway setting (`NEBULA_GATEWAY_QUEUE_MAX_DEPTH`) for now.
+- Accounting is per gateway replica (ADR-0034); several replicas can overshoot one deployment, which
+  worker 429s and saturation correct.
+
+**Original plan**
 
 **Deliverables**
 

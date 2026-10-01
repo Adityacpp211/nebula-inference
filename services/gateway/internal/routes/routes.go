@@ -88,6 +88,9 @@ type Target struct {
 	Namespace string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
 	// ContextWindow of this target's model version; zero means the route's.
 	ContextWindow int `json:"context_window,omitempty" yaml:"context_window,omitempty"`
+	// Slots is each static endpoint's concurrency, for admission control when no
+	// heartbeat reports it. Zero means the gateway's default.
+	Slots int `json:"slots,omitempty" yaml:"slots,omitempty"`
 }
 
 // Key identifies the target's deployment in the router: its id when known, else
@@ -146,7 +149,7 @@ func Empty() *Table {
 // by extension; an unknown field is an error, because a misspelt "weight" that
 // silently defaults to zero would drop a target's traffic.
 func Load(path string, now time.Time) (*Table, error) {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) //nolint:gosec // the operator's own configuration file
 	if err != nil {
 		return nil, fmt.Errorf("reading route table: %w", err)
 	}

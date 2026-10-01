@@ -202,6 +202,18 @@ type GatewayConfig struct {
 	BreakerThreshold int      `json:"breaker_threshold" yaml:"breaker_threshold" env:"NEBULA_GATEWAY_BREAKER_THRESHOLD" default:"3"`
 	BreakerCooldown  Duration `json:"breaker_cooldown" yaml:"breaker_cooldown" env:"NEBULA_GATEWAY_BREAKER_COOLDOWN" default:"2s"`
 
+	// QueueMaxDepth bounds each deployment's admission queue; a full queue answers
+	// 429 with Retry-After at once (docs/architecture.md §6.3).
+	QueueMaxDepth int `json:"queue_max_depth" yaml:"queue_max_depth" env:"NEBULA_GATEWAY_QUEUE_MAX_DEPTH" default:"128"`
+	// QueueAging is how long a queued request waits to gain one priority level, so
+	// LOW is never starved by sustained HIGH.
+	QueueAging Duration `json:"queue_aging" yaml:"queue_aging" env:"NEBULA_GATEWAY_QUEUE_AGING" default:"5s"`
+	// DefaultSlots is an endpoint's concurrency when no heartbeat reports it, and
+	// SlotOvercommit multiplies slots into how many requests the gateway lets reach
+	// one endpoint at once (the rest wait in the admission queue).
+	DefaultSlots   int `json:"default_slots" yaml:"default_slots" env:"NEBULA_GATEWAY_DEFAULT_SLOTS" default:"4"`
+	SlotOvercommit int `json:"slot_overcommit" yaml:"slot_overcommit" env:"NEBULA_GATEWAY_SLOT_OVERCOMMIT" default:"2"`
+
 	// DefaultTimeout is a request's budget when neither the client nor the route
 	// sets one. MaxTimeout caps whatever the client asks for.
 	DefaultTimeout Duration `json:"default_timeout" yaml:"default_timeout" env:"NEBULA_GATEWAY_DEFAULT_TIMEOUT" default:"60s"`

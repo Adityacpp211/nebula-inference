@@ -62,8 +62,17 @@ One shape everywhere, OpenAI-compatible so existing SDK error handling works:
 | 504 | `timeout_error` | conditional | Retryable only if zero tokens were emitted. |
 
 `X-Nebula-Reason` values are a closed, documented set (`no_healthy_endpoint`, `queue_full`,
-`queue_timeout`, `breaker_open`, `rate_limited_rpm`, `rate_limited_tpm`, `concurrency_limit`,
-`model_loading`, `control_plane_degraded`) so clients and dashboards can branch on them.
+`queue_timeout`, `capacity_exhausted`, `breaker_open`, `rate_limited_rpm`, `rate_limited_tpm`,
+`concurrency_limit`, `model_loading`, `control_plane_degraded`) so clients and dashboards can branch
+on them.
+
+Since Phase 7 the gateway queues a request when its deployment has no free capacity, rather than
+failing it ([ADR-0034](./architecture-decisions/0034-admission-queue-per-deployment.md)). The queue
+answers in one of three ways when it cannot admit: `429 queue_full` with `Retry-After` (the queue is
+at its bound), `429 capacity_exhausted` with `Retry-After` (the request set `nebula.queue` to
+`"reject"` and there was no room now), or `504 queue_timeout` (its timeout passed while it waited;
+nothing was dispatched). A shed request is not charged tokens. Priority comes from the API key and
+ages while it waits, so `LOW` is never starved.
 
 ---
 
@@ -170,7 +179,9 @@ OpenAI embeddings shape and is available for model versions whose `task` is `emb
 > into a prompt by the gateway with the route's declared template (`chatml`, `llama3` or `plain`);
 > reading the template from GGUF metadata is still open (TODO(NEB-144)). `estimated_cost`
 > is absent from the `nebula` block until the cost engine (Phase 13) can compute it — absent, not
-> zero (axiom A6). `nebula.queue` is accepted and has no effect until the gateway queue (Phase 7).
+> zero (axiom A6). `nebula.queue` is `"allow"` (default: wait in the admission queue within the timeout) or
+> `"reject"` (fail at once with `429 capacity_exhausted` instead of waiting).
+> `nebula.gateway_queue_ms` reports the time spent in the gateway's queue, absent when there was none.
 
 ### `GET /v1/models`
 

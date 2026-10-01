@@ -201,7 +201,7 @@ func TestInternalRoutingTable(t *testing.T) {
 	}
 
 	// Unchanged content is a 304.
-	req, _ := http.NewRequestWithContext(dbtest.Context(t), "GET", f.Server.URL+"/internal/v1/routing-table", nil)
+	req, _ := http.NewRequestWithContext(dbtest.Context(t), "GET", f.Server.URL+"/internal/v1/routing-table", http.NoBody)
 	req.Header.Set(auth.HeaderAuthContext, service)
 	req.Header.Set("If-None-Match", h.Get("ETag"))
 	resp, err := f.Server.Client().Do(req)

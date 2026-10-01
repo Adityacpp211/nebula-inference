@@ -135,7 +135,7 @@ func runMain() error {
 	// A standby replica is ready: it is doing exactly its job, which is waiting.
 	// Leadership and cache state are reported in /healthz for operators.
 	probes.Register(telemetry.CheckFunc{CheckName: "kubernetes_api", IsCritical: false, CheckTimeout: 2 * time.Second,
-		Fn: func(ctx context.Context) error {
+		Fn: func(context.Context) error {
 			_, err := kube.Discovery().ServerVersion()
 			return err
 		}})

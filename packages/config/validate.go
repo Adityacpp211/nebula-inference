@@ -286,6 +286,11 @@ func (c *Config) validateGateway(v *ValidationErrors) {
 	v.AddIf(g.HeartbeatStaleAfter.Duration() < time.Second, "NEBULA_GATEWAY_HEARTBEAT_STALE_AFTER", "must be at least 1s")
 	v.AddIf(g.BreakerThreshold < 1, "NEBULA_GATEWAY_BREAKER_THRESHOLD", "must be at least 1")
 	v.AddIf(g.BreakerCooldown.Duration() <= 0, "NEBULA_GATEWAY_BREAKER_COOLDOWN", "must be positive")
+	v.AddIf(g.QueueMaxDepth < 0 || g.QueueMaxDepth > 100000, "NEBULA_GATEWAY_QUEUE_MAX_DEPTH",
+		"must be between 0 (never queue) and 100000")
+	v.AddIf(g.QueueAging.Duration() < 0, "NEBULA_GATEWAY_QUEUE_AGING", "must not be negative")
+	v.AddIf(g.DefaultSlots < 1, "NEBULA_GATEWAY_DEFAULT_SLOTS", "must be at least 1")
+	v.AddIf(g.SlotOvercommit < 1 || g.SlotOvercommit > 64, "NEBULA_GATEWAY_SLOT_OVERCOMMIT", "must be between 1 and 64")
 	if c.NATS.URL != "" {
 		if u, err := url.Parse(c.NATS.URL); err != nil || (u.Scheme != "nats" && u.Scheme != "tls") || u.Host == "" {
 			v.Add("NEBULA_NATS_URL", "must be a nats:// or tls:// URL (got %q)", c.NATS.URL)

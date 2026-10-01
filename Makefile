@@ -287,6 +287,11 @@ run-gateway:
 		NEBULA_GATEWAY_ROUTES_FILE=deploy/dev/routes.yaml \
 		go run ./services/gateway
 
+## load-overload: the Phase 7 exit test — 3x capacity, bounded queue, flat memory
+.PHONY: load-overload
+load-overload: build
+	@./scripts/load-overload.sh
+
 ## e2e-gateway: the Phase 4 demo — the OpenAI Python SDK against a live stack
 ##
 ## Starts PostgreSQL and Redis, migrates a throwaway database, runs the control

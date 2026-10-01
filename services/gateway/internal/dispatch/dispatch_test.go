@@ -60,7 +60,7 @@ func TestRequestCarriesTheProtocolHeaders(t *testing.T) {
 
 func TestWorkerErrorEnvelope(t *testing.T) {
 	t.Parallel()
-	srv := netx.NewServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := netx.NewServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "3")
 		w.Header().Set("X-Nebula-Reason", "worker_saturated")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -89,7 +89,7 @@ func TestTransportError(t *testing.T) {
 }
 
 func sse(events ...string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		for _, e := range events {
 			_, _ = io.WriteString(w, e)
@@ -161,7 +161,7 @@ func TestStreamTruncatedAndErrorEvents(t *testing.T) {
 
 func TestStreamRefusedBeforeStart(t *testing.T) {
 	t.Parallel()
-	srv := netx.NewServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := netx.NewServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusConflict)
 		_, _ = w.Write([]byte(`{"error":{"message":"wrong version","type":"invalid_request_error","code":"model_version_mismatch"}}`))
 	}))

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -60,7 +61,7 @@ func TestUnreachableReplicaIsSkipped(t *testing.T) {
 
 	sawRetry := false
 	for i := 0; i < 4; i++ {
-		nb := readNebula(t, h.do("POST", "/v1/chat/completions", keyAcme, chatBody))
+		nb := readNebula(t, h.do("POST", "/v1/chat/completions", keyAcme, chatBody)) //nolint:bodyclose // readNebula closes it
 		if nb.Nebula.Attempts == 2 {
 			sawRetry = true
 		}
@@ -121,5 +122,45 @@ func TestFailoverPolicy(t *testing.T) {
 	nb := readNebula(t, resp)
 	if nb.Nebula.Deployment != "b" || nb.Nebula.Degraded != "failover:backup" {
 		t.Fatalf("%+v", nb.Nebula)
+	}
+}
+
+// Backpressure end to end: a worker answering 429 is marked saturated, the request
+// goes back to the admission queue instead of failing, and is served once the
+// Retry-After has passed.
+func TestSaturatedWorkerIsWaitedOut(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	var calls atomic.Int32
+	ok := replyJSON("hello", "stop", 7, 2)
+	h.worker.handle = func(w http.ResponseWriter, r *http.Request, req workerReq) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.Header().Set("X-Nebula-Reason", "worker_saturated")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"error":{"message":"full","type":"rate_limit_error","code":"worker_saturated"}}`)
+			return
+		}
+		ok(w, r, req)
+	}
+	started := time.Now()
+	resp := h.do("POST", "/v1/chat/completions", keyAcme, chatBody)
+	var body struct {
+		Nebula struct {
+			Attempts       int    `json:"attempts"`
+			GatewayQueueMS *int64 `json:"gateway_queue_ms"`
+		} `json:"nebula"`
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("%d %s", resp.StatusCode, b)
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body.Nebula.Attempts != 2 || body.Nebula.GatewayQueueMS == nil || *body.Nebula.GatewayQueueMS < 900 {
+		t.Fatalf("want 2 attempts and about a second queued, got %+v (queued %v)", body.Nebula, body.Nebula.GatewayQueueMS)
+	}
+	if d := time.Since(started); d > 5*time.Second {
+		t.Fatalf("took %v", d)
 	}
 }

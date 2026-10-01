@@ -63,10 +63,10 @@ type TableSource struct {
 // snapshot is loaded so the gateway routes with the control plane down (axiom A8).
 func (s *TableSource) Run(ctx context.Context) {
 	if err := s.Poll(ctx); err != nil {
-		s.Logger.Warn("the control plane routing table is unavailable at startup; trying the snapshot",
+		s.Logger.WarnContext(ctx, "the control plane routing table is unavailable at startup; trying the snapshot",
 			slog.String("cause", err.Error()))
 		if err := s.LoadSnapshot(ctx); err != nil {
-			s.Logger.Warn("no routing snapshot either; serving no routes until the control plane answers",
+			s.Logger.WarnContext(ctx, "no routing snapshot either; serving no routes until the control plane answers",
 				slog.String("cause", err.Error()))
 		}
 	}
@@ -83,11 +83,11 @@ func (s *TableSource) Run(ctx context.Context) {
 		switch {
 		case err != nil && !failing:
 			failing = true
-			s.Logger.Warn("routing table refresh failed; serving the last good table",
+			s.Logger.WarnContext(ctx, "routing table refresh failed; serving the last good table",
 				slog.String("cause", err.Error()))
 		case err == nil && failing:
 			failing = false
-			s.Logger.Info("routing table refresh recovered")
+			s.Logger.InfoContext(ctx, "routing table refresh recovered")
 		}
 		s.save(ctx)
 	}
@@ -155,7 +155,7 @@ func (s *TableSource) LoadSnapshot(ctx context.Context) error {
 	}
 	s.Router.Restore(snap)
 	s.FromSnapshot.Store(true)
-	s.Logger.Info("routing state restored from the snapshot",
+	s.Logger.InfoContext(ctx, "routing state restored from the snapshot",
 		slog.Time("saved_at", snap.SavedAt), slog.Int("routes", s.Router.Table().Len()))
 	return nil
 }
@@ -180,7 +180,7 @@ func (s *TableSource) save(ctx context.Context) {
 	snap.SavedAt = saved
 	b, _ = json.Marshal(snap)
 	if err := s.Snapshots.Save(ctx, b); err != nil {
-		s.Logger.Debug("saving the routing snapshot failed", slog.String("cause", err.Error()))
+		s.Logger.DebugContext(ctx, "saving the routing snapshot failed", slog.String("cause", err.Error()))
 		return
 	}
 	s.lastSaved = sum
@@ -276,7 +276,7 @@ func (e *EndpointSlices) Run(ctx context.Context) error {
 		return ctx.Err()
 	}
 	e.synced.Store(true)
-	e.Logger.Info("endpoint discovery synced", slog.String("namespace", e.Namespace))
+	e.Logger.InfoContext(ctx, "endpoint discovery synced", slog.String("namespace", e.Namespace))
 	<-ctx.Done()
 	factory.Shutdown()
 	return nil
@@ -427,7 +427,6 @@ func (h *Heartbeats) Run(ctx context.Context) error {
 	// Heartbeats are latest-wins; dropping a backlog is correct, blocking is not.
 	_ = sub.SetPendingLimits(64*1024, 64<<20)
 	for subject, fn := range h.Also {
-		fn := fn
 		if _, err := nc.Subscribe(subject, func(m *nats.Msg) { fn(m.Data) }); err != nil {
 			nc.Close()
 			return fmt.Errorf("subscribing to %s: %w", subject, err)

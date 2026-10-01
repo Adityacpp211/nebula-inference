@@ -18,6 +18,8 @@
 #                     127.0.0.1:5432 and :6379 (a native install, WSL, a tunnel)
 #   GATEWAY_ENV       extra "NAME=value" words for the gateway's environment
 #   WORKER_RUNTIME_CONFIG  the mock runtime's configuration (JSON)
+#   ROUTE_SLOTS       the route target's slots: the gateway's admission capacity per
+#                     endpoint (times NEBULA_GATEWAY_SLOT_OVERCOMMIT) without heartbeats
 
 set -euo pipefail
 
@@ -129,7 +131,7 @@ routes:
     capabilities: {streaming: true}
     targets:
       - {deployment: mock-e2e, model_version: "e2e:mock", weight: 100, label: baseline,
-         endpoints: ["$WORKER_URL"]}
+         slots: ${ROUTE_SLOTS:-8}, endpoints: ["$WORKER_URL"]}
 EOF
 
   echo "== gateway"

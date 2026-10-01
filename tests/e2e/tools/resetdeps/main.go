@@ -52,7 +52,7 @@ func run(adminURL, dbName, redisURL string) error {
 		if err != nil {
 			return fmt.Errorf("connecting to PostgreSQL: %w", err)
 		}
-		defer conn.Close(ctx)
+		defer func() { _ = conn.Close(ctx) }()
 		for _, stmt := range []string{
 			fmt.Sprintf(`DROP DATABASE IF EXISTS %q WITH (FORCE)`, dbName),
 			fmt.Sprintf(`CREATE DATABASE %q`, dbName),
@@ -68,7 +68,7 @@ func run(adminURL, dbName, redisURL string) error {
 			return err
 		}
 		c := redis.NewClient(opts)
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		for i := 0; i < 30; i++ {
 			if err = c.Ping(ctx).Err(); err == nil {
 				break

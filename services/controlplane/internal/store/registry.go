@@ -227,12 +227,6 @@ func (r *ModelVersionRepo) ListForModel(ctx context.Context, q Querier, orgID, m
 	return out, classify(rows.Err())
 }
 
-// SetStatus moves a version through its lifecycle with a compare-and-set.
-//
-// The expected-status predicate is what makes concurrent finalize requests safe:
-// the second one affects no rows and gets ErrConflict rather than both appearing to
-// succeed. Postgres' own trigger independently refuses anything the lifecycle
-// forbids, so a bug here cannot produce an illegal state.
 // Verifying is a version awaiting byte-level verification, with its tenant.
 type Verifying struct {
 	OrgID   uuid.UUID
@@ -279,6 +273,12 @@ func prefixed(prefix, columns string) string {
 	return strings.Join(parts, ", ")
 }
 
+// SetStatus moves a version through its lifecycle with a compare-and-set.
+//
+// The expected-status predicate is what makes concurrent finalize requests safe:
+// the second one affects no rows and gets ErrConflict rather than both appearing to
+// succeed. Postgres' own trigger independently refuses anything the lifecycle
+// forbids, so a bug here cannot produce an illegal state.
 func (r *ModelVersionRepo) SetStatus(ctx context.Context, q Querier, orgID, id uuid.UUID,
 	from, to models.ModelVersionStatus, failureReason *string) error {
 	if !from.CanTransitionTo(to) {

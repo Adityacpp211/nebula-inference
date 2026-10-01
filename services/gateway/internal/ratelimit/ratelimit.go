@@ -246,14 +246,14 @@ func (le *Lease) Release(ctx context.Context, actualTokens int) {
 	le.once.Do(func() {
 		now := le.l.now()
 		if le.redis {
-			if err := le.l.releaseRedis(ctx, le.req, actualTokens, now); err == nil {
+			err := le.l.releaseRedis(ctx, le.req, actualTokens, now)
+			if err == nil {
 				return
-			} else {
-				// The slot now expires with its lease instead of being freed. Logged
-				// rather than retried: the lease TTL is the bound on the damage.
-				le.l.logger.WarnContext(ctx, "releasing a rate-limit lease failed; it expires with its TTL",
-					slog.String("cause", err.Error()))
 			}
+			// The slot now expires with its lease instead of being freed. Logged
+			// rather than retried: the lease TTL is the bound on the damage.
+			le.l.logger.WarnContext(ctx, "releasing a rate-limit lease failed; it expires with its TTL",
+				slog.String("cause", err.Error()))
 			return
 		}
 		le.l.local.release(le.req, actualTokens, now)

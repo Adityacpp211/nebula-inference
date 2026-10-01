@@ -121,7 +121,8 @@ func ParseURI(uri string) (scheme, bucket, key string, err error) {
 			return "", "", "", fmt.Errorf("artifact uri %q has no bucket", uri)
 		}
 	case "file":
-		// file:///abs/dir/sha256/<hex> — the key is the last two segments.
+		// A file URI names an absolute directory followed by sha256/<hex>; the key
+		// is those last two segments.
 		i := strings.LastIndex(rest, "/sha256/")
 		if i < 0 {
 			return "", "", "", fmt.Errorf("artifact uri %q is not content-addressed", uri)

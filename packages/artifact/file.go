@@ -23,7 +23,7 @@ func NewDir(root string) (*Dir, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Join(abs, "sha256"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(abs, "sha256"), 0o750); err != nil {
 		return nil, fmt.Errorf("artifact dir: %w", err)
 	}
 	return &Dir{root: abs}, nil
@@ -80,14 +80,14 @@ func (d *Dir) Put(_ context.Context, key string, r io.Reader) error {
 }
 
 func writeAtomic(path string, r io.Reader) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".partial-*")
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name()) // no-op after a successful rename
+	defer func() { _ = os.Remove(tmp.Name()) }() // no-op after a successful rename
 	if _, err := io.Copy(tmp, r); err != nil {
 		_ = tmp.Close()
 		return err

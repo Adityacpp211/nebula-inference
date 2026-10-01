@@ -48,7 +48,7 @@ func (g *Gateway) stream(w http.ResponseWriter, r *http.Request, ex *exchange) {
 	var err error
 	for {
 		st, err = g.d.Workers.Stream(wctx, ex.call)
-		if err == nil || ctx.Err() != nil || !g.replace(ex, err) {
+		if err == nil || ctx.Err() != nil || !g.replace(ctx, ex, err) {
 			break
 		}
 	}
@@ -60,14 +60,14 @@ func (g *Gateway) stream(w http.ResponseWriter, r *http.Request, ex *exchange) {
 			return
 		}
 		ex.verdict = verdictOf(err)
-		apiErr := g.workerError(w, ctx, err)
+		apiErr := g.workerError(ctx, w, err)
 		ex.record.StatusCode = apiErr.Status
 		ex.record.ErrorClass = string(apiErr.Type)
 		ex.record.Outcome = outcomeOf(apiErr)
 		g.fail(w, r, apiErr)
 		return
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	events := make(chan streamItem, 8)
 	stop := make(chan struct{})
@@ -106,13 +106,14 @@ func (g *Gateway) stream(w http.ResponseWriter, r *http.Request, ex *exchange) {
 	}
 
 	meta := openai.Meta{
-		RequestID:    ex.call.RequestID,
-		Route:        ex.route.Model,
-		Deployment:   ex.target.Deployment,
-		ModelVersion: ex.target.ModelVersion,
-		Variant:      ex.target.Label,
-		Attempts:     ex.attempts,
-		Degraded:     ex.degraded,
+		RequestID:      ex.call.RequestID,
+		Route:          ex.route.Model,
+		Deployment:     ex.target.Deployment,
+		ModelVersion:   ex.target.ModelVersion,
+		Variant:        ex.target.Label,
+		Attempts:       ex.attempts,
+		Degraded:       ex.degraded,
+		GatewayQueueMS: gatewayQueueMS(ex),
 	}
 	if err := sw.metaComment(meta); err != nil {
 		clientGone()

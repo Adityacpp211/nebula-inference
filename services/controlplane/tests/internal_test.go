@@ -33,7 +33,7 @@ func signer(t *testing.T, maxAge time.Duration, now func() time.Time) *auth.Cont
 // gateway's admin proxy does.
 func (f *fixture) send(t *testing.T, method, path, signedContext string, out any) (int, http.Header) {
 	t.Helper()
-	req, err := http.NewRequestWithContext(dbtest.Context(t), method, f.Server.URL+path, nil)
+	req, err := http.NewRequestWithContext(dbtest.Context(t), method, f.Server.URL+path, http.NoBody)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestInternalCredentialLookup(t *testing.T) {
 	// A revoked key is returned WITH its revocation, not hidden: the gateway must
 	// answer credential_revoked, not invalid_credential.
 	var revokeHeaders http.Header
-	req, _ := http.NewRequestWithContext(dbtest.Context(t), "DELETE", f.Server.URL+"/v1/api-keys/"+f.KeyID.String(), nil)
+	req, _ := http.NewRequestWithContext(dbtest.Context(t), "DELETE", f.Server.URL+"/v1/api-keys/"+f.KeyID.String(), http.NoBody)
 	req.Header.Set(auth.HeaderAuthContext, tenant)
 	resp, err := f.Server.Client().Do(req)
 	if err != nil {

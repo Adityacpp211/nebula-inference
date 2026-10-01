@@ -19,29 +19,30 @@ for chunk in client.chat.completions.create(
 
 ---
 
-> ## Project status — Phase 6 complete
+> ## Project status — Phase 7 complete
 >
-> **Requests are routed by health and load, not by a file.** A route — the public model name — is
-> created through the API over weighted deployments; every gateway picks it up from the control
-> plane within seconds, discovers the pods from EndpointSlices, reads their load from worker
-> heartbeats over NATS, and places each request on the least-loaded replica that can take it. Kill
-> every pod of one target under load and its traffic moves to the others within a second, with no
-> client errors; restart a gateway while the control plane is down and it still routes, from a Redis
-> snapshot. The `nebula` CLI in the examples above is still Phase 14; today it is a `curl`.
+> **Overload turns into bounded waiting, then honest refusal — never a crash.** Requests are routed
+> by health and load: routes come from the control plane, pods from EndpointSlices, load from
+> worker heartbeats over NATS. When a deployment is full, requests wait in a bounded,
+> prioritised, deadline-aware queue at the gateway; when that is full too, they are refused at once
+> with `429` and a `Retry-After` estimate. At three times capacity the queue holds at its bound,
+> the gateway's memory stays flat, and nothing fails that was not deliberately shed. Kill every
+> pod of one target under load and its traffic moves elsewhere with no client errors; restart a
+> gateway while the control plane is down and it still routes and authenticates.
 >
-> What works now: everything from Phases 1–5 (schema and row-level security, API-key auth, the
-> registry and enforced lifecycle, the worker with llama.cpp and mock runtimes, the OpenAI-compatible
-> gateway with streaming and rate limiting, the deployment controller with capacity admission,
-> verified artifacts, Helm and kind) plus routes and routing policies, the router with its
-> filter, strategies, breakers and failover, worker heartbeats, and the cross-replica revocation
-> broadcast.
+> What works now: everything from Phases 1–6 (schema and row-level security, API-key auth, the
+> registry and lifecycle, the worker with llama.cpp and mock runtimes, the OpenAI-compatible
+> gateway, the deployment controller with verified artifacts, Helm and kind, routes, routing
+> strategies, heartbeats) plus the admission queue per deployment, worker-saturation backpressure,
+> and `nebula.queue: "reject"` fast-fail.
 >
-> What this deliberately does NOT do yet: there is no gateway queue (Phase 7), no metrics endpoint
-> or traces (Phase 8), no autoscaling (Phase 9), and retries only happen before a worker starts
-> work — general retries are Phase 10. Usage records are log lines until the durable event stream.
+> What this deliberately does NOT do yet: no metrics endpoint or traces (Phase 8 — queue stats exist
+> in-process and at `/debug/queues` in development), no autoscaling (Phase 9), and retries only
+> before a worker starts work (Phase 10). Usage records are log lines until the durable event
+> stream.
 >
-> Next: [Phase 7](docs/roadmap.md#phase-7--request-queue-and-concurrency-control) — the request queue
-> and concurrency control. See [Capability status](#capability-status).
+> Next: [Phase 8](docs/roadmap.md#phase-8--metrics-logs-tracing) — metrics, logs and tracing.
+> See [Capability status](#capability-status).
 
 ## Running it today
 
@@ -86,6 +87,7 @@ make run-gateway        # :8080 — routes from deploy/dev/routes.yaml
 
 make e2e-gateway        # or: the whole stack, throwaway, driven by the OpenAI SDK
 make load-gateway       # the same stack under k6
+make load-overload      # three times capacity: bounded queue, flat memory, 429 + Retry-After
 ```
 
 ```python
@@ -329,7 +331,7 @@ checkout.
 | Gateway container image | ✅ **working** — built and run on kind in the Phase 5 demo | 4 |
 | Deployment controller, Kubernetes integration, Helm | ✅ **working** — kind demo 12/12: pods replaced, deleted Deployments recreated, drift reverted | 5 |
 | Health-aware routing, routing strategies | ✅ **working** — kind demo: 50/50 split, all pods of one target killed under load with 0 errors, cold start from snapshot | 6 |
-| Bounded queues, concurrency control, backpressure | ⬜ not started | 7 |
+| Bounded queues, concurrency control, backpressure | ✅ **working** — 3× capacity load test: queue at its bound, heap flat, every refusal a 429 with Retry-After | 7 |
 | Metrics, logs, traces, Grafana dashboards | ⬜ not started | 8 |
 | Autoscaling | ⬜ not started | 9 |
 | Retries, breakers, timeouts, graceful shutdown | ⬜ not started | 10 |

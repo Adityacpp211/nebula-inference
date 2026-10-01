@@ -44,19 +44,26 @@ func main() {
 	retries := flag.Int("retries", 4, "attempts for transient failures")
 	flag.Parse()
 
+	os.Exit(pull(*resultPath, *retries))
+}
+
+// pull runs the fetch and reports it; separate from main so its deferred cleanup
+// runs before the process exits.
+func pull(resultPath string, retries int) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	res, code := run(ctx, os.Getenv, *retries)
+	res, code := run(ctx, os.Getenv, retries)
 	b, _ := json.Marshal(res)
 	fmt.Println(string(b))
-	if err := os.WriteFile(*resultPath, b, 0o644); err != nil && !errors.Is(err, os.ErrNotExist) {
+	// The kubelet reads the termination message as root; owner-only is enough.
+	if err := os.WriteFile(resultPath, b, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
 		fmt.Fprintln(os.Stderr, "writing result:", err)
 	}
-	os.Exit(code)
+	return code
 }
 
-func run(ctx context.Context, getenv func(string) string, retries int) (artifact.FetchResult, int) {
+func run(ctx context.Context, getenv func(string) string, retries int) (result artifact.FetchResult, exitCode int) {
 	fail := func(code int, errCode string, err error) (artifact.FetchResult, int) {
 		return artifact.FetchResult{Status: artifact.FetchFailed, ErrorCode: errCode, Error: err.Error(),
 			SHA256: getenv("NEBULA_ARTIFACT_SHA256")}, code
