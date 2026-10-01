@@ -1,0 +1,47 @@
+# nebula-artifact-puller
+#
+# The init container that fills the node-local, content-addressed model cache.
+# Distroless static, non-root; it reads store credentials from its environment and
+# writes only to the cache mount.
+
+FROM golang:1.24-alpine AS build
+
+# git is needed only so the build can stamp a commit when one is not passed in.
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /src
+
+# Dependencies first: this layer is cached unless go.mod or go.sum changes.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+
+# CGO_ENABLED=0 produces a static binary, which is what makes a distroless
+# static base viable. -trimpath keeps build paths out of the binary.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath \
+      -ldflags "-s -w \
+        -X github.com/adityasatwar321/nebula/packages/version.Version=${VERSION} \
+        -X github.com/adityasatwar321/nebula/packages/version.Commit=${COMMIT} \
+        -X github.com/adityasatwar321/nebula/packages/version.BuildTime=${BUILD_TIME}" \
+      -o /out/nebula-artifact-puller ./cmd/nebula-artifact-puller
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=build /out/nebula-artifact-puller /usr/local/bin/nebula-artifact-puller
+
+# 65532 is distroless's "nonroot" user. Declared explicitly so the image is
+# correct even when a Pod spec omits securityContext.
+USER 65532:65532
+
+
+# No HEALTHCHECK: Kubernetes probes own liveness and readiness, and two
+# independent health mechanisms disagreeing is worse than one.
+ENTRYPOINT ["/usr/local/bin/nebula-artifact-puller"]

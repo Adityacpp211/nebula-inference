@@ -8,6 +8,7 @@ import (
 
 	"github.com/adityasatwar321/nebula/packages/db/models"
 	"github.com/adityasatwar321/nebula/packages/lifecycle"
+	"github.com/adityasatwar321/nebula/packages/scheduler"
 )
 
 // Wire types live here rather than being the row structs, for one reason: a row
@@ -302,7 +303,7 @@ func newDeploymentResponse(d *models.Deployment, now time.Time) deploymentRespon
 		Status: deploymentStatusDTO{
 			State: string(d.State), StateReason: d.StateReason, StateMessage: d.StateMessage,
 			StateEnteredAt:     d.StateEnteredAt,
-			StateAgeSeconds:    int64(now.Sub(d.StateEnteredAt).Seconds()),
+			StateAgeSeconds:    ageSeconds(now, d.StateEnteredAt),
 			Serving:            lifecycle.Serving(d.State),
 			NextStates:         nextStrings,
 			ObservedGeneration: d.ObservedGeneration,
@@ -322,7 +323,10 @@ func newDeploymentResponse(d *models.Deployment, now time.Time) deploymentRespon
 // that the control plane has not verified.
 type createdDeploymentResponse struct {
 	deploymentResponse
-	Note string `json:"note,omitempty"`
+	// Placement is the admission decision: the constraints the controller will
+	// apply and the capacity observed when the deployment was admitted.
+	Placement *scheduler.Decision `json:"placement,omitempty"`
+	Note      string              `json:"note,omitempty"`
 }
 
 type createDeploymentRequest struct {
@@ -513,4 +517,14 @@ func hexString(b []byte) string {
 		out = append(out, digits[c>>4], digits[c&0x0f])
 	}
 	return string(out)
+}
+
+// ageSeconds is how long ago t was, never negative. The timestamp comes from the
+// database's clock and now from this process's; when the database host runs ahead,
+// a state entered a moment ago would otherwise report a negative age.
+func ageSeconds(now, t time.Time) int64 {
+	if d := now.Sub(t); d > 0 {
+		return int64(d.Seconds())
+	}
+	return 0
 }

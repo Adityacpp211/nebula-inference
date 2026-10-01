@@ -1,0 +1,106 @@
+{{- $name := "nebula-gateway" }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+# Phase 5 routing is a static table; the EndpointSlice read access of
+# docs/deployment-architecture.md §3 arrives with dynamic routing in Phase 6.
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nebula-gateway-routes
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+data:
+  routes.yaml: |
+    routes: {{- toYaml .Values.gateway.routes | nindent 6 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nebula.labels" . | nindent 4 }}
+    {{- include "nebula.selector" $name | nindent 4 }}
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels: {{- include "nebula.selector" $name | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nebula.labels" . | nindent 8 }}
+        {{- include "nebula.selector" $name | nindent 8 }}
+      annotations:
+        checksum/routes: {{ toYaml .Values.gateway.routes | sha256sum }}
+        checksum/secrets: {{ include (print $.Template.BasePath "/namespaces-secrets.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: false
+      securityContext: {{- include "nebula.podSecurity" . | nindent 8 }}
+      terminationGracePeriodSeconds: 60
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {{- include "nebula.selector" $name | nindent 14 }}
+      containers:
+        - name: gateway
+          image: {{ include "nebula.image" (dict "root" . "name" "gateway") }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          ports: [{name: http, containerPort: 8080}]
+          env:
+            {{- include "nebula.commonEnv" . | nindent 12 }}
+            - name: NEBULA_GATEWAY_CONTROLPLANE_URL
+              value: http://nebula-controlplane.{{ .Release.Namespace }}:8082
+            - name: NEBULA_GATEWAY_ROUTES_FILE
+              value: /etc/nebula/routes.yaml
+            {{- range $k := list "NEBULA_AUTH_KEY_PEPPER" "NEBULA_INTERNAL_AUTH_SECRET" "NEBULA_REDIS_URL" }}
+            - name: {{ $k }}
+              valueFrom: {secretKeyRef: {name: nebula-secrets, key: {{ $k }}}}
+            {{- end }}
+          {{- include "nebula.probes" . | nindent 10 }}
+          lifecycle:
+            preStop: {sleep: {seconds: 5}}
+          resources: {{- toYaml .Values.gateway.resources | nindent 12 }}
+          securityContext: {{- include "nebula.containerSecurity" . | nindent 12 }}
+          volumeMounts: [{name: routes, mountPath: /etc/nebula, readOnly: true}]
+      volumes:
+        - name: routes
+          configMap: {name: nebula-gateway-routes}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.gateway.service.type }}
+  selector: {{- include "nebula.selector" $name | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      {{- if .Values.gateway.service.nodePort }}
+      nodePort: {{ .Values.gateway.service.nodePort }}
+      {{- end }}
+{{- if gt (int .Values.gateway.replicas) 1 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  minAvailable: 50%
+  selector:
+    matchLabels: {{- include "nebula.selector" $name | nindent 6 }}
+{{- end }}

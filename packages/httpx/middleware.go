@@ -198,6 +198,11 @@ func (s *statusRecorder) Flush() {
 	}
 }
 
+// Unwrap exposes the underlying writer to http.ResponseController, so a streaming
+// handler can set per-write deadlines through the middleware chain. Without it the
+// controller stops at this wrapper and SetWriteDeadline reports "not supported".
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
 // AccessLog logs one structured line per request after it completes.
 //
 // skipPaths suppresses probe endpoints: kubelet polls them every few seconds and

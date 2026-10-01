@@ -46,6 +46,8 @@ type Store struct {
 	Organizations *OrganizationRepo
 	Users         *UserRepo
 	APIKeys       *APIKeyRepo
+	RatePolicies  *RateLimitPolicyRepo
+	Nodes         *NodeRepo
 	Models        *ModelRepo
 	Versions      *ModelVersionRepo
 	Deployments   *DeploymentRepo
@@ -59,6 +61,8 @@ func New(pool *db.Pool) *Store {
 		Organizations: &OrganizationRepo{},
 		Users:         &UserRepo{},
 		APIKeys:       &APIKeyRepo{},
+		RatePolicies:  &RateLimitPolicyRepo{},
+		Nodes:         &NodeRepo{},
 		Models:        &ModelRepo{},
 		Versions:      &ModelVersionRepo{},
 		Deployments:   &DeploymentRepo{},
@@ -198,7 +202,7 @@ func constraintDescription(name string) string {
 		return "a model with that name already exists in this organization"
 	case "uq_model_versions__model_version":
 		return "that version already exists for this model"
-	case "uq_deployments__org_name":
+	case "uq_deployments__org_name", "uq_deployments__org_name_live":
 		return "a deployment with that name already exists in this organization"
 	case "uq_deployment_revisions__dep_rev":
 		return "that revision number already exists for this deployment"

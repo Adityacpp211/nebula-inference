@@ -1,0 +1,65 @@
+{{/* Names, labels and images: one definition each, reused everywhere. */}}
+
+{{- define "nebula.labels" -}}
+app.kubernetes.io/part-of: nebula
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
+{{- end -}}
+
+{{- define "nebula.selector" -}}
+app.kubernetes.io/name: {{ . }}
+{{- end -}}
+
+{{/* image: (dict "root" $ "name" "gateway") → registry/nebula/gateway:tag */}}
+{{- define "nebula.image" -}}
+{{- $v := .root.Values.images -}}
+{{- $tag := required "images.tag is required: images are always pinned, never latest" $v.tag -}}
+{{- if eq $tag "latest" }}{{ fail "images.tag must not be latest" }}{{ end -}}
+{{- $repo := index $v .name -}}
+{{- if $v.registry -}}{{ printf "%s/%s:%s" $v.registry $repo $tag }}{{- else -}}{{ printf "%s:%s" $repo $tag }}{{- end -}}
+{{- end -}}
+
+{{/* The hardening every NEBULA container carries (docs/deployment-architecture.md §2.1). */}}
+{{- define "nebula.containerSecurity" -}}
+allowPrivilegeEscalation: false
+readOnlyRootFilesystem: true
+runAsNonRoot: true
+capabilities:
+  drop: ["ALL"]
+seccompProfile:
+  type: RuntimeDefault
+{{- end -}}
+
+{{- define "nebula.podSecurity" -}}
+runAsNonRoot: true
+runAsUser: 65532
+runAsGroup: 65532
+seccompProfile:
+  type: RuntimeDefault
+{{- end -}}
+
+{{- define "nebula.probes" -}}
+startupProbe:
+  httpGet: {path: /readyz, port: http}
+  periodSeconds: 2
+  timeoutSeconds: 3
+  failureThreshold: 60
+readinessProbe:
+  httpGet: {path: /readyz, port: http}
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+livenessProbe:
+  httpGet: {path: /livez, port: http}
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+{{- end -}}
+
+{{- define "nebula.commonEnv" -}}
+- name: NEBULA_ENV
+  value: {{ .Values.env | quote }}
+- name: NEBULA_LOG_FORMAT
+  value: json
+{{- end -}}

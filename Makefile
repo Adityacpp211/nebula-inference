@@ -30,8 +30,9 @@ BIN_DIR := bin
 # the product prefix (nebula-controlplane), and guessing that mapping is how a
 # build target silently stops covering a new service.
 CMD_nebula-controlplane := ./services/controlplane
+CMD_nebula-gateway      := ./services/gateway
 CMD_nebula-migrate      := ./cmd/nebula-migrate
-BINARIES := nebula-controlplane nebula-migrate
+BINARIES := nebula-controlplane nebula-gateway nebula-migrate
 
 # ---- local development database --------------------------------------------
 # Development credentials. Deliberately NOT valid in production: config
@@ -45,6 +46,11 @@ TEST_DB_URL ?= $(or $(NEBULA_TEST_DATABASE_URL),postgres://nebula:nebula@127.0.0
 # the seeded API key you just copied out of the log. Config validation refuses
 # this exact value when NEBULA_ENV=production, which is what keeps it honest.
 DEV_KEY_PEPPER ?= $(or $(NEBULA_AUTH_KEY_PEPPER),nebula-development-pepper-do-not-use-in-production)
+
+# The secret the gateway signs X-Nebula-Auth-Context with and the control plane
+# verifies (docs/security-boundaries.md §2, B2). Refused by name in production.
+DEV_INTERNAL_SECRET ?= $(or $(NEBULA_INTERNAL_AUTH_SECRET),nebula-development-internal-secret-do-not-use)
+DEV_REDIS_URL       ?= $(or $(NEBULA_REDIS_URL),redis://127.0.0.1:6379/0)
 
 # In a restricted network where proxy.golang.org is unreachable but github.com is
 # not, export GOPROXY=direct GOSUMDB=off before running these targets.
@@ -214,6 +220,15 @@ db-up:
 	done; \
 	echo "postgres did not become ready in 30s"; docker compose logs postgres; exit 1
 
+## deps-up: start PostgreSQL and Redis
+.PHONY: deps-up
+deps-up: db-up
+	@docker compose up -d redis
+	@for i in $$(seq 1 30); do \
+		if docker compose exec -T redis redis-cli ping >/dev/null 2>&1; then echo "  redis ready"; exit 0; fi; \
+		sleep 1; \
+	done; echo "redis did not become ready in 30s"; exit 1
+
 ## db-down: stop the development database and delete its data
 .PHONY: db-down
 db-down:
@@ -255,8 +270,62 @@ migrate-cycle: build
 run-controlplane:
 	@NEBULA_DATABASE_URL="$(DEV_DB_URL)" NEBULA_LOG_FORMAT=text NEBULA_ENV=dev \
 		NEBULA_AUTH_KEY_PEPPER="$(DEV_KEY_PEPPER)" \
+		NEBULA_INTERNAL_AUTH_SECRET="$(DEV_INTERNAL_SECRET)" \
 		NEBULA_DEV_SEED=true NEBULA_DEV_MOCK_RUNTIME=true \
 		go run ./services/controlplane
+
+## run-gateway: run the gateway on :8080 against the local control plane and Redis
+##
+## Routes come from deploy/dev/routes.yaml (static routing, Phase 4), which points
+## the seeded "dev" organization's model "nebula-mock" at `make run-worker-mock`.
+.PHONY: run-gateway
+run-gateway:
+	@NEBULA_LOG_FORMAT=text NEBULA_ENV=dev \
+		NEBULA_AUTH_KEY_PEPPER="$(DEV_KEY_PEPPER)" \
+		NEBULA_INTERNAL_AUTH_SECRET="$(DEV_INTERNAL_SECRET)" \
+		NEBULA_REDIS_URL="$(DEV_REDIS_URL)" \
+		NEBULA_GATEWAY_ROUTES_FILE=deploy/dev/routes.yaml \
+		go run ./services/gateway
+
+## e2e-gateway: the Phase 4 demo — the OpenAI Python SDK against a live stack
+##
+## Starts PostgreSQL and Redis, migrates a throwaway database, runs the control
+## plane (seeded), a mock worker and the gateway, then runs tests/e2e/gateway with
+## the unmodified OpenAI SDK. Everything it starts, it stops.
+.PHONY: e2e-gateway
+e2e-gateway: build
+	@./scripts/e2e-gateway.sh
+
+## dev-up: NEBULA on a local kind cluster — images built and loaded, chart installed
+.PHONY: dev-up
+dev-up:
+	@./scripts/dev-up.sh
+
+## dev-down: delete the kind cluster (the host model cache is kept)
+.PHONY: dev-down
+dev-down:
+	@./scripts/dev-down.sh
+
+## e2e-kind: the Phase 5 demo against the kind cluster dev-up created
+.PHONY: e2e-kind
+e2e-kind:
+	@$(PY) tests/e2e/kind/phase5_demo.py
+
+## helm-check: lint the chart and render it with dev and production-shaped values
+.PHONY: helm-check
+helm-check:
+	@helm lint deploy/helm/nebula -f deploy/helm/nebula/values-dev.yaml
+	@helm template nebula deploy/helm/nebula -n nebula-system -f deploy/helm/nebula/values-dev.yaml >/dev/null
+	@helm template nebula deploy/helm/nebula -n nebula-system --set images.tag=ci \
+		--set secrets.keyPepper=x --set secrets.internalAuthSecret=x --set secrets.databaseURL=x \
+		--set secrets.controllerDatabaseURL=x --set secrets.redisURL=x --set secrets.artifactAccessKey=x \
+		--set secrets.artifactSecretKey=x --set artifact.endpoint=s3.example:443 >/dev/null
+	@echo "chart lints and renders for dev and production values"
+
+## load-gateway: the Phase 4 load baseline (k6) against the same live stack
+.PHONY: load-gateway
+load-gateway: build
+	@./scripts/load-gateway.sh
 
 ## docker-build: build the container images
 .PHONY: docker-build
@@ -264,6 +333,9 @@ docker-build:
 	@docker build -f deploy/docker/Dockerfile.controlplane \
 		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
 		-t nebula/controlplane:$(VERSION) .
+	@docker build -f deploy/docker/Dockerfile.gateway \
+		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
+		-t nebula/gateway:$(VERSION) .
 	@docker build -f deploy/docker/Dockerfile.migrate \
 		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
 		-t nebula/migrate:$(VERSION) .

@@ -342,3 +342,58 @@ func NewPage(limit int, cursor *uuid.UUID) Page {
 	}
 	return Page{Limit: int32(limit), Cursor: cursor} // #nosec G115 -- clamped above
 }
+
+// ---------------------------------------------------------------------------
+// rate-limit policies
+// ---------------------------------------------------------------------------
+
+// RateLimitPolicyRepo reads rate-limit policies. Written by an admin surface that
+// arrives with Phase 17's policy management; read today so the gateway enforces the
+// policy a key is actually bound to rather than a default.
+type RateLimitPolicyRepo struct{}
+
+// Get returns a policy visible to an org: its own, or a built-in (org_id NULL).
+func (r *RateLimitPolicyRepo) Get(ctx context.Context, q Querier, orgID, id uuid.UUID) (*models.RateLimitPolicy, error) {
+	var p models.RateLimitPolicy
+	err := q.QueryRow(ctx, `
+		SELECT id, org_id, name, requests_per_minute, tokens_per_minute, max_concurrency,
+		       max_queue_depth, created_at
+		  FROM rate_limit_policies
+		 WHERE id = $1 AND (org_id = $2 OR org_id IS NULL)`, id, orgID).
+		Scan(&p.ID, &p.OrgID, &p.Name, &p.RequestsPerMinute, &p.TokensPerMinute,
+			&p.MaxConcurrency, &p.MaxQueueDepth, &p.CreatedAt)
+	if err != nil {
+		return nil, classify(err)
+	}
+	return &p, nil
+}
+
+// ---------------------------------------------------------------------------
+// nodes (read-only here: the controller's inventory reconciler writes them)
+// ---------------------------------------------------------------------------
+
+// NodeRepo reads the node cache for capacity admission.
+type NodeRepo struct{}
+
+// ListPresent returns nodes currently in the cluster, as last synced.
+func (r *NodeRepo) ListPresent(ctx context.Context, q Querier) ([]*models.Node, error) {
+	rows, err := q.Query(ctx, `
+		SELECT id, name, provider_id, labels, taints, capacity, allocatable, requested,
+		       conditions, schedulable, kubelet_version, first_seen_at, synced_at, removed_at
+		  FROM nodes WHERE removed_at IS NULL ORDER BY name`)
+	if err != nil {
+		return nil, classify(err)
+	}
+	defer rows.Close()
+	var out []*models.Node
+	for rows.Next() {
+		var n models.Node
+		if err := rows.Scan(&n.ID, &n.Name, &n.ProviderID, &n.Labels, &n.Taints, &n.Capacity,
+			&n.Allocatable, &n.Requested, &n.Conditions, &n.Schedulable, &n.KubeletVersion,
+			&n.FirstSeenAt, &n.SyncedAt, &n.RemovedAt); err != nil {
+			return nil, classify(err)
+		}
+		out = append(out, &n)
+	}
+	return out, classify(rows.Err())
+}
