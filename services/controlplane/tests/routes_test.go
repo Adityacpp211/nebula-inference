@@ -36,7 +36,8 @@ func TestRouteLifecycle(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	_, v1 := f.createReadyVersion(t, "chatty", "v1")
-	_, v2 := f.createReadyVersion(t, "chatty", "v2")
+	// A second model: the helper creates the model as well as the version.
+	_, v2 := f.createReadyVersion(t, "chatty-next", "v2")
 	blue := f.createDeployment(t, "blue", v1)
 	f.createDeployment(t, "green", v2)
 

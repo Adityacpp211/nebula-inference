@@ -182,11 +182,32 @@ jobs:
       - name: bring NEBULA up
         run: ./scripts/dev-up.sh
       - name: phase 5 demo
-        run: python3 tests/e2e/kind/phase5_demo.py
+        # On failure the demo's last lines become an annotation, readable without
+        # opening the log.
+        run: |
+          set -o pipefail
+          python3 tests/e2e/kind/phase5_demo.py 2>&1 | tee demo.log || {
+            echo "::error title=phase5_demo.py failed::$(tail -n 6 demo.log | tr '\n' ' ' | cut -c1-900)"
+            exit 1
+          }
       - name: Phase 6 demo (routing, traffic shift, cold start from snapshot)
-        run: python3 tests/e2e/kind/phase6_demo.py
+        # On failure the demo's last lines become an annotation, readable without
+        # opening the log.
+        run: |
+          set -o pipefail
+          python3 tests/e2e/kind/phase6_demo.py 2>&1 | tee demo.log || {
+            echo "::error title=phase6_demo.py failed::$(tail -n 6 demo.log | tr '\n' ' ' | cut -c1-900)"
+            exit 1
+          }
       - name: Phase 8 demo (metric exemplar to trace to logs; every dashboard panel has data)
-        run: python3 tests/e2e/kind/phase8_demo.py
+        # On failure the demo's last lines become an annotation, readable without
+        # opening the log.
+        run: |
+          set -o pipefail
+          python3 tests/e2e/kind/phase8_demo.py 2>&1 | tee demo.log || {
+            echo "::error title=phase8_demo.py failed::$(tail -n 6 demo.log | tr '\n' ' ' | cut -c1-900)"
+            exit 1
+          }
       - name: diagnostics on failure
         if: failure()
         run: |
