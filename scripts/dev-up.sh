@@ -63,6 +63,18 @@ echo "== install"
 helm upgrade --install nebula deploy/helm/nebula -n nebula-system --create-namespace \
   -f deploy/helm/nebula/values-dev.yaml --set images.tag="$TAG" --wait --timeout 10m
 
+# The control plane creates the development bucket in the background once the
+# store answers. Wait for it, so the first upload never races bucket creation.
+echo "== artifact bucket"
+for _ in $(seq 1 60); do
+  if kubectl -n nebula-system logs deploy/nebula-controlplane 2>/dev/null | grep -q "artifact bucket present"; then
+    break
+  fi
+  sleep 2
+done
+kubectl -n nebula-system logs deploy/nebula-controlplane 2>/dev/null | grep -q "artifact bucket present" ||
+  echo "warning: the control plane has not reported the artifact bucket yet"
+
 # The development seed key is fixed in values-dev.yaml, so it survives restarts.
 key=$(grep -o 'nbk_[A-Za-z0-9]*' deploy/helm/nebula/values-dev.yaml | head -1)
 

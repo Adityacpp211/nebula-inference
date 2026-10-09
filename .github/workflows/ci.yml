@@ -188,6 +188,7 @@ jobs:
           set -o pipefail
           python3 tests/e2e/kind/phase5_demo.py 2>&1 | tee demo.log || {
             echo "::error title=phase5_demo.py failed::$(tail -n 6 demo.log | tr '\n' ' ' | cut -c1-900)"
+            echo "::error title=control plane (artifact store)::$(kubectl -n nebula-system logs deploy/nebula-controlplane | grep -i -E 'bucket|artifact|s3' | tail -n 8 | tr '\n' ' ' | cut -c1-900)"
             exit 1
           }
       - name: Phase 6 demo (routing, traffic shift, cold start from snapshot)
