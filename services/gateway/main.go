@@ -273,6 +273,22 @@ func run() error {
 
 	// ADMISSION. One bounded, prioritised queue per deployment, sized by the
 	// router's view of its free capacity.
+	stopTracing, err := telemetry.SetupTracing(ctx, telemetry.TracingOptions{
+		Endpoint: cfg.Telemetry.OTLPEndpoint, SampleRatio: cfg.Telemetry.TraceSampleRatio,
+		Service: serviceName, Version: info.Version, Instance: instance,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = stopTracing(sctx)
+	}()
+	metrics := telemetry.NewMetrics()
+	if cfg.Telemetry.MetricsAddr != "" {
+		go telemetry.ServeMetrics(ctx, cfg.Telemetry.MetricsAddr, metrics, logger)
+	}
 	queues := admission.New(admission.Options{
 		MaxDepth: cfg.Gateway.QueueMaxDepth, AgingStep: cfg.Gateway.QueueAging.Duration(),
 		Capacity: rt.Capacity,
@@ -304,6 +320,7 @@ func run() error {
 		Router:      rt,
 		RouteSource: routeSource,
 		Queues:      queues,
+		Metrics:     metrics,
 		Workers:     dispatch.New(dispatch.Options{}),
 		Proxy:       proxy,
 		Usage:       usage.LogSink{Logger: logger},

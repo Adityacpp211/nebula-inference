@@ -23,6 +23,10 @@ nodes:
       - containerPort: 30333
         hostPort: 30333
         listenAddress: "127.0.0.1"
+      # Grafana NodePort → localhost:3000
+      - containerPort: 30300
+        hostPort: 3000
+        listenAddress: "127.0.0.1"
   - role: worker
     labels:
       nebula.dev/accelerator: cpu

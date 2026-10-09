@@ -101,7 +101,9 @@ type LogSink struct{ Logger *slog.Logger }
 // Emit implements Sink.
 func (s LogSink) Emit(ctx context.Context, r Record) {
 	complete(&r)
-	s.Logger.LogAttrs(ctx, slog.LevelInfo, "usage.record", slog.Any("usage", r))
+	// The request's logger, so the line carries request_id and trace_id at the
+	// top level like every other line of the request (docs/observability.md §4.1).
+	telemetry.Logger(ctx, s.Logger).LogAttrs(ctx, slog.LevelInfo, "usage.record", slog.Any("usage", r))
 }
 
 // MemorySink keeps records in memory, for tests.

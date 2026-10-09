@@ -62,6 +62,32 @@ livenessProbe:
   value: {{ .Values.env | quote }}
 - name: NEBULA_LOG_FORMAT
   value: json
+# /metrics on its own port, never the public one (docs/observability.md §1).
+- name: NEBULA_METRICS_ADDR
+  value: ":{{ .Values.telemetry.metricsPort }}"
+{{- with include "nebula.otlpEndpoint" . }}
+- name: NEBULA_OTLP_ENDPOINT
+  value: {{ . | quote }}
+{{- end }}
+- name: NEBULA_TRACE_SAMPLE_RATIO
+  value: {{ .Values.telemetry.traceSampleRatio | quote }}
+{{- end -}}
+
+{{/* Where spans go: the configured collector, else the in-cluster one when the
+observability stack is installed, else nowhere. */}}
+{{- define "nebula.otlpEndpoint" -}}
+{{- if .Values.telemetry.otlpEndpoint -}}
+{{ .Values.telemetry.otlpEndpoint }}
+{{- else if .Values.observability.enabled -}}
+otel-collector.{{ .Values.observability.namespace }}:4318
+{{- end -}}
+{{- end -}}
+
+{{/* Pod annotations Prometheus discovers NEBULA's services by. */}}
+{{- define "nebula.scrapeAnnotations" -}}
+prometheus.io/scrape: "true"
+prometheus.io/port: {{ .Values.telemetry.metricsPort | quote }}
+prometheus.io/path: /metrics
 {{- end -}}
 
 {{/* The NATS URL services and workers use: the configured one, else the in-cluster

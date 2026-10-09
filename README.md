@@ -19,30 +19,25 @@ for chunk in client.chat.completions.create(
 
 ---
 
-> ## Project status — Phase 7 complete
+> ## Project status — Phase 8 complete
 >
-> **Overload turns into bounded waiting, then honest refusal — never a crash.** Requests are routed
-> by health and load: routes come from the control plane, pods from EndpointSlices, load from
-> worker heartbeats over NATS. When a deployment is full, requests wait in a bounded,
-> prioritised, deadline-aware queue at the gateway; when that is full too, they are refused at once
-> with `429` and a `Retry-After` estimate. At three times capacity the queue holds at its bound,
-> the gateway's memory stays flat, and nothing fails that was not deliberately shed. Kill every
-> pod of one target under load and its traffic moves elsewhere with no client errors; restart a
-> gateway while the control plane is down and it still routes and authenticates.
+> **One request can be followed from a dashboard to its trace to its log lines.** Every service
+> exports Prometheus metrics from a declared catalogue, every request is a single OpenTelemetry trace
+> from the gateway through the worker, and every log line carries that trace's id. The development
+> cluster runs Prometheus, Tempo, Loki and Grafana with four dashboards whose every panel is backed by
+> real series, and histogram exemplars that open the trace behind a bucket.
 >
-> What works now: everything from Phases 1–6 (schema and row-level security, API-key auth, the
-> registry and lifecycle, the worker with llama.cpp and mock runtimes, the OpenAI-compatible
-> gateway, the deployment controller with verified artifacts, Helm and kind, routes, routing
-> strategies, heartbeats) plus the admission queue per deployment, worker-saturation backpressure,
-> and `nebula.queue: "reject"` fast-fail.
+> What works now: everything from Phases 1–7 — the schema and row-level security, API-key auth, the
+> registry and lifecycle, the worker with llama.cpp and mock runtimes, the OpenAI-compatible gateway,
+> the deployment controller with verified artifacts, health-aware routing with heartbeats, and the
+> bounded admission queue — plus metrics, traces, correlated logs, dashboards and tested alert rules.
 >
-> What this deliberately does NOT do yet: no metrics endpoint or traces (Phase 8 — queue stats exist
-> in-process and at `/debug/queues` in development), no autoscaling (Phase 9), and retries only
-> before a worker starts work (Phase 10). Usage records are log lines until the durable event
-> stream.
+> What this deliberately does NOT do yet: no autoscaling (Phase 9), retries only before a worker
+> starts work (Phase 10), no canaries (Phase 12) or cost accounting (Phase 13). Usage records are log
+> lines until the durable event stream.
 >
-> Next: [Phase 8](docs/roadmap.md#phase-8--metrics-logs-tracing) — metrics, logs and tracing.
-> See [Capability status](#capability-status).
+> Next: [Phase 9](docs/roadmap.md#phase-9--autoscaling) — autoscaling. See
+> [Capability status](#capability-status).
 
 ## Running it today
 
@@ -154,6 +149,7 @@ kubectl and helm:
 
 ```bash
 make dev-up      # builds the images, loads them into kind, helm-installs, prints the dev key
+                 # Grafana at http://127.0.0.1:3000 (dashboards in the NEBULA folder)
 make e2e-kind    # the Phase 5 and 6 demos against the live cluster
 make dev-down
 ```
@@ -332,7 +328,7 @@ checkout.
 | Deployment controller, Kubernetes integration, Helm | ✅ **working** — kind demo 12/12: pods replaced, deleted Deployments recreated, drift reverted | 5 |
 | Health-aware routing, routing strategies | ✅ **working** — kind demo: 50/50 split, all pods of one target killed under load with 0 errors, cold start from snapshot | 6 |
 | Bounded queues, concurrency control, backpressure | ✅ **working** — 3× capacity load test: queue at its bound, heap flat, every refusal a 429 with Retry-After | 7 |
-| Metrics, logs, traces, Grafana dashboards | ⬜ not started | 8 |
+| Metrics, logs, traces, Grafana dashboards | ✅ **working** — kind demo: exemplar → trace → logs for one request; all 28 panels backed by series | 8 |
 | Autoscaling | ⬜ not started | 9 |
 | Retries, breakers, timeouts, graceful shutdown | ⬜ not started | 10 |
 | Model versioning, rollback | ⬜ not started | 11 |

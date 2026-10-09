@@ -63,6 +63,7 @@ spec:
       annotations:
         checksum/routes: {{ toYaml .Values.gateway.routes | sha256sum }}
         checksum/secrets: {{ include (print $.Template.BasePath "/namespaces-secrets.yaml") . | sha256sum }}
+        {{- include "nebula.scrapeAnnotations" . | nindent 8 }}
     spec:
       serviceAccountName: {{ $name }}
       automountServiceAccountToken: {{ not $static }}
@@ -78,7 +79,7 @@ spec:
         - name: gateway
           image: {{ include "nebula.image" (dict "root" . "name" "gateway") }}
           imagePullPolicy: {{ .Values.images.pullPolicy }}
-          ports: [{name: http, containerPort: 8080}]
+          ports: [{name: http, containerPort: 8080}, {name: metrics, containerPort: {{ .Values.telemetry.metricsPort }}}]
           env:
             {{- include "nebula.commonEnv" . | nindent 12 }}
             - name: NEBULA_GATEWAY_CONTROLPLANE_URL

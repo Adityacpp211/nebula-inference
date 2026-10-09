@@ -238,6 +238,11 @@ func (g *Gateway) completeStream(sw *sseWriter, ex *exchange, created int64, rea
 // then [DONE], and no finish_reason.
 func (g *Gateway) interrupted(ctx context.Context, sw *sseWriter, ex *exchange, cause error) {
 	g.logger(ctx).WarnContext(ctx, "stream interrupted", slog.String("cause", cause.Error()))
+	reason := "worker_error"
+	if errors.Is(cause, dispatch.ErrStreamTruncated) {
+		reason = "truncated"
+	}
+	g.m.interrupted.WithLabelValues(ex.target.Deployment, reason).Inc()
 	ex.verdict = router.Failed
 	ex.record.Outcome = usage.OutcomeStreamInterrupted
 	ex.record.ErrorClass = string(httpx.TypeUpstream)

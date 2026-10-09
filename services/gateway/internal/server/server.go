@@ -21,6 +21,10 @@
 package server
 
 import (
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"context"
 	"log/slog"
 	"net/http"
@@ -60,7 +64,9 @@ type Deps struct {
 	// RouteSource is "controlplane" or "static", reported in /v1/models.
 	RouteSource string
 	// Queues are the per-deployment admission queues.
-	Queues  *admission.Queues
+	Queues *admission.Queues
+	// Metrics is the registry the gateway records into; the caller serves it.
+	Metrics *telemetry.Metrics
 	Workers *dispatch.Client
 	// Proxy forwards the control API. Nil answers 503 for every admin path, which
 	// is the shape of a gateway configured without a control plane.
@@ -72,6 +78,7 @@ type Deps struct {
 // Gateway holds the handlers.
 type Gateway struct {
 	d Deps
+	m *gwMetrics
 }
 
 // Route is one mounted endpoint, for the specification drift test.
@@ -117,7 +124,10 @@ func New(d Deps) http.Handler {
 			Capacity: d.Router.Capacity})
 		go d.Queues.Run(context.Background())
 	}
-	g := &Gateway{d: d}
+	if d.Metrics == nil {
+		d.Metrics = telemetry.NewMetrics()
+	}
+	g := &Gateway{d: d, m: newGatewayMetrics(d.Metrics, d.Router, d.Queues)}
 
 	mux := http.NewServeMux()
 	d.Probes.Mount(mux)
@@ -166,7 +176,7 @@ func New(d Deps) http.Handler {
 
 	chain := httpx.Chain(
 		httpx.RequestID(),
-		httpx.Trace(),
+		httpx.Trace("gateway.request"),
 		httpx.WithLogger(d.Logger),
 		httpx.APIVersion(),
 		httpx.AccessLog(d.Logger, telemetry.PathLivez, telemetry.PathReadyz, telemetry.PathHealthz),
@@ -228,11 +238,18 @@ func (g *Gateway) authenticate(next http.Handler) http.Handler {
 			g.fail(w, r, err)
 			return
 		}
-		p, err := g.d.Auth.Authenticate(r.Context(), presented)
+		actx, span := tracer.Start(r.Context(), "gateway.authenticate")
+		p, err := g.d.Auth.Authenticate(actx, presented)
+		span.SetAttributes(attribute.String("auth_method", "api_key"), attribute.Bool("degraded", p.Degraded))
 		if err != nil {
+			span.SetStatus(codes.Error, "authentication failed")
+			span.End()
 			g.fail(w, r, err)
 			return
 		}
+		span.End()
+		trace.SpanFromContext(r.Context()).SetAttributes(
+			attribute.String("org", p.Identity.OrgSlug), attribute.String("api_key_prefix", p.Identity.ActorLabel))
 		ctx := auth.WithIdentity(r.Context(), p.Identity)
 		ctx = context.WithValue(ctx, principalKey{}, p)
 		ctx = telemetry.WithOrgID(ctx, p.Identity.OrgID.String())
@@ -339,6 +356,11 @@ func (g *Gateway) admit(w http.ResponseWriter, r *http.Request, tokens int, leas
 		return lease, nil
 	}
 	w.Header().Set("Retry-After", seconds(d.RetryAfter))
+	scope := "key"
+	if d.Scope == ratelimit.ScopeOrg {
+		scope = "org"
+	}
+	g.m.rateLimitedBy(scope, string(d.Reason))
 	who := "this API key"
 	if d.Scope == ratelimit.ScopeOrg {
 		who = "this organization"

@@ -113,12 +113,31 @@ func runMain() error {
 			StartingTimeoutSec: int32(cfg.Kube.StartingTimeout.Duration().Seconds()),
 			MaxArtifactBytes:   cfg.Artifact.MaxBytes,
 			NATSURL:            cfg.NATS.URL,
+			OTLPEndpoint:       cfg.Telemetry.OTLPEndpoint,
 		},
 		StartingTimeout: cfg.Kube.StartingTimeout.Duration(),
 		Logger:          logger,
 	}
+	stopTracing, err := telemetry.SetupTracing(ctx, telemetry.TracingOptions{
+		Endpoint: cfg.Telemetry.OTLPEndpoint, SampleRatio: cfg.Telemetry.TraceSampleRatio,
+		Service: serviceName, Version: info.Version, Instance: instance,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = stopTracing(sctx)
+	}()
+	metrics := telemetry.NewMetrics()
+	metrics.Gauge("nebula_schema_version").WithLabelValues(serviceName).Set(float64(expected))
+	if cfg.Telemetry.MetricsAddr != "" {
+		go telemetry.ServeMetrics(ctx, cfg.Telemetry.MetricsAddr, metrics, logger)
+	}
 	ctrl := run.New(run.Options{
-		Kube: kube, Store: st, Reconciler: reconciler,
+		Metrics: metrics,
+		Kube:    kube, Store: st, Reconciler: reconciler,
 		Namespace: cfg.Kube.WorkloadNamespace, SystemNamespace: cfg.Kube.SystemNamespace,
 		Identity: instance, LeaderElection: cfg.Kube.LeaderElection,
 		LeaseDuration: cfg.Kube.LeaseDuration.Duration(), RenewDeadline: cfg.Kube.RenewDeadline.Duration(),

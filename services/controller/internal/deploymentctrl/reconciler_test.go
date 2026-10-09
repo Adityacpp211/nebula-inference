@@ -230,6 +230,11 @@ func TestObjectsAreComplete(t *testing.T) {
 	if dep.Annotations[k8s.AnnotationSpecHash] == "" || dep.Spec.Template.Annotations[k8s.AnnotationSpecHash] == "" {
 		t.Error("spec hash annotation missing")
 	}
+	// Prometheus discovers workers by these; the spec hash must not displace them.
+	if ann := dep.Spec.Template.Annotations; ann["prometheus.io/scrape"] != "true" || ann["prometheus.io/port"] != "8090" ||
+		ann["prometheus.io/path"] != "/metrics" {
+		t.Errorf("scrape annotations missing from the pod template: %v", ann)
+	}
 	if *dep.Spec.Replicas != 2 || dep.Spec.Strategy.RollingUpdate.MaxUnavailable.IntValue() != 0 {
 		t.Errorf("replicas/strategy: %d %+v", *dep.Spec.Replicas, dep.Spec.Strategy)
 	}

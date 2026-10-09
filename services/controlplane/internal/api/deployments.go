@@ -272,6 +272,7 @@ func (a *API) createDeployment(w http.ResponseWriter, r *http.Request) error {
 			return httpx.ErrInternal(err)
 		}
 		decision, err := admit(version, resources, desired, nodes, time.Now())
+		a.recordAdmission(decision, err)
 		if err != nil {
 			return err
 		}

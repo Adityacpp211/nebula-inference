@@ -5,7 +5,11 @@ package run
 
 import (
 	"context"
+
 	"fmt"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -22,6 +26,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 
 	"github.com/adityasatwar321/nebula/packages/k8s"
+	"github.com/adityasatwar321/nebula/packages/telemetry"
 	"github.com/adityasatwar321/nebula/services/controller/internal/deploymentctrl"
 	"github.com/adityasatwar321/nebula/services/controller/internal/inventoryctrl"
 	"github.com/adityasatwar321/nebula/services/controller/internal/store"
@@ -43,6 +48,8 @@ type Options struct {
 	PollInterval    time.Duration
 	Workers         int
 	Logger          *slog.Logger
+	// Metrics receives reconcile and fleet metrics; nil records nothing.
+	Metrics *telemetry.Metrics
 }
 
 // Controller is the running controller.
@@ -58,7 +65,7 @@ func New(o Options) *Controller {
 	if o.Workers <= 0 {
 		o.Workers = 4
 	}
-	return &Controller{
+	c := &Controller{
 		o: o,
 		// Exponential backoff per key, 5 ms to 5 minutes, plus an overall bucket:
 		// a deployment that keeps failing slows down instead of hot-looping.
@@ -66,6 +73,8 @@ func New(o Options) *Controller {
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 			workqueue.TypedRateLimitingQueueConfig[string]{Name: "deployments"}),
 	}
+	c.registerFleetMetrics()
+	return c
 }
 
 // IsLeader reports whether this replica is the active one.
@@ -294,7 +303,15 @@ func (c *Controller) next(ctx context.Context) bool {
 		return true
 	}
 	started := time.Now()
-	res, err := c.o.Reconciler.Reconcile(ctx, id)
+	// Each pass is its own trace, not a child of any request (docs/observability.md §3.1).
+	rctx, span := telemetry.Tracer("nebula/controller").Start(ctx, "controller.reconcile",
+		trace.WithNewRoot(), trace.WithAttributes(attribute.String("deployment_id", key)))
+	res, err := c.o.Reconciler.Reconcile(rctx, id)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+	}
+	span.End()
+	c.observe(started, err)
 	if err != nil {
 		c.o.Logger.WarnContext(ctx, "reconcile failed; retrying with backoff",
 			slog.String("deployment_id", key), slog.Int("retries", c.queue.NumRequeues(key)),

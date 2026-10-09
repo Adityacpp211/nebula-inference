@@ -117,7 +117,7 @@ func TestTraceContinuedOrStarted(t *testing.T) {
 			t.Parallel()
 			var tc telemetry.TraceContext
 			var ok bool
-			h := httpx.Trace()(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			h := httpx.Trace("test.request")(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 				tc, ok = telemetry.Trace(r.Context())
 			}))
 			req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)

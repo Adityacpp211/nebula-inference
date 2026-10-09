@@ -32,6 +32,8 @@ type API struct {
 	Artifacts artifact.Store
 	// Verifier completes finalize asynchronously; nil without a store.
 	Verifier *Verifier
+	// Metrics receives capacity admission decisions; nil records nothing.
+	Metrics *telemetry.Metrics
 
 	keys *keyCache
 }

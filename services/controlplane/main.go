@@ -118,6 +118,24 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	stopTracing, err := telemetry.SetupTracing(ctx, telemetry.TracingOptions{
+		Endpoint: cfg.Telemetry.OTLPEndpoint, SampleRatio: cfg.Telemetry.TraceSampleRatio,
+		Service: serviceName, Version: info.Version, Instance: instance,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = stopTracing(sctx)
+	}()
+	metrics := telemetry.NewMetrics()
+	metrics.Gauge("nebula_schema_version").WithLabelValues(serviceName).Set(float64(expectedSchema))
+	cpAPI.Metrics = metrics
+	if cfg.Telemetry.MetricsAddr != "" {
+		go telemetry.ServeMetrics(ctx, cfg.Telemetry.MetricsAddr, metrics, logger)
+	}
 
 	if cpAPI.Verifier != nil {
 		// The verifier completes finalize for store-backed versions. It resumes any

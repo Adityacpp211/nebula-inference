@@ -52,3 +52,13 @@ data:
   enabled: true
   s3:
     nodePort: 30333
+
+telemetry:
+  traceSampleRatio: "1"
+
+observability:
+  enabled: true
+  grafana:
+    adminPassword: nebula-dev
+    anonymousViewer: true
+    service: {type: NodePort, nodePort: 30300}

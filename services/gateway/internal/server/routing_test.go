@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -162,5 +164,39 @@ func TestSaturatedWorkerIsWaitedOut(t *testing.T) {
 	}
 	if d := time.Since(started); d > 5*time.Second {
 		t.Fatalf("took %v", d)
+	}
+}
+
+// The metrics a dashboard reads exist after one ordinary request, with the
+// documented labels (docs/observability.md §2.1, §2.2).
+func TestRequestRecordsMetrics(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	if resp := h.do("POST", "/v1/chat/completions", keyAcme, chatBody); resp.StatusCode != 200 {
+		t.Fatalf("%d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	h.do("POST", "/v1/chat/completions", keyAcme, `{"model":"nope","messages":[{"role":"user","content":"x"}]}`).Body.Close()
+
+	rec := httptest.NewRecorder()
+	h.metrics.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", http.NoBody))
+	text := rec.Body.String()
+	for _, want := range []string{
+		`nebula_requests_total{deployment="tiny-a",endpoint="chat.completions",error_class="",model_version="tiny:v1",route="tiny",status_class="2xx",variant="baseline"} 1`,
+		`nebula_requests_total{deployment="",endpoint="chat.completions",error_class="not_found_error",model_version="",route="",status_class="4xx",variant=""} 1`,
+		`nebula_request_duration_seconds_count{deployment="tiny-a",endpoint="chat.completions",route="tiny",streamed="false"} 1`,
+		`nebula_tokens_total{deployment="tiny-a",direction="completion",model_version="tiny:v1"} 2`,
+		`nebula_route_decisions_total{outcome="selected",route="tiny",strategy="least_loaded"} 1`,
+		`nebula_request_attempts_total{deployment="tiny-a",outcome="succeeded"} 1`,
+		`nebula_inflight_requests{deployment="tiny-a"} 0`,
+		`nebula_endpoints{deployment="tiny-a",state="ready"} 1`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+	if t.Failed() {
+		t.Log(text)
 	}
 }

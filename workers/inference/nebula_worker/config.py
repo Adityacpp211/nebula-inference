@@ -106,6 +106,8 @@ class WorkerConfig:
     #: The URL a gateway reaches this worker at, for static routing outside
     #: Kubernetes, where no EndpointSlice ties a heartbeat to an endpoint.
     advertise_url: str = ""
+    #: The OpenTelemetry Collector's OTLP/HTTP host:port; empty exports no spans.
+    otlp_endpoint: str = ""
 
     @classmethod
     def from_env(cls, getenv: Mapping[str, str] | None = None) -> WorkerConfig:
@@ -139,6 +141,7 @@ class WorkerConfig:
             deployment_id=_env(source, "NEBULA_WORKER_DEPLOYMENT_ID"),
             model_version_id=_env(source, "NEBULA_WORKER_MODEL_VERSION_ID"),
             advertise_url=_env(source, "NEBULA_WORKER_ADVERTISE_URL").rstrip("/"),
+            otlp_endpoint=_env(source, "NEBULA_OTLP_ENDPOINT"),
         )
 
         if cfg.env not in {"dev", "staging", "production"}:

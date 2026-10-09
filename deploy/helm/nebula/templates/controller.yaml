@@ -106,6 +106,7 @@ spec:
         {{- include "nebula.selector" $name | nindent 8 }}
       annotations:
         checksum/secrets: {{ include (print $.Template.BasePath "/namespaces-secrets.yaml") . | sha256sum }}
+        {{- include "nebula.scrapeAnnotations" . | nindent 8 }}
     spec:
       serviceAccountName: {{ $name }}
       securityContext: {{- include "nebula.podSecurity" . | nindent 8 }}
@@ -124,7 +125,7 @@ spec:
         - name: controller
           image: {{ include "nebula.image" (dict "root" . "name" "controller") }}
           imagePullPolicy: {{ .Values.images.pullPolicy }}
-          ports: [{name: http, containerPort: 8083}]
+          ports: [{name: http, containerPort: 8083}, {name: metrics, containerPort: {{ .Values.telemetry.metricsPort }}}]
           env:
             {{- include "nebula.commonEnv" . | nindent 12 }}
             - name: NEBULA_DATABASE_URL

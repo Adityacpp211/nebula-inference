@@ -1,0 +1,95 @@
+# NEBULA alert rules (docs/observability.md §7.2), for every alert whose metrics
+# exist today. Each has a promtool unit test in alerts_test.yaml that asserts it
+# fires when it should and stays quiet when it should not (make alerts-test).
+#
+# Not here yet, with their metrics: NebulaUsageEventsDropped and
+# NebulaUsageIngestLag (Phase 13), NebulaAutoscalerFlapping and
+# NebulaAutoscalerBlind (Phase 9), NebulaRolloutAborted (Phase 12),
+# NebulaModelLoadFailing (needs nebula_model_load_failures_total).
+groups:
+  - name: nebula-slo
+    rules:
+      # Availability SLO 99.9%: error budget 0.1%. Multi-window burn rate: page
+      # when both the 1h and the 6h windows burn faster than 14.4x budget, the
+      # standard "2% of a 30-day budget in an hour" threshold. Client
+      # cancellations are 499s, counted as 4xx, so they never burn the budget.
+      - record: nebula:error_ratio:rate1h
+        expr: |
+          sum(rate(nebula_requests_total{status_class="5xx"}[1h]))
+            / clamp_min(sum(rate(nebula_requests_total[1h])), 1e-9)
+      - record: nebula:error_ratio:rate6h
+        expr: |
+          sum(rate(nebula_requests_total{status_class="5xx"}[6h]))
+            / clamp_min(sum(rate(nebula_requests_total[6h])), 1e-9)
+      - alert: NebulaSLOErrorBudgetBurn
+        expr: nebula:error_ratio:rate1h > (14.4 * 0.001) and nebula:error_ratio:rate6h > (14.4 * 0.001)
+        labels: {severity: page}
+        annotations:
+          summary: "Error budget burning at more than 14x"
+          action: "Investigate the error class breakdown on the Fleet Overview dashboard."
+
+  - name: nebula-serving
+    rules:
+      - alert: NebulaNoHealthyEndpoints
+        expr: |
+          (sum by (deployment) (nebula_endpoints) > 0)
+            unless on (deployment) (sum by (deployment) (nebula_endpoints{state="ready"}) > 0)
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          summary: "{{ $labels.deployment }} has no endpoint that can take traffic"
+          action: "Model load failure or node loss: check the deployment's worker events."
+      - alert: NebulaQueueSaturated
+        expr: |
+          sum by (deployment) (nebula_queue_depth) > 0
+            and on (deployment) sum by (deployment) (increase(nebula_queue_drops_total{reason="queue_full"}[5m])) > 0
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "{{ $labels.deployment }}'s admission queue is full and shedding"
+          action: "Capacity: add replicas, or check the autoscaler's decisions."
+      - alert: NebulaTTFTHigh
+        expr: |
+          histogram_quantile(0.95, sum by (le, deployment) (rate(nebula_ttft_seconds_bucket[10m]))) > 2
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "p95 time to first token on {{ $labels.deployment }} is over twice the 1 s target"
+          action: "Saturation or a slow endpoint: Request Path dashboard, then the exemplar trace."
+      - alert: NebulaBreakerOpen
+        expr: max by (deployment, endpoint) (nebula_breaker_state) == 2
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: "A breaker on {{ $labels.deployment }} has been open for 5 minutes"
+          action: "An endpoint is persistently bad: check its logs and restart it."
+
+  - name: nebula-control
+    rules:
+      - alert: NebulaReconcileFailing
+        expr: sum by (reconciler) (increase(nebula_reconcile_errors_total[10m])) > 0
+        for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "The {{ $labels.reconciler }} reconciler keeps failing"
+          action: "The control plane cannot converge: controller logs, by error_class."
+      - alert: NebulaGenerationLagStuck
+        expr: max by (deployment) (nebula_generation_lag) > 0
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: "{{ $labels.deployment }}'s desired state has not been observed for 5 minutes"
+          action: "The reconciler is wedged on one item: controller logs for this deployment."
+      - alert: NebulaCapacityRejections
+        expr: sum(increase(nebula_capacity_admission_total{result="rejected"}[30m])) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "Deployments are being refused for lack of capacity"
+          action: "The cluster needs nodes, or requests are mis-sized."
+      - alert: NebulaSchemaVersionSkew
+        # One series per distinct version value; more than one is skew.
+        expr: count(count_values("version", nebula_schema_version)) > 1
+        labels: {severity: page}
+        annotations:
+          summary: "Services disagree on the database schema version"
+          action: "A partial upgrade: finish or roll back the release."

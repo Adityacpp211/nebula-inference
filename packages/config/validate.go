@@ -169,6 +169,8 @@ func (c *Config) Validate() error {
 		"NEBULA_ARTIFACT_PRESIGN_TTL", "must be between 1m and 168h (the S3 maximum)")
 	v.AddIf(c.Artifact.VerifyInterval.Duration() <= 0, "NEBULA_ARTIFACT_VERIFY_INTERVAL", "must be positive")
 
+	v.AddIf(c.Telemetry.TraceSampleRatio < 0 || c.Telemetry.TraceSampleRatio > 1, "NEBULA_TRACE_SAMPLE_RATIO",
+		"must be between 0 and 1")
 	if c.service == ServiceGateway {
 		c.validateGateway(&v)
 	}

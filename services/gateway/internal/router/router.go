@@ -390,8 +390,12 @@ func (r *Router) Select(route *routes.Route, req Request) (*Selection, error) {
 		// endpoint vanishing since the snapshot, moves on to the next candidate.
 		if ep != nil && ep.breaker.Acquire(now) {
 			ep.inflight.Add(1)
+			age := time.Duration(-1)
+			if c := cands[j]; c.Heartbeat != nil {
+				age = now.Sub(c.HeardAt)
+			}
 			return &Selection{Route: route, Target: target, URL: ep.url, EndpointID: ep.id,
-				Strategy: strategy.Name(), ep: ep, r: r}, nil
+				Strategy: strategy.Name(), HeartbeatAge: age, ep: ep, r: r}, nil
 		}
 		cands = append(cands[:j:j], cands[j+1:]...)
 	}
@@ -449,6 +453,9 @@ type Selection struct {
 	URL        string
 	EndpointID string
 	Strategy   string
+	// HeartbeatAge is how old the chosen endpoint's last heartbeat was; negative
+	// when it has none.
+	HeartbeatAge time.Duration
 
 	ep   *endpoint
 	r    *Router
@@ -582,4 +589,68 @@ func (r *Router) Capacity(key string) int {
 		total += slots * r.o.Overcommit
 	}
 	return total
+}
+
+// EndpointReport is one endpoint's state, for metrics.
+type EndpointReport struct {
+	Deployment string // the deployment's name, or its key when no route names it
+	Endpoint   string
+	State      string // ready, not_ready, stale, not_accepting, breaker_open, saturated
+	Breaker    routing.BreakerState
+}
+
+// DeploymentName maps a deployment key to the name a route gives it.
+func (r *Router) DeploymentName(key string) string {
+	for _, rt := range r.Table().All() {
+		for _, t := range rt.Targets {
+			if t.Key(rt) == key {
+				return t.Deployment
+			}
+		}
+	}
+	return key
+}
+
+// Report describes every endpoint the router knows, for the nebula_endpoints and
+// nebula_breaker_state gauges.
+func (r *Router) Report() []EndpointReport {
+	now := r.o.Now()
+	fo := routing.FilterOptions{Now: now, StaleAfter: r.o.StaleAfter, HeartbeatsLive: r.live()}
+	names := map[string]string{}
+	for _, rt := range r.Table().All() {
+		for _, t := range rt.Targets {
+			names[t.Key(rt)] = t.Deployment
+		}
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []EndpointReport
+	for _, key := range routing.SortedKeys(r.deps) {
+		name := names[key]
+		if name == "" {
+			name = key
+		}
+		eps := r.snapshotLocked(r.deps[key], 0)
+		routing.SortByID(eps)
+		_, excluded := routing.Filter(eps, routing.Request{}, fo)
+		for _, e := range eps {
+			state := "ready"
+			switch excluded[e.ID] {
+			case "":
+				if e.Saturated {
+					state = "saturated"
+				}
+			case routing.ExcludedNotReady:
+				state = "not_ready"
+			case routing.ExcludedStale:
+				state = "stale"
+			case routing.ExcludedBreakerOpen:
+				state = "breaker_open"
+			default:
+				state = "not_accepting"
+			}
+			out = append(out, EndpointReport{Deployment: name, Endpoint: e.ID, State: state, Breaker: e.Breaker})
+		}
+	}
+	return out
 }

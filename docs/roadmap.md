@@ -607,7 +607,64 @@ with `Retry-After`.
 
 ---
 
-## Phase 8 — Metrics, logs, tracing
+## Phase 8 — Metrics, logs, tracing ✅
+
+**Status: complete**, with the deviations below.
+
+**Delivered**
+
+- Metrics: `telemetry.Catalog` declares every Go metric of observability.md §2.1, §2.2 and §2.4 that
+  exists today — request RED, TTFT, tokens, in-flight, attempts, interrupted streams, client
+  cancellations, routing decisions, endpoints by state, heartbeat staleness, queue depth / wait /
+  oldest age / drops, breaker state, rate-limit refusals, reconcile duration / errors / queue depth,
+  generation lag, replicas, deployment state, capacity admission, schema version. An undeclared
+  metric panics at startup; served on a separate port (`NEBULA_METRICS_ADDR`) so the gateway's
+  public listener never exposes them. Histograms carry the trace id as an exemplar.
+- Tracing: OpenTelemetry (API, SDK, OTLP/HTTP) in every Go service and the worker — `gateway.request`
+  → `gateway.authenticate`, `gateway.validate`, `router.resolve`, `router.select`,
+  `gateway.ratelimit`, `queue.wait` (only when the request waited), `dispatch.attempt` →
+  `worker.generate` → `worker.queue`, `runtime.stream`; `controller.reconcile` as its own trace.
+  Logs carry the span's trace id, so the trace and the log lines share one id.
+- The observability stack in the chart (`observability.enabled`, on in development): OpenTelemetry
+  Collector, Tempo, Loki with Promtail, Prometheus with exemplar storage and the alert rules, Grafana
+  with cross-linked datasources (exemplar → trace, trace → logs, log line → trace) and four
+  generated dashboards — Fleet Overview, Deployment Detail, Request Path, Queue & Autoscaling.
+- Alert rules for every §7.2 alert whose metrics exist (11 rules), each with promtool unit tests
+  that it fires and that it stays quiet (`make alerts-test`).
+- CI: every action on its Node 24 major, runners pinned to `ubuntu-24.04`, an observability job
+  (alert tests, dashboards match their generator), the Phase 8 demo in the kind job.
+
+**Tests.** The metrics contract test parses observability.md's tables and compares them with the
+catalogue in both directions; the gateway span-tree test asserts the documented tree for one request
+and that the worker's parent is the `dispatch.attempt` span; the worker's tracing tests do the same
+for `worker.generate` in both modes; the log tests assert request_id and trace_id on every request
+line, in the gateway and the worker, and that prompt text appears in no line, span or attribute,
+including on failure; a gateway test asserts the documented series exist after one request; promtool
+tests every alert rule. `tests/e2e/kind/phase8_demo.py` on a fresh kind cluster: the stack up with
+three linked datasources and four dashboards; Prometheus scraping the gateway, control plane,
+controller and both worker pods; **all 28 dashboard panels returning series**; a histogram exemplar's
+trace opening in Tempo; the known request as **one trace of 13 spans across gateway and worker**; and
+Loki holding its lines from both services, all with that trace id, and the prompt nowhere.
+
+Building it found three real defects, now fixed: the controller's spec-hash annotation replaced the
+pod template's annotations (so workers were never scraped), the worker logged its request line
+after unbinding the request id, and the gateway's usage record was logged without the request's
+correlation fields.
+
+**Exit:** met — one request is followed from a dashboard histogram's exemplar to its trace in Tempo to
+its log lines in Loki, and every dashboard panel is backed by a real series.
+
+**Deviations** ([ADR-0035](./architecture-decisions/0035-observability-wiring.md)).
+
+- Annotation-based scraping instead of `ServiceMonitor`s: kind has no Prometheus Operator.
+- OTLP over HTTP (4318) rather than gRPC.
+- Rollouts & Experiments, Cost, and Nodes & GPU dashboards are not shipped until their metrics exist
+  (Phases 12, 13, and a GPU exporter); their §7.2 alerts likewise.
+- No tail sampling or Alertmanager routing in the development stack (sampling is 100% there).
+- The cardinality test of observability.md §8 is covered by the catalogue's label-budget check
+  rather than a synthetic multi-org workload.
+
+**Original plan**
 
 **Deliverables**
 

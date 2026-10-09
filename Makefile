@@ -311,11 +311,22 @@ dev-up:
 dev-down:
 	@./scripts/dev-down.sh
 
-## e2e-kind: the Phase 5 and 6 demos against the kind cluster dev-up created
+## e2e-kind: the Phase 5, 6 and 8 demos against the kind cluster dev-up created
 .PHONY: e2e-kind
 e2e-kind:
 	@$(PY) tests/e2e/kind/phase5_demo.py
 	@$(PY) tests/e2e/kind/phase6_demo.py
+	@$(PY) tests/e2e/kind/phase8_demo.py
+
+## dashboards: regenerate the Grafana dashboards from deploy/grafana/generate.py
+.PHONY: dashboards
+dashboards:
+	@$(PY) deploy/grafana/generate.py
+
+## alerts-test: promtool unit tests for every alert rule (needs docker or promtool)
+.PHONY: alerts-test
+alerts-test:
+	@cd deploy/helm/nebula/files/prometheus && if command -v promtool >/dev/null 2>&1; then 		promtool check rules alerts.yaml && promtool test rules alerts_test.yaml; 	else 		docker run --rm -v "$$PWD":/rules -w /rules --entrypoint sh prom/prometheus:v2.53.4 			-c 'promtool check rules alerts.yaml && promtool test rules alerts_test.yaml'; 	fi
 
 ## helm-check: lint the chart and render it with dev and production-shaped values
 .PHONY: helm-check

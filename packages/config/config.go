@@ -47,18 +47,19 @@ type Config struct {
 	// Env gates development-only behaviour. Set with NEBULA_ENV.
 	Env Env `json:"env" yaml:"env" env:"NEBULA_ENV" flag:"env" usage:"deployment environment: dev, staging, production" default:"dev"`
 
-	Log      LogConfig      `json:"log" yaml:"log"`
-	HTTP     HTTPConfig     `json:"http" yaml:"http"`
-	Database DatabaseConfig `json:"database" yaml:"database"`
-	Auth     AuthConfig     `json:"auth" yaml:"auth"`
-	Internal InternalConfig `json:"internal" yaml:"internal"`
-	Redis    RedisConfig    `json:"redis" yaml:"redis"`
-	Gateway  GatewayConfig  `json:"gateway" yaml:"gateway"`
-	Limits   LimitsConfig   `json:"limits" yaml:"limits"`
-	Artifact ArtifactConfig `json:"artifact" yaml:"artifact"`
-	Kube     KubeConfig     `json:"kube" yaml:"kube"`
-	NATS     NATSConfig     `json:"nats" yaml:"nats"`
-	Dev      DevConfig      `json:"dev" yaml:"dev"`
+	Log       LogConfig       `json:"log" yaml:"log"`
+	HTTP      HTTPConfig      `json:"http" yaml:"http"`
+	Database  DatabaseConfig  `json:"database" yaml:"database"`
+	Auth      AuthConfig      `json:"auth" yaml:"auth"`
+	Internal  InternalConfig  `json:"internal" yaml:"internal"`
+	Redis     RedisConfig     `json:"redis" yaml:"redis"`
+	Gateway   GatewayConfig   `json:"gateway" yaml:"gateway"`
+	Limits    LimitsConfig    `json:"limits" yaml:"limits"`
+	Artifact  ArtifactConfig  `json:"artifact" yaml:"artifact"`
+	Kube      KubeConfig      `json:"kube" yaml:"kube"`
+	NATS      NATSConfig      `json:"nats" yaml:"nats"`
+	Telemetry TelemetryConfig `json:"telemetry" yaml:"telemetry"`
+	Dev       DevConfig       `json:"dev" yaml:"dev"`
 
 	// service is set by the binary, never by configuration.
 	service string `yaml:"-"`
@@ -301,6 +302,20 @@ type ArtifactConfig struct {
 	// VerifyInterval is how often the registry looks for versions to verify, as a
 	// backstop to the immediate verification finalize starts.
 	VerifyInterval Duration `json:"verify_interval" yaml:"verify_interval" env:"NEBULA_ARTIFACT_VERIFY_INTERVAL" default:"5s"`
+}
+
+// TelemetryConfig controls metrics and tracing export.
+type TelemetryConfig struct {
+	// MetricsAddr is where /metrics is served, on its own listener (never the
+	// gateway's public port). Empty serves no metrics.
+	MetricsAddr string `json:"metrics_addr" yaml:"metrics_addr" env:"NEBULA_METRICS_ADDR" flag:"metrics-addr" usage:"listen address for /metrics (empty: none)"`
+	// OTLPEndpoint is the OpenTelemetry Collector's OTLP/HTTP host:port. Empty
+	// exports no spans; the W3C trace context still flows and logs still carry
+	// trace ids.
+	OTLPEndpoint string `json:"otlp_endpoint" yaml:"otlp_endpoint" env:"NEBULA_OTLP_ENDPOINT" usage:"OTLP/HTTP collector host:port (empty: no span export)"`
+	// TraceSampleRatio is head sampling for traces that start here; the
+	// Collector's tail sampling keeps errors and slow requests regardless.
+	TraceSampleRatio float64 `json:"trace_sample_ratio" yaml:"trace_sample_ratio" env:"NEBULA_TRACE_SAMPLE_RATIO" default:"1"`
 }
 
 // NATSConfig locates the signalling bus (ADR-0007). Worker heartbeats travel on

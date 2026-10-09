@@ -55,6 +55,8 @@ type Settings struct {
 	MaxArtifactBytes   int64
 	// NATSURL is where workers publish heartbeats; empty for none.
 	NATSURL string
+	// OTLPEndpoint is where workers export spans; empty for none.
+	OTLPEndpoint string
 }
 
 // Ports and paths inside a worker pod.
@@ -118,15 +120,20 @@ func Build(d *store.Deployment, s Settings) (*Objects, error) {
 		return nil, err
 	}
 	template := corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{Labels: copyMap(labels)},
-		Spec:       pod,
+		ObjectMeta: metav1.ObjectMeta{Labels: copyMap(labels), Annotations: map[string]string{
+			// Prometheus discovers worker metrics from these (docs/observability.md §1).
+			"prometheus.io/scrape": "true",
+			"prometheus.io/port":   strconv.Itoa(WorkerPort),
+			"prometheus.io/path":   "/metrics",
+		}},
+		Spec: pod,
 	}
 	// The hash covers the pod template only, so a replica change does not roll
 	// pods and a spec change always does.
 	raw, _ := json.Marshal(template)
 	sum := sha256.Sum256(raw)
 	specHash := "sha256:" + hex.EncodeToString(sum[:])[:16]
-	template.Annotations = map[string]string{k8s.AnnotationSpecHash: specHash}
+	template.Annotations[k8s.AnnotationSpecHash] = specHash
 
 	annotations := map[string]string{
 		k8s.AnnotationSpecHash:   specHash,
@@ -257,6 +264,9 @@ func podSpec(d *store.Deployment, s Settings, c scheduler.Constraints, selector 
 	}
 	if s.NATSURL != "" {
 		env = append(env, corev1.EnvVar{Name: "NEBULA_NATS_URL", Value: s.NATSURL})
+	}
+	if s.OTLPEndpoint != "" {
+		env = append(env, corev1.EnvVar{Name: "NEBULA_OTLP_ENDPOINT", Value: s.OTLPEndpoint})
 	}
 	if runtimeConfig != "{}" {
 		env = append(env, corev1.EnvVar{Name: "NEBULA_WORKER_RUNTIME_CONFIG", Value: runtimeConfig})

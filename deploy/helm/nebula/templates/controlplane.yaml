@@ -28,6 +28,7 @@ spec:
       annotations:
         # A changed secret rolls the pods instead of silently doing nothing.
         checksum/secrets: {{ include (print $.Template.BasePath "/namespaces-secrets.yaml") . | sha256sum }}
+        {{- include "nebula.scrapeAnnotations" . | nindent 8 }}
     spec:
       serviceAccountName: {{ $name }}
       automountServiceAccountToken: false
@@ -51,7 +52,7 @@ spec:
         - name: controlplane
           image: {{ include "nebula.image" (dict "root" . "name" "controlplane") }}
           imagePullPolicy: {{ .Values.images.pullPolicy }}
-          ports: [{name: http, containerPort: 8082}]
+          ports: [{name: http, containerPort: 8082}, {name: metrics, containerPort: {{ .Values.telemetry.metricsPort }}}]
           env:
             {{- include "nebula.commonEnv" . | nindent 12 }}
             - name: NEBULA_HTTP_ADDR

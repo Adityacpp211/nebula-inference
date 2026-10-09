@@ -2,8 +2,12 @@ package server
 
 import (
 	"context"
+
 	"errors"
 	"fmt"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"io"
 	"log/slog"
 	"net/http"
@@ -14,6 +18,7 @@ import (
 	"github.com/adityasatwar321/nebula/packages/db/models"
 	"github.com/adityasatwar321/nebula/packages/httpx"
 	"github.com/adityasatwar321/nebula/packages/queue"
+	"github.com/adityasatwar321/nebula/packages/routing"
 	"github.com/adityasatwar321/nebula/packages/telemetry"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/dispatch"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/openai"
@@ -58,6 +63,11 @@ type exchange struct {
 	requeues  int
 	reject    bool
 	prio      queue.Priority
+	// inflightOn is the deployment counted in nebula_inflight_requests.
+	inflightOn string
+
+	// attempt is the span of the current dispatch attempt.
+	attempt trace.Span
 
 	// record is filled as the request progresses and emitted exactly once.
 	record usage.Record
@@ -75,6 +85,7 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, kind openai.Kind) {
 	ex, err := g.prepare(w, r, kind)
 	if err != nil {
+		g.m.refused("", kind.String(), err)
 		g.fail(w, r, err)
 		return
 	}
@@ -103,13 +114,23 @@ func (g *Gateway) prepare(w http.ResponseWriter, r *http.Request, kind openai.Ki
 		}
 		return nil, httpx.ErrInvalidRequest("the request body could not be read", "unreadable_body", "")
 	}
+	_, vspan := tracer.Start(ctx, "gateway.validate")
 	req, err := openai.Parse(kind, body)
+	vspan.End()
 	if err != nil {
 		return nil, err
 	}
+	root := trace.SpanFromContext(ctx)
+	root.SetAttributes(attribute.String("route", req.Model), attribute.String("endpoint", kind.String()),
+		attribute.Bool("streamed", req.Stream))
 
 	// RESOLVE. A route in another org is reported exactly as a missing one.
+	_, rspan := tracer.Start(ctx, "router.resolve")
 	route, ok := g.d.Router.Table().Lookup(ident.OrgSlug, req.Model)
+	if ok {
+		rspan.SetAttributes(attribute.String("route_id", route.ID), attribute.Int("targets", len(route.Targets)))
+	}
+	rspan.End()
 	if !ok {
 		return nil, &httpx.APIError{
 			Status:  http.StatusNotFound,
@@ -176,24 +197,53 @@ func (g *Gateway) prepare(w http.ResponseWriter, r *http.Request, kind openai.Ki
 		RequiredContext: (len(prompt)+openai.MaxBytesPerToken-1)/openai.MaxBytesPerToken + *req.MaxTokens,
 		Exclude:         map[string]bool{},
 	}
+	_, sspan := tracer.Start(ctx, "router.select")
 	sel, degraded, err := g.place(ident.OrgSlug, route, placement)
+	if err == nil {
+		sspan.SetAttributes(attribute.String("strategy", sel.Strategy),
+			attribute.String("target_deployment", sel.Target.Deployment), attribute.Int("weight", sel.Target.Weight),
+			attribute.String("variant", sel.Target.Label), attribute.String("chosen_pod", sel.EndpointID))
+		if degraded != "" {
+			sspan.SetAttributes(attribute.String("degraded", degraded))
+		}
+	} else {
+		sspan.SetStatus(codes.Error, err.Error())
+	}
+	sspan.End()
 	if err != nil {
+		strategy := route.Policy.Strategy
+		if strategy == "" {
+			strategy = routing.DefaultStrategy
+		}
 		if errors.Is(err, router.ErrNoTarget) {
+			g.m.decision(route.Model, strategy, "no_target")
 			return nil, httpx.ErrInvalidRequest(
 				fmt.Sprintf("nebula.deployment_id %q is not a deployment of %s", req.Nebula.DeploymentID, route.Model),
 				"deployment_not_in_route", "nebula.deployment_id")
 		}
+		g.m.decision(route.Model, strategy, "no_endpoint")
 		g.logger(ctx).WarnContext(ctx, "no endpoint can serve the request", slog.String("cause", err.Error()))
 		w.Header().Set("Retry-After", "1")
 		return nil, noHealthyEndpoint(err)
 	}
+	if degraded != "" {
+		g.m.decision(route.Model, sel.Strategy, "failover")
+	} else {
+		g.m.decision(route.Model, sel.Strategy, "selected")
+	}
+	g.m.selected(sel)
 	route, target := sel.Route, sel.Target
 
 	// ADMIT. The reservation is an upper bound on what this request can consume:
 	// every token covers at least one byte of prompt, plus the completion's ceiling,
 	// plus a margin for the BOS/EOS tokens an engine adds.
 	reserve := len(prompt) + *req.MaxTokens + 8
+	_, lspan := tracer.Start(ctx, "gateway.ratelimit")
 	lease, err := g.admit(w, r, reserve, timeout+time.Minute, false)
+	if err != nil {
+		lspan.SetStatus(codes.Error, "rate limited")
+	}
+	lspan.End()
 	if err != nil {
 		sel.Done(router.Abandoned)
 		return nil, err
@@ -208,13 +258,27 @@ func (g *Gateway) prepare(w http.ResponseWriter, r *http.Request, kind openai.Ki
 	// (docs/architecture.md §6.3). A request that runs at once never waits here; a
 	// full queue sheds with Retry-After instead of growing.
 	reject := req.Nebula.Queue == "reject"
+	queuedAt := time.Now()
 	ticket, err := g.d.Queues.Gate(sel.Key()).Acquire(ctx, queue.ParsePriority(priority), deadline, reject)
+	if err != nil || ticket.Waited > 0 {
+		// Only a request that actually waited (or was refused) gets a queue span.
+		_, qspan := tracer.Start(ctx, "queue.wait", trace.WithTimestamp(queuedAt))
+		qspan.SetAttributes(attribute.String("priority", priority), attribute.Int64("deadline_ms", deadline.UnixMilli()))
+		if err != nil {
+			qspan.SetStatus(codes.Error, err.Error())
+		} else {
+			qspan.SetAttributes(attribute.Int64("wait_ms", ticket.Waited.Milliseconds()))
+		}
+		qspan.End()
+	}
 	if err != nil {
+		g.m.dropped(sel.Target.Deployment, err)
 		sel.Done(router.Abandoned)
 		lease.Release(ctx, 0)
 		return nil, g.queueError(w, r, err)
 	}
 	if ticket.Waited > 0 {
+		g.m.waited(sel.Target.Deployment, queue.ParsePriority(priority), ticket.Waited, traceID(ctx))
 		// The deployment's endpoints may have changed while the request waited:
 		// place it again, on the same deployment.
 		sel.Done(router.Abandoned)
@@ -226,13 +290,9 @@ func (g *Gateway) prepare(w http.ResponseWriter, r *http.Request, kind openai.Ki
 			return nil, noHealthyEndpoint(err)
 		}
 		route, target = sel.Route, sel.Target
+		g.m.selected(sel)
 	}
-	traceparent := ""
-	if tc, ok := telemetry.Trace(ctx); ok {
-		if child, err := tc.Child(); err == nil {
-			traceparent = child.Header()
-		}
-	}
+	g.m.inflight.WithLabelValues(target.Deployment).Inc()
 
 	ex := &exchange{
 		kind:    kind,
@@ -244,25 +304,27 @@ func (g *Gateway) prepare(w http.ResponseWriter, r *http.Request, kind openai.Ki
 		started: started,
 		ident:   ident,
 
-		sel:       sel,
-		ticket:    ticket,
-		queueWait: ticket.Waited,
-		reject:    reject,
-		prio:      queue.ParsePriority(priority),
-		placement: placement,
-		attempts:  1,
-		verdict:   router.Succeeded,
-		degraded:  degraded,
+		sel:        sel,
+		ticket:     ticket,
+		queueWait:  ticket.Waited,
+		reject:     reject,
+		prio:       queue.ParsePriority(priority),
+		inflightOn: target.Deployment,
+		placement:  placement,
+		attempts:   1,
+		verdict:    router.Succeeded,
+		degraded:   degraded,
 		call: dispatch.Call{
-			Endpoint:     sel.URL,
-			RequestID:    requestID,
-			Traceparent:  traceparent,
+			Endpoint:  sel.URL,
+			RequestID: requestID,
+
 			Deadline:     deadline,
 			Priority:     priority,
 			ModelVersion: target.ModelVersion,
 			Body:         workerBody(req, prompt, stops),
 		},
 	}
+	g.startAttempt(ctx, ex)
 	if kind == openai.KindChat {
 		ex.id = "chatcmpl-" + requestID
 	} else {
@@ -559,9 +621,13 @@ func (g *Gateway) finish(ctx context.Context, ex *exchange) {
 	ex.lease.Release(ctx, actual)
 	ex.ticket.Release()
 	ex.record.Attempts = ex.attempts
+	g.endAttempt(ex, ex.verdict)
 	if ex.sel != nil {
+		g.m.attempt(ex.target.Deployment, ex.verdict)
 		ex.sel.Done(ex.verdict)
 	}
+	g.m.inflight.WithLabelValues(ex.inflightOn).Dec()
+	g.m.finished(&ex.record, ex.req.Stream)
 	g.d.Usage.Emit(context.WithoutCancel(ctx), ex.record)
 }
 
@@ -632,10 +698,14 @@ func (g *Gateway) replace(ctx context.Context, ex *exchange, cause error) bool {
 		// reports it against the endpoint that failed.
 		return false
 	}
+	g.m.attempt(ex.target.Deployment, verdictOf(cause))
+	g.endAttempt(ex, verdictOf(cause))
 	ex.sel.Done(verdictOf(cause))
+	g.m.selected(sel)
 	ex.sel, ex.target = sel, sel.Target
 	ex.call.Endpoint, ex.call.ModelVersion = sel.URL, sel.Target.ModelVersion
 	ex.attempts++
+	g.startAttempt(ctx, ex)
 	ex.record.Deployment, ex.record.DeploymentID = sel.Target.Deployment, sel.Target.DeploymentID
 	ex.record.ModelVersion, ex.record.Variant = sel.Target.ModelVersion, sel.Target.Label
 	return true
@@ -649,15 +719,19 @@ func (g *Gateway) requeue(ctx context.Context, ex *exchange, cause error) bool {
 		return false
 	}
 	key := ex.sel.Key()
+	g.m.attempt(ex.target.Deployment, verdictOf(cause))
+	g.endAttempt(ex, verdictOf(cause))
 	ex.sel.Done(verdictOf(cause))
 	ex.ticket.Release()
 	ex.ticket = nil
 	ex.requeues++
 	ticket, err := g.d.Queues.Gate(key).Acquire(ctx, ex.prio, ex.call.Deadline, false)
 	if err != nil {
+		g.m.dropped(ex.target.Deployment, err)
 		ex.sel = nil
 		return false
 	}
+	g.m.waited(ex.target.Deployment, ex.prio, ticket.Waited, ex.record.TraceID)
 	ex.ticket = ticket
 	ex.queueWait += ticket.Waited
 	placement := ex.placement
@@ -667,10 +741,41 @@ func (g *Gateway) requeue(ctx context.Context, ex *exchange, cause error) bool {
 		ex.sel = nil
 		return false
 	}
+	g.m.selected(sel)
 	ex.sel, ex.target = sel, sel.Target
 	ex.call.Endpoint = sel.URL
 	ex.attempts++
+	g.startAttempt(ctx, ex)
 	return true
+}
+
+// tracer is the gateway's tracer; spans are no-ops unless tracing is configured.
+var tracer = telemetry.Tracer("nebula/gateway")
+
+// startAttempt opens a dispatch.attempt span and makes it the worker's parent.
+//
+// ctx carries the request's trace: the request context in prepare, the worker
+// context (derived from it) on a later attempt.
+func (g *Gateway) startAttempt(ctx context.Context, ex *exchange) {
+	ctx, span := tracer.Start(ctx, "dispatch.attempt", trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attribute.Int("attempt", ex.attempts), attribute.String("endpoint", ex.sel.EndpointID),
+			attribute.String("deployment", ex.target.Deployment)))
+	ex.attempt = span
+	tc, _ := telemetry.Trace(ctx)
+	ex.call.Traceparent = telemetry.Traceparent(ctx, tc)
+}
+
+// endAttempt closes the current attempt span with its outcome.
+func (g *Gateway) endAttempt(ex *exchange, o router.Outcome) {
+	if ex.attempt == nil {
+		return
+	}
+	ex.attempt.SetAttributes(attribute.String("outcome", outcomeName(o)))
+	if o == router.Unreachable || o == router.Failed {
+		ex.attempt.SetStatus(codes.Error, outcomeName(o))
+	}
+	ex.attempt.End()
+	ex.attempt = nil
 }
 
 // generateOnce performs a non-streamed generation, moving to another replica

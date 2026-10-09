@@ -1,0 +1,481 @@
+{{- if .Values.observability.enabled }}
+{{- $ns := .Values.observability.namespace }}
+{{- $img := .Values.observability.images }}
+{{- /*
+The observability stack of docs/observability.md §1, single-replica and in-cluster
+for development: an OpenTelemetry Collector (the swap point), Tempo for traces,
+Loki and Promtail for logs, Prometheus with the alert rules and exemplar storage,
+and Grafana with the committed dashboards and cross-linked datasources.
+
+Production runs these as managed services or their own charts; turning this off and
+pointing NEBULA_OTLP_ENDPOINT and the scrape configuration elsewhere is a values
+change, not a different architecture.
+*/ -}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+---
+# ---------------------------------------------------------------- collector
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector
+  namespace: {{ $ns }}
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          http: {endpoint: 0.0.0.0:4318}
+          grpc: {endpoint: 0.0.0.0:4317}
+    processors:
+      memory_limiter: {check_interval: 1s, limit_mib: 200}
+      batch: {}
+    exporters:
+      otlp/tempo:
+        endpoint: tempo.{{ $ns }}:4317
+        tls: {insecure: true}
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [otlp/tempo]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: {{ $ns }}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app.kubernetes.io/name: otel-collector}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: otel-collector}
+      annotations: {checksum/config: {{ .Values.observability.images.collector | sha256sum | trunc 8 }}}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: collector
+          image: {{ $img.collector }}
+          args: ["--config=/etc/otel/config.yaml"]
+          ports: [{containerPort: 4318}, {containerPort: 4317}]
+          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 256Mi}}
+          volumeMounts: [{name: config, mountPath: /etc/otel}]
+      volumes: [{name: config, configMap: {name: otel-collector}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: {{ $ns }}
+spec:
+  selector: {app.kubernetes.io/name: otel-collector}
+  ports: [{name: otlp-http, port: 4318}, {name: otlp-grpc, port: 4317}]
+---
+# ---------------------------------------------------------------- tempo
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tempo
+  namespace: {{ $ns }}
+data:
+  tempo.yaml: |
+    server: {http_listen_port: 3200}
+    distributor:
+      receivers:
+        otlp:
+          protocols:
+            grpc: {endpoint: 0.0.0.0:4317}
+    storage:
+      trace:
+        backend: local
+        local: {path: /var/tempo/traces}
+        wal: {path: /var/tempo/wal}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tempo
+  namespace: {{ $ns }}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app.kubernetes.io/name: tempo}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: tempo}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001}
+      containers:
+        - name: tempo
+          image: {{ $img.tempo }}
+          args: ["-config.file=/etc/tempo/tempo.yaml"]
+          ports: [{containerPort: 3200}, {containerPort: 4317}]
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}
+          volumeMounts: [{name: config, mountPath: /etc/tempo}, {name: data, mountPath: /var/tempo}]
+      volumes:
+        - {name: config, configMap: {name: tempo}}
+        - {name: data, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tempo
+  namespace: {{ $ns }}
+spec:
+  selector: {app.kubernetes.io/name: tempo}
+  ports: [{name: http, port: 3200}, {name: otlp-grpc, port: 4317}]
+---
+# ---------------------------------------------------------------- loki
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki
+  namespace: {{ $ns }}
+data:
+  loki.yaml: |
+    auth_enabled: false
+    server: {http_listen_port: 3100}
+    common:
+      path_prefix: /loki
+      replication_factor: 1
+      ring: {kvstore: {store: inmemory}}
+      storage:
+        filesystem: {chunks_directory: /loki/chunks, rules_directory: /loki/rules}
+    schema_config:
+      configs:
+        - {from: "2024-01-01", store: tsdb, object_store: filesystem, schema: v13, index: {prefix: index_, period: 24h}}
+    limits_config: {allow_structured_metadata: true, reject_old_samples: false}
+    analytics: {reporting_enabled: false}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki
+  namespace: {{ $ns }}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app.kubernetes.io/name: loki}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: loki}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001}
+      containers:
+        - name: loki
+          image: {{ $img.loki }}
+          args: ["-config.file=/etc/loki/loki.yaml"]
+          ports: [{containerPort: 3100}]
+          readinessProbe: {httpGet: {path: /ready, port: 3100}, periodSeconds: 5}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}
+          volumeMounts: [{name: config, mountPath: /etc/loki}, {name: data, mountPath: /loki}]
+      volumes:
+        - {name: config, configMap: {name: loki}}
+        - {name: data, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: {{ $ns }}
+spec:
+  selector: {app.kubernetes.io/name: loki}
+  ports: [{name: http, port: 3100}]
+---
+# ---------------------------------------------------------------- promtail
+# Ships NEBULA's pod logs to Loki. Labels stay low-cardinality (service, level,
+# namespace, pod — §4.2); request_id and trace_id stay in the line body, queried
+# with |=.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: promtail
+  namespace: {{ $ns }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nebula-promtail
+rules:
+  - apiGroups: [""]
+    resources: [pods, nodes]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nebula-promtail
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nebula-promtail}
+subjects: [{kind: ServiceAccount, name: promtail, namespace: {{ $ns }}}]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: promtail
+  namespace: {{ $ns }}
+data:
+  promtail.yaml: |
+    server: {http_listen_port: 9080, grpc_listen_port: 0}
+    positions: {filename: /run/promtail/positions.yaml}
+    clients: [{url: "http://loki.{{ $ns }}:3100/loki/api/v1/push"}]
+    scrape_configs:
+      - job_name: nebula
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces: {names: [{{ .Release.Namespace }}, {{ .Values.namespaces.workloads }}]}
+        relabel_configs:
+          - {source_labels: [__meta_kubernetes_pod_node_name], target_label: __host__}
+          - {source_labels: [__meta_kubernetes_namespace], target_label: namespace}
+          - {source_labels: [__meta_kubernetes_pod_name], target_label: pod}
+          - {source_labels: [__meta_kubernetes_pod_container_name], target_label: container}
+          - source_labels: [__meta_kubernetes_pod_uid, __meta_kubernetes_pod_container_name]
+            separator: /
+            target_label: __path__
+            replacement: /var/log/pods/*$1/*.log
+        pipeline_stages:
+          - cri: {}
+          - json: {expressions: {service: service, level: level}}
+          - labels: {service: "", level: ""}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: promtail
+  namespace: {{ $ns }}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: promtail}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: promtail}
+    spec:
+      serviceAccountName: promtail
+      containers:
+        - name: promtail
+          image: {{ $img.promtail }}
+          args: ["-config.file=/etc/promtail/promtail.yaml"]
+          env: [{name: HOSTNAME, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}]
+          resources: {requests: {cpu: 20m, memory: 64Mi}, limits: {memory: 256Mi}}
+          volumeMounts:
+            - {name: config, mountPath: /etc/promtail}
+            - {name: run, mountPath: /run/promtail}
+            - {name: pods, mountPath: /var/log/pods, readOnly: true}
+      volumes:
+        - {name: config, configMap: {name: promtail}}
+        - {name: run, emptyDir: {}}
+        - {name: pods, hostPath: {path: /var/log/pods}}
+---
+# ---------------------------------------------------------------- prometheus
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: {{ $ns }}
+{{- range $target := list .Release.Namespace .Values.namespaces.workloads }}
+---
+# Pod discovery in the namespaces it scrapes, and nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nebula-prometheus
+  namespace: {{ $target }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nebula-prometheus
+  namespace: {{ $target }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: nebula-prometheus}
+subjects: [{kind: ServiceAccount, name: prometheus, namespace: {{ $ns }}}]
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus
+  namespace: {{ $ns }}
+data:
+  prometheus.yml: |
+    global: {scrape_interval: 15s, evaluation_interval: 30s}
+    rule_files: [/etc/prometheus/alerts.yaml]
+    scrape_configs:
+      # Every NEBULA pod that asks to be scraped, by annotation. The Prometheus
+      # Operator's ServiceMonitors do the same in clusters that run it.
+      - job_name: nebula
+        # A metric's own labels win: the gateway's "deployment" and "pod" label
+        # NEBULA deployments and endpoints, not the scraped pod.
+        honor_labels: true
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces: {names: [{{ .Release.Namespace }}, {{ .Values.namespaces.workloads }}]}
+        relabel_configs:
+          - {source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape], action: keep, regex: "true"}
+          - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            regex: (.+);(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - {source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path], regex: (.+), target_label: __metrics_path__}
+          - {source_labels: [__meta_kubernetes_namespace], target_label: namespace}
+          - {source_labels: [__meta_kubernetes_pod_name], target_label: pod}
+          - {source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name], target_label: service}
+          # Worker pods name their NEBULA deployment in a label; the worker's own
+          # metrics deliberately do not carry it (docs/observability.md §2.3).
+          - {source_labels: [__meta_kubernetes_pod_label_nebula_dev_deployment], regex: (.+), target_label: deployment}
+  alerts.yaml: |
+{{ .Files.Get "files/prometheus/alerts.yaml" | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: {{ $ns }}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app.kubernetes.io/name: prometheus}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: prometheus}
+      annotations:
+        checksum/config: {{ .Files.Get "files/prometheus/alerts.yaml" | sha256sum | trunc 12 }}
+    spec:
+      serviceAccountName: prometheus
+      securityContext: {runAsUser: 65534, runAsGroup: 65534, fsGroup: 65534}
+      containers:
+        - name: prometheus
+          image: {{ $img.prometheus }}
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=2d
+            # Histogram buckets carry trace ids: the link from a panel to a trace.
+            - --enable-feature=exemplar-storage
+            - --web.enable-lifecycle
+          ports: [{containerPort: 9090}]
+          readinessProbe: {httpGet: {path: /-/ready, port: 9090}, periodSeconds: 5}
+          resources: {requests: {cpu: 50m, memory: 256Mi}, limits: {memory: 1Gi}}
+          volumeMounts: [{name: config, mountPath: /etc/prometheus}, {name: data, mountPath: /prometheus}]
+      volumes:
+        - {name: config, configMap: {name: prometheus}}
+        - {name: data, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: {{ $ns }}
+spec:
+  selector: {app.kubernetes.io/name: prometheus}
+  ports: [{name: http, port: 9090}]
+---
+# ---------------------------------------------------------------- grafana
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: {{ $ns }}
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        uid: prometheus
+        type: prometheus
+        url: http://prometheus.{{ $ns }}:9090
+        isDefault: true
+        jsonData:
+          # An exemplar's trace_id opens the trace in Tempo.
+          exemplarTraceIdDestinations: [{name: trace_id, datasourceUid: tempo}]
+      - name: Tempo
+        uid: tempo
+        type: tempo
+        url: http://tempo.{{ $ns }}:3200
+        jsonData:
+          # From a span to the log lines of the same trace.
+          tracesToLogsV2: {datasourceUid: loki, filterByTraceID: true, spanStartTimeShift: "-5m", spanEndTimeShift: "5m"}
+      - name: Loki
+        uid: loki
+        type: loki
+        url: http://loki.{{ $ns }}:3100
+        jsonData:
+          # From a log line's trace_id to the trace.
+          derivedFields:
+            - {name: trace_id, matcherRegex: '"trace_id":"(\w+)"', datasourceUid: tempo, url: "$${__value.raw}"}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: {{ $ns }}
+data:
+  provider.yaml: |
+    apiVersion: 1
+    providers:
+      - {name: nebula, folder: NEBULA, type: file, disableDeletion: true, options: {path: /var/lib/grafana/dashboards}}
+{{- range $path, $_ := .Files.Glob "files/dashboards/*.json" }}
+  {{ base $path }}: |
+{{ $.Files.Get $path | indent 4 }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: {{ $ns }}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app.kubernetes.io/name: grafana}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: grafana}
+      annotations:
+        checksum/dashboards: {{ (.Files.Glob "files/dashboards/*.json").AsConfig | sha256sum | trunc 12 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsUser: 472, runAsGroup: 472, fsGroup: 472}
+      containers:
+        - name: grafana
+          image: {{ $img.grafana }}
+          env:
+            - {name: GF_AUTH_ANONYMOUS_ENABLED, value: {{ .Values.observability.grafana.anonymousViewer | quote }}}
+            - {name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: Viewer}
+            - {name: GF_SECURITY_ADMIN_PASSWORD, value: {{ required "observability.grafana.adminPassword is required" .Values.observability.grafana.adminPassword | quote }}}
+            - {name: GF_ANALYTICS_REPORTING_ENABLED, value: "false"}
+            - {name: GF_PATHS_PROVISIONING, value: /etc/grafana/provisioning}
+          ports: [{containerPort: 3000}]
+          readinessProbe: {httpGet: {path: /api/health, port: 3000}, periodSeconds: 5}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}
+          volumeMounts:
+            - {name: datasources, mountPath: /etc/grafana/provisioning/datasources}
+            - {name: dashboards, mountPath: /etc/grafana/provisioning/dashboards, subPath: ""}
+            - {name: dashboard-files, mountPath: /var/lib/grafana/dashboards}
+      volumes:
+        - {name: datasources, configMap: {name: grafana-datasources}}
+        - name: dashboards
+          configMap: {name: grafana-dashboards, items: [{key: provider.yaml, path: provider.yaml}]}
+        - name: dashboard-files
+          configMap: {name: grafana-dashboards}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: {{ $ns }}
+spec:
+  type: {{ .Values.observability.grafana.service.type }}
+  selector: {app.kubernetes.io/name: grafana}
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      {{- if .Values.observability.grafana.service.nodePort }}
+      nodePort: {{ .Values.observability.grafana.service.nodePort }}
+      {{- end }}
+{{- end }}

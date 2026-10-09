@@ -71,6 +71,7 @@ cat <<EOF
 NEBULA is up.
   gateway:  http://127.0.0.1:8080
   api key:  $key   (development only)
+  grafana:  http://127.0.0.1:3000   (anonymous viewer; admin / nebula-dev)
 
   curl -H "Authorization: Bearer $key" http://127.0.0.1:8080/v1/me
   kubectl -n nebula-workloads get deploy,pods

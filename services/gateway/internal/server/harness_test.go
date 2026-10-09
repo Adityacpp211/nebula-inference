@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -212,6 +213,26 @@ type harness struct {
 	auth        fakeAuth
 	invalidated []string
 	router      *router.Router
+	metrics     *telemetry.Metrics
+	logs        *syncBuffer
+}
+
+// syncBuffer collects log output from concurrent handlers.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 type option func(*config.Config)
@@ -268,10 +289,16 @@ func newHarness(t *testing.T, opts ...option) *harness {
 
 	h.router = router.New(router.Options{Breaker: routing.BreakerConfig{Threshold: 1000, Cooldown: time.Millisecond}})
 	h.router.SetTable(tbl)
+	h.metrics = telemetry.NewMetrics()
 
 	h.signer, _ = auth.NewContextSigner(internalSecret, 10*time.Second, nil)
 	h.cp = newFakeControlPlane(t, h.signer)
-	logger := telemetry.Discard()
+	h.logs = &syncBuffer{}
+	logger, err := telemetry.NewLogger(h.logs, config.LogConfig{Level: "debug", Format: "json"},
+		version.Get("nebula-gateway"), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
 	proxy := adminproxy.New(adminproxy.Options{
 		Target: mustURL(t, h.cp.srv.URL), Signer: h.signer, Issuer: "nebula-gateway", Logger: logger,
 		Invalidate: func(_ context.Context, prefix string) { h.invalidated = append(h.invalidated, prefix) },
@@ -282,7 +309,7 @@ func newHarness(t *testing.T, opts ...option) *harness {
 	handler := server.New(server.Deps{
 		Config: cfg, Logger: logger, Probes: probes, Auth: h.auth,
 		Limiter: ratelimit.New(ratelimit.Options{FallbackFraction: 1}),
-		Router:  h.router, Workers: dispatch.New(dispatch.Options{}), Proxy: proxy, Usage: h.usage,
+		Router:  h.router, Metrics: h.metrics, Workers: dispatch.New(dispatch.Options{}), Proxy: proxy, Usage: h.usage,
 	})
 	h.gw = netx.NewServer(t, handler)
 	return h
