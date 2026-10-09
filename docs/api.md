@@ -62,8 +62,17 @@ One shape everywhere, OpenAI-compatible so existing SDK error handling works:
 | 504 | `timeout_error` | conditional | Retryable only if zero tokens were emitted. |
 
 `X-Nebula-Reason` values are a closed, documented set (`no_healthy_endpoint`, `queue_full`,
-`queue_timeout`, `breaker_open`, `rate_limited_rpm`, `rate_limited_tpm`, `concurrency_limit`,
-`model_loading`, `control_plane_degraded`) so clients and dashboards can branch on them.
+`queue_timeout`, `capacity_exhausted`, `breaker_open`, `rate_limited_rpm`, `rate_limited_tpm`,
+`concurrency_limit`, `model_loading`, `control_plane_degraded`) so clients and dashboards can branch
+on them.
+
+Since Phase 7 the gateway queues a request when its deployment has no free capacity, rather than
+failing it ([ADR-0034](./architecture-decisions/0034-admission-queue-per-deployment.md)). The queue
+answers in one of three ways when it cannot admit: `429 queue_full` with `Retry-After` (the queue is
+at its bound), `429 capacity_exhausted` with `Retry-After` (the request set `nebula.queue` to
+`"reject"` and there was no room now), or `504 queue_timeout` (its timeout passed while it waited;
+nothing was dispatched). A shed request is not charged tokens. Priority comes from the API key and
+ages while it waits, so `LOW` is never starved.
 
 ---
 
@@ -125,10 +134,9 @@ disagreement would show up in someone's cost report.
 `X-Accel-Buffering: no`:
 
 ```
-event: nebula.meta
-data: {"request_id":"0192f3c1-...","deployment":"qwen-prod","model_version":"qwen2.5:0.5b-q4","variant":"baseline","queue_wait_ms":12}
+: nebula.meta {"request_id":"0192f3c1-...","route":"qwen2.5-chat","deployment":"qwen-prod","model_version":"qwen2.5:0.5b-q4","variant":"baseline","attempts":1}
 
-data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
 
 data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hel"}}]}
 
@@ -141,8 +149,13 @@ data: {"id":"chatcmpl-...","object":"chat.completion.chunk","usage":{"prompt_tok
 data: [DONE]
 ```
 
-- The leading `nebula.meta` event is a **named** SSE event, which OpenAI SDKs ignore, so
-  compatibility holds while operators still get routing context on the wire.
+- The routing context is the first line, as an SSE **comment** (`: nebula.meta {...}`), and in the
+  `X-Nebula-Route`, `X-Nebula-Deployment`, `X-Nebula-Model-Version` and `X-Nebula-Variant` response
+  headers, which non-streamed responses carry too. Phase 0 specified a named `event: nebula.meta`;
+  the Phase 4 end-to-end test showed that the current OpenAI Python SDK yields named events as
+  chunks, so it was replaced by a comment, which every SSE parser must ignore
+  ([ADR-0029](./architecture-decisions/0029-stream-metadata-is-a-comment.md)). No NEBULA stream
+  frame is ever a named event.
 - Comment-line keep-alives (`: keep-alive`) every 15 s prevent idle proxy timeouts.
 - The usage frame is emitted only when `stream_options.include_usage` is true, matching OpenAI.
 - **Mid-stream failure** emits a terminal error frame, never a silent truncation:
@@ -153,6 +166,22 @@ data: [DONE]
 
 `POST /v1/completions` is the legacy text-completion equivalent; `POST /v1/embeddings` returns the
 OpenAI embeddings shape and is available for model versions whose `task` is `embedding`.
+
+> **What is served today (Phase 6).** `POST /v1/chat/completions`, `POST /v1/completions` and
+> `GET /v1/models` (plus `GET /v1/models/{route}`) are served by the gateway, exactly as above,
+> including streaming, `stream_options.include_usage`, refusal of unsupported parameters by name, the
+> `nebula` extension block, rate-limit headers (`x-ratelimit-{limit,remaining,reset}-{requests,tokens}`)
+> and client-disconnect cancellation with partial usage. `POST /v1/embeddings` is **not** served: no
+> Phase 3 runtime produces embeddings, and an endpoint with nothing behind it would be a 400 in
+> disguise. Since Phase 6 routes come from the control plane and every response names the deployment that
+> served it; `nebula.attempts` counts the replicas it was offered to, and `nebula.degraded` (and
+> `X-Nebula-Degraded`) names a failover route when one served it. Chat messages are rendered
+> into a prompt by the gateway with the route's declared template (`chatml`, `llama3` or `plain`);
+> reading the template from GGUF metadata is still open (TODO(NEB-144)). `estimated_cost`
+> is absent from the `nebula` block until the cost engine (Phase 13) can compute it — absent, not
+> zero (axiom A6). `nebula.queue` is `"allow"` (default: wait in the admission queue within the timeout) or
+> `"reject"` (fail at once with `429 capacity_exhausted` instead of waiting).
+> `nebula.gateway_queue_ms` reports the time spent in the gateway's queue, absent when there was none.
 
 ### `GET /v1/models`
 
@@ -209,12 +238,24 @@ paths are org-scoped by the caller's credential; `org_id` is never a client-supp
 > `GET /v1/lifecycle/deployment-states` — the state machine as data, so a CLI or dashboard renders the
 > graph the database enforces instead of keeping its own copy.
 >
-> Not yet implemented: the inference surface (§2), routes, rollouts and experiments, usage, costs,
-> nodes, policies, pricing, and the `/replicas`, `/events`, `/metrics` and `/logs` sub-resources of a
-> deployment. Artifact upload has no presigned target: `upload` is `null` and `finalize` compares the
-> client-declared checksum with the one presented, reporting `verification: declared_checksum` rather
-> than claiming the bytes were read. Session tokens are refused with `unsupported_credential`; API
-> keys are the only accepted credential until the dashboard.
+> Since Phase 4 the control API is reached through the gateway's admin proxy, which authenticates
+> the key and forwards a signed identity (§6a); the control plane still accepts API keys directly for
+> development and tests.
+>
+> Since Phase 5, a version whose artifact is uploaded to NEBULA's own store gets a presigned
+> upload target, and `finalize` answers `202` while the control plane hashes the stored bytes
+> ([ADR-0031](./architecture-decisions/0031-artifacts-verified-asynchronously.md)); a version
+> registered against an external URI keeps `verification: declared_checksum`.
+>
+> Since Phase 6: routes (`/v1/routes`, create, read, list, atomic weight and policy replacement,
+> delete) and `GET /v1/policies/routing`. A deployment that a route targets cannot be deleted
+> (`409 in_use`) until the route stops targeting it. The `route` shortcut on `POST /v1/deployments`
+> shown below is not implemented; create the route separately.
+>
+> Not yet implemented: embeddings (§2), rollouts and experiments, usage, costs, nodes, rate-limit
+> policies, pricing, and the `/replicas`, `/events`, `/metrics` and `/logs` sub-resources of a
+> deployment. Session tokens are refused with `unsupported_credential`; API keys are the only
+> accepted credential until the dashboard.
 
 ### Models and versions
 
@@ -488,6 +529,30 @@ Admission control: when the local queue is full the worker returns **429 with `R
 `X-Nebula-Reason: worker_saturated`. It never accepts work it cannot start before the deadline —
 accepting and then timing out wastes the deadline budget that the gateway could have spent on
 another replica.
+
+---
+
+## 6a. Internal control-plane API
+
+Gateway → control plane only. Never proxied by the gateway (it answers 404 for any `/internal/`
+path), absent from `openapi.yaml` by design, and a test fails if it ever appears there.
+
+```
+GET /internal/v1/credentials/{prefix}     a key's record: stored HMAC, org id and slug, scopes,
+                                          priority, expiry, revocation, rate-limit policy
+```
+
+Every call carries `X-Nebula-Auth-Context`: a payload signed with HMAC-SHA256 under
+`NEBULA_INTERNAL_AUTH_SECRET`, bound to the audience `nebula-controlplane`, valid for
+`NEBULA_INTERNAL_AUTH_MAX_AGE` (default 10 s). Internal routes accept only `actor_type: service`; a
+tenant identity is refused with 403 `service_only`, and a service identity is refused on every public
+route with 403 `service_identity`. The same header carries the caller's verified identity on every
+admin call the gateway proxies (docs/security-boundaries.md §2, B2), in place of the API key, which
+the gateway strips. Why the record rather than a verification verdict:
+[ADR-0030](./architecture-decisions/0030-gateway-credentials-through-the-control-plane.md).
+
+A successful `DELETE /v1/api-keys/{id}` sets `X-Nebula-Revoked-Key-Prefix`, which the gateway consumes
+to evict the key from the shared credential cache and removes before the response reaches the client.
 
 ---
 

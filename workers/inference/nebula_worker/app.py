@@ -31,9 +31,11 @@ from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from . import tracing
 from .cancel import CancelRegistry
 from .config import WorkerConfig
 from .deadline import DeadlineError, budget_for, parse_deadline
+from .heartbeat import HeartbeatPublisher
 from .queue import AdmissionQueue, DeadlineUnreachable, QueueFull
 from .runtimes import build as build_runtime
 from .runtimes.base import (
@@ -174,6 +176,60 @@ class Worker:
         # allowed and what the adapter declares, because either being exceeded is a
         # different kind of failure and neither is worth discovering under load.
         self.queue: AdmissionQueue | None = None
+        #: Smoothed load signals for heartbeats, in the worker's own measurements.
+        self.ttft_ms_ewma = 0.0
+        self.tokens_per_second_ewma = 0.0
+        self.heartbeat: HeartbeatPublisher | None = None
+        #: The tracing provider when spans are exported, flushed on shutdown.
+        self.tracing: Any | None = None
+        self._heartbeat_task: asyncio.Task[None] | None = None
+
+    def set_draining(self, *, release_waiters: bool = True) -> bool:
+        """Stop accepting work, and say so on the heartbeat at once.
+
+        ``release_waiters`` also fails requests still queued for a slot. The SIGTERM
+        path keeps them: they are served during the drain delay.
+
+        Returns whether the worker was already draining.
+        """
+        was = self.draining
+        self.draining = True
+        self.metrics.draining.set(1)
+        if release_waiters and self.queue is not None:
+            self.queue.drain_waiters()
+        if self.heartbeat is not None:
+            self.heartbeat.kick()
+        return was
+
+    def observe_timing(self, ttft_ms: float | None, tokens: int, decode_ms: float | None) -> None:
+        alpha = 0.2
+        if ttft_ms:
+            self.ttft_ms_ewma = (
+                ttft_ms
+                if not self.ttft_ms_ewma
+                else alpha * ttft_ms + (1 - alpha) * self.ttft_ms_ewma
+            )
+        if decode_ms and tokens > 0:
+            tps = tokens / (decode_ms / 1000)
+            self.tokens_per_second_ewma = (
+                tps
+                if not self.tokens_per_second_ewma
+                else alpha * tps + (1 - alpha) * self.tokens_per_second_ewma
+            )
+
+    def start_heartbeats(self) -> None:
+        if not self.config.nats_url or self.heartbeat is not None:
+            return
+        self.heartbeat = HeartbeatPublisher(self)
+        self._heartbeat_task = asyncio.get_running_loop().create_task(self.heartbeat.run())
+
+    async def stop_heartbeats(self) -> None:
+        if self.heartbeat is not None:
+            await self.heartbeat.close()
+        if self._heartbeat_task is not None:
+            self._heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._heartbeat_task
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -218,8 +274,7 @@ class Worker:
         unload. Unloading first would leave callers blocked on an iterator that has
         gone away.
         """
-        self.draining = True
-        self.metrics.draining.set(1)
+        self.set_draining(release_waiters=False)
         if self.queue is not None:
             woken = self.queue.drain_waiters()
             if woken:
@@ -234,6 +289,9 @@ class Worker:
         deadline = time.monotonic() + self.config.shutdown_grace_s
         while self.cancels and time.monotonic() < deadline:  # noqa: ASYNC110
             await asyncio.sleep(0.05)
+        await self.stop_heartbeats()
+        if self.tracing is not None:
+            self.tracing.shutdown()
         await self.runtime.unload()
         self.log.info("engine unloaded")
 
@@ -401,7 +459,11 @@ def create_app(config: WorkerConfig, runtime: InferenceRuntime | None = None) ->
     async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # The model is loaded before the server reports ready, so Kubernetes never
         # routes traffic to a replica that would answer 503.
+        worker.tracing = tracing.setup(
+            config.otlp_endpoint, "nebula-worker", config.pod_name, WORKER_PROTOCOL_VERSION
+        )
         await worker.load()
+        worker.start_heartbeats()
         try:
             yield
         finally:
@@ -428,24 +490,25 @@ def create_app(config: WorkerConfig, runtime: InferenceRuntime | None = None) ->
         started = time.perf_counter()
         try:
             response = await call_next(request)
+            response.headers[HEADER_PROTOCOL] = WORKER_PROTOCOL_VERSION
+            response.headers[HEADER_REQUEST_ID] = rid
+            # Logged while the ids are still bound, so the line is correlated.
+            if request.url.path not in {"/livez", "/readyz", "/healthz", "/metrics"}:
+                worker.log.info(
+                    "request completed",
+                    extra={
+                        "fields": {
+                            "http_method": request.method,
+                            "http_path": request.url.path,
+                            "http_status": response.status_code,
+                            "duration_ms": int((time.perf_counter() - started) * 1000),
+                        }
+                    },
+                )
+            return response
         finally:
             request_id_var.reset(token_rid)
             trace_id_var.reset(token_tid)
-        response.headers[HEADER_PROTOCOL] = WORKER_PROTOCOL_VERSION
-        response.headers[HEADER_REQUEST_ID] = rid
-        if request.url.path not in {"/livez", "/readyz", "/healthz", "/metrics"}:
-            worker.log.info(
-                "request completed",
-                extra={
-                    "fields": {
-                        "http_method": request.method,
-                        "http_path": request.url.path,
-                        "http_status": response.status_code,
-                        "duration_ms": int((time.perf_counter() - started) * 1000),
-                    }
-                },
-            )
-        return response
 
     # -- probes ------------------------------------------------------------
 
@@ -567,11 +630,7 @@ def create_app(config: WorkerConfig, runtime: InferenceRuntime | None = None) ->
         Called from a preStop hook. Idempotent, because a preStop hook that runs twice
         must not be a second kind of event.
         """
-        was = worker.draining
-        worker.draining = True
-        worker.metrics.draining.set(1)
-        if worker.queue is not None:
-            worker.queue.drain_waiters()
+        was = worker.set_draining()
         return JSONResponse(
             content={
                 "draining": True,
@@ -715,9 +774,18 @@ def create_app(config: WorkerConfig, runtime: InferenceRuntime | None = None) ->
             )
 
         gen_req = to_generation_request(body, ctx)
+        span = tracing.start_generate(
+            request.headers,
+            {
+                "request_id": ctx.request_id,
+                "model_version": config.model_version,
+                "runtime": worker.runtime.name,
+                "streamed": streaming,
+            },
+        )
         if streaming:
-            return await _stream_response(gen_req, ctx, endpoint)
-        return await _collect_response(gen_req, ctx, endpoint)
+            return await _stream_response(gen_req, ctx, endpoint, span)
+        return await _collect_response(gen_req, ctx, endpoint, span)
 
     async def _acquire(gen_req: GenerationRequest, ctx: RequestContext) -> tuple[Any, float]:
         registration = worker.cancels.register(ctx.request_id)
@@ -736,16 +804,28 @@ def create_app(config: WorkerConfig, runtime: InferenceRuntime | None = None) ->
             worker.metrics.tokens_prompt_total.inc(chunk.usage.prompt_tokens)
         if chunk is not None and chunk.timing is not None and chunk.timing.ttft_ms:
             worker.metrics.ttft.observe(chunk.timing.ttft_ms / 1000)
+        if chunk is not None and chunk.timing is not None and outcome == "ok":
+            tokens = chunk.usage.completion_tokens if chunk.usage is not None else 0
+            worker.observe_timing(chunk.timing.ttft_ms, tokens, chunk.timing.decode_ms)
         if outcome == "cancelled":
             worker.metrics.cancellations_total.inc()
         elif outcome == "deadline":
             worker.metrics.deadlines_exceeded_total.inc()
 
     async def _collect_response(
-        gen_req: GenerationRequest, ctx: RequestContext, endpoint: str
+        gen_req: GenerationRequest, ctx: RequestContext, endpoint: str, span: Any
     ) -> Response:
         started = time.perf_counter()
-        registration, wait_s = await _acquire(gen_req, ctx)
+        qspan = tracing.child(span, "worker.queue")
+        try:
+            registration, wait_s = await _acquire(gen_req, ctx)
+        except BaseException:
+            qspan.end()
+            span.end()
+            raise
+        qspan.set_attribute("wait_ms", int(wait_s * 1000))
+        qspan.end()
+        rspan = tracing.child(span, "runtime.stream")
         text: list[str] = []
         final: TokenChunk | None = None
         outcome = "ok"
@@ -777,23 +857,34 @@ def create_app(config: WorkerConfig, runtime: InferenceRuntime | None = None) ->
             )
         except InferenceRuntimeError as exc:
             outcome = "error"
+            tracing.fail(rspan, exc.code)
             return _runtime_error_response(exc, ctx)
         finally:
             duration = time.perf_counter() - started
+            _finish_spans(span, rspan, final, outcome)
             _record(endpoint, final, outcome, duration)
             worker.cancels.release(ctx.request_id)
             assert worker.queue is not None
             worker.queue.release(max(0.0, duration - wait_s))
 
     async def _stream_response(
-        gen_req: GenerationRequest, ctx: RequestContext, endpoint: str
+        gen_req: GenerationRequest, ctx: RequestContext, endpoint: str, span: Any
     ) -> Response:
         started = time.perf_counter()
-        registration, wait_s = await _acquire(gen_req, ctx)
+        qspan = tracing.child(span, "worker.queue")
+        try:
+            registration, wait_s = await _acquire(gen_req, ctx)
+        except BaseException:
+            qspan.end()
+            span.end()
+            raise
+        qspan.set_attribute("wait_ms", int(wait_s * 1000))
+        qspan.end()
 
         async def body() -> AsyncIterator[bytes]:
             final: TokenChunk | None = None
             outcome = "ok"
+            rspan = tracing.child(span, "runtime.stream")
             try:
                 async for chunk in worker.runtime.stream(gen_req):
                     if registration.cancelled.is_set() and not chunk.is_final:
@@ -810,6 +901,7 @@ def create_app(config: WorkerConfig, runtime: InferenceRuntime | None = None) ->
                 yield b"data: [DONE]\n\n"
             except InferenceRuntimeError as exc:
                 outcome = "error"
+                tracing.fail(rspan, exc.code)
                 # The status line is long gone by now, so an error mid-stream has to
                 # be delivered as an event. Clients are told to treat an ``error``
                 # event as terminal (docs/api.md §1).
@@ -830,6 +922,7 @@ def create_app(config: WorkerConfig, runtime: InferenceRuntime | None = None) ->
                 yield b"data: [DONE]\n\n"
             finally:
                 duration = time.perf_counter() - started
+                _finish_spans(span, rspan, final, outcome)
                 _record(endpoint, final, outcome, duration)
                 worker.cancels.release(ctx.request_id)
                 assert worker.queue is not None
@@ -845,6 +938,22 @@ def create_app(config: WorkerConfig, runtime: InferenceRuntime | None = None) ->
                 "X-Accel-Buffering": "no",
             },
         )
+
+    def _finish_spans(span: Any, rspan: Any, final: TokenChunk | None, outcome: str) -> None:
+        """Close the runtime and generation spans with counts and timings only."""
+        if final is not None:
+            if final.finish_reason is not None:
+                rspan.set_attribute("finish_reason", str(final.finish_reason))
+            if final.usage is not None:
+                rspan.set_attribute("tokens_out", final.usage.completion_tokens)
+                rspan.set_attribute("tokens_in", final.usage.prompt_tokens)
+            if final.timing is not None and final.timing.ttft_ms:
+                rspan.set_attribute("ttft_ms", final.timing.ttft_ms)
+        span.set_attribute("outcome", outcome)
+        if outcome == "error":
+            tracing.fail(span, "generation failed")
+        rspan.end()
+        span.end()
 
     def _runtime_error_response(exc: InferenceRuntimeError, ctx: RequestContext) -> Response:
         status = _ERROR_STATUS.get(type(exc), 500)

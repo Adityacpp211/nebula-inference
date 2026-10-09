@@ -37,16 +37,34 @@ import (
 // the request (docs/security-boundaries.md §2, B2).
 func (a *API) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		presented, err := bearerToken(r)
-		if err != nil {
-			a.fail(w, r, err)
-			return
-		}
-
-		ident, err := a.resolveKey(r.Context(), presented)
-		if err != nil {
-			a.fail(w, r, err)
-			return
+		var ident auth.Identity
+		if r.Header.Get(auth.HeaderAuthContext) != "" {
+			// The gateway authenticated the caller and signed the result (B2). The
+			// signed context is used INSTEAD of any bearer token: a request carrying
+			// both is one the gateway built, and the key has already been checked.
+			v, err := a.verifyContext(r)
+			if err != nil {
+				a.fail(w, r, err)
+				return
+			}
+			if v.ActorType == auth.ActorService {
+				// A service identity has no tenant and no scopes. It may call the
+				// internal surface and nothing else.
+				a.fail(w, r, forbidden("a service identity cannot call tenant endpoints", "service_identity"))
+				return
+			}
+			ident = v
+		} else {
+			presented, err := bearerToken(r)
+			if err != nil {
+				a.fail(w, r, err)
+				return
+			}
+			ident, err = a.resolveKey(r.Context(), presented)
+			if err != nil {
+				a.fail(w, r, err)
+				return
+			}
 		}
 
 		ctx := auth.WithIdentity(r.Context(), ident)

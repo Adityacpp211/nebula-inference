@@ -1,0 +1,122 @@
+{
+  "nebula-fleet": [
+    [
+      "Request rate",
+      "sum by (route) (rate(nebula_requests_total[5m]))"
+    ],
+    [
+      "Error rate (5xx, excluding client cancellations)",
+      "(sum(rate(nebula_requests_total{status_class=\"5xx\"}[5m])) or vector(0)) / sum(rate(nebula_requests_total[5m]))"
+    ],
+    [
+      "p95 time to first token",
+      "histogram_quantile(0.95, sum by (le, deployment) (rate(nebula_ttft_seconds_bucket[5m])))"
+    ],
+    [
+      "Deployments by state",
+      "sum by (state) (nebula_deployment_state)"
+    ],
+    [
+      "Ready endpoints",
+      "sum by (deployment) (nebula_endpoints{state=\"ready\"})"
+    ],
+    [
+      "Requests shed by the admission queue",
+      "sum by (reason) (rate(nebula_queue_drops_total[5m]))"
+    ]
+  ],
+  "nebula-deployment": [
+    [
+      "Requests by status",
+      "sum by (status_class) (rate(nebula_requests_total{deployment=~\"$deployment\"}[5m]))"
+    ],
+    [
+      "Request duration p95",
+      "histogram_quantile(0.95, sum by (le) (rate(nebula_request_duration_seconds_bucket{deployment=~\"$deployment\"}[5m])))"
+    ],
+    [
+      "Time to first token p95",
+      "histogram_quantile(0.95, sum by (le) (rate(nebula_ttft_seconds_bucket{deployment=~\"$deployment\"}[5m])))"
+    ],
+    [
+      "Tokens per second",
+      "sum by (direction) (rate(nebula_tokens_total{deployment=~\"$deployment\"}[5m]))"
+    ],
+    [
+      "Endpoints by state",
+      "sum by (state) (nebula_endpoints{deployment=~\"$deployment\"})"
+    ],
+    [
+      "Replicas desired / ready",
+      "nebula_deployment_replicas{deployment=~\"$deployment\"}"
+    ],
+    [
+      "In flight",
+      "sum(nebula_inflight_requests{deployment=~\"$deployment\"})"
+    ],
+    [
+      "Generation lag",
+      "max(nebula_generation_lag{deployment=~\"$deployment\"})"
+    ]
+  ],
+  "nebula-request-path": [
+    [
+      "Gateway queue wait p95",
+      "histogram_quantile(0.95, sum by (le, deployment) (rate(nebula_queue_wait_seconds_bucket[5m])))"
+    ],
+    [
+      "Time to first token p95 (worker-measured)",
+      "histogram_quantile(0.95, sum by (le, deployment) (rate(nebula_ttft_seconds_bucket[5m])))"
+    ],
+    [
+      "Total duration p95",
+      "histogram_quantile(0.95, sum by (le, deployment) (rate(nebula_request_duration_seconds_bucket[5m])))"
+    ],
+    [
+      "Dispatch attempts by outcome",
+      "sum by (outcome) (rate(nebula_request_attempts_total[5m]))"
+    ],
+    [
+      "Routing decisions",
+      "sum by (outcome) (rate(nebula_route_decisions_total[5m]))"
+    ],
+    [
+      "Open or half-open breakers",
+      "sum by (deployment) (nebula_breaker_state > 0) or vector(0)"
+    ],
+    [
+      "Heartbeat age at selection p95",
+      "histogram_quantile(0.95, sum by (le) (rate(nebula_endpoint_staleness_seconds_bucket[5m])))"
+    ],
+    [
+      "Rate-limit refusals",
+      "sum by (scope, limit) (rate(nebula_ratelimit_rejections_total[5m])) or vector(0)"
+    ]
+  ],
+  "nebula-queue": [
+    [
+      "Queue depth",
+      "sum by (deployment, priority) (nebula_queue_depth)"
+    ],
+    [
+      "Oldest waiting request",
+      "max by (deployment) (nebula_queue_oldest_age_seconds)"
+    ],
+    [
+      "Queue wait p95 vs 500 ms target",
+      "histogram_quantile(0.95, sum by (le, deployment) (rate(nebula_queue_wait_seconds_bucket[5m])))"
+    ],
+    [
+      "Drops by reason",
+      "sum by (deployment, reason) (rate(nebula_queue_drops_total[5m])) or vector(0)"
+    ],
+    [
+      "Worker queue depth",
+      "sum by (pod) (nebula_worker_queue_depth)"
+    ],
+    [
+      "Worker slots busy / total",
+      "sum(nebula_worker_slots_busy) / clamp_min(sum(nebula_worker_slots_total), 1)"
+    ]
+  ]
+}

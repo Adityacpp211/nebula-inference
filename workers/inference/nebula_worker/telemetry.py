@@ -76,7 +76,7 @@ _LEVELS = {
 
 
 def configure_logging(
-    level: str, service: str = "nebula-inference-worker", instance: str = "local"
+    level: str, service: str = "nebula-worker", instance: str = "local"
 ) -> logging.Logger:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JSONFormatter(service, instance))

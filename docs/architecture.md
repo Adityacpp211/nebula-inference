@@ -304,7 +304,11 @@ stale data would be wrong. Three overlapping sources, in priority order:
    endpoint. Locally observed failure is believed immediately; it does not wait for a heartbeat.
 
 On cold start a gateway replica loads a Redis snapshot of routes and endpoints (written by the
-controller) so its first request is not served blind, then converges via informer + heartbeats.
+gateways themselves whenever their view changes —
+[ADR-0033](./architecture-decisions/0033-router-state-and-before-work-retries.md)) so its first
+request is not served blind, then converges via informer + heartbeats. Heartbeat staleness counts
+only while heartbeats are flowing: with NATS down, silence proves nothing, and selection falls back
+to readiness plus local observation.
 
 ### 6.3 Admission queue
 

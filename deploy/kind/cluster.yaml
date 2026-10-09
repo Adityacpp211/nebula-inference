@@ -1,0 +1,43 @@
+# kind cluster for NEBULA development (docs/deployment-architecture.md §1.2).
+#
+# Two worker nodes, not one: with a single node, topology spread, node-loss tests
+# and multi-node artifact caching are all untestable.
+#
+# The model cache is a host directory mounted into every node at the path the
+# controller puts in worker pods (NEBULA_KUBE_ARTIFACT_CACHE_HOST_PATH). Two
+# reasons: a downloaded artifact survives `kind delete cluster`, and the directory
+# can be created with the owner the non-root artifact puller runs as (65532) —
+# a hostPath kubelet creates itself is root-owned and unwritable to it.
+# scripts/dev-up.sh prepares it.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: nebula-dev
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      # gateway NodePort → localhost:8080
+      - containerPort: 30080
+        hostPort: 8080
+        listenAddress: "127.0.0.1"
+      # artifact store (S3 API) NodePort → localhost:30333, for presigned uploads
+      - containerPort: 30333
+        hostPort: 30333
+        listenAddress: "127.0.0.1"
+      # Grafana NodePort → localhost:3000
+      - containerPort: 30300
+        hostPort: 3000
+        listenAddress: "127.0.0.1"
+  - role: worker
+    labels:
+      nebula.dev/accelerator: cpu
+      nebula.dev/pool: inference
+    extraMounts:
+      - hostPath: /var/lib/nebula-kind/models
+        containerPath: /var/lib/nebula/models
+  - role: worker
+    labels:
+      nebula.dev/accelerator: cpu
+      nebula.dev/pool: inference
+    extraMounts:
+      - hostPath: /var/lib/nebula-kind/models
+        containerPath: /var/lib/nebula/models

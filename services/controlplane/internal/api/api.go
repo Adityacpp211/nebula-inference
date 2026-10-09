@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/adityasatwar321/nebula/packages/artifact"
 	"github.com/adityasatwar321/nebula/packages/auth"
 	"github.com/adityasatwar321/nebula/packages/config"
 	"github.com/adityasatwar321/nebula/packages/telemetry"
@@ -22,6 +23,17 @@ type API struct {
 	Logger *slog.Logger
 	Store  *store.Store
 	Hasher *auth.Hasher
+	// Signer verifies X-Nebula-Auth-Context from the gateway. Nil when no internal
+	// secret is configured, in which case only direct API-key authentication works
+	// and the internal surface is not mounted.
+	Signer *auth.ContextSigner
+	// Artifacts is the model artifact store, nil when none is configured. With a
+	// store, versions get presigned uploads and finalize verifies the bytes.
+	Artifacts artifact.Store
+	// Verifier completes finalize asynchronously; nil without a store.
+	Verifier *Verifier
+	// Metrics receives capacity admission decisions; nil records nothing.
+	Metrics *telemetry.Metrics
 
 	keys *keyCache
 }
@@ -39,13 +51,26 @@ func New(cfg *config.Config, logger *slog.Logger, st *store.Store) (*API, error)
 	if err != nil {
 		return nil, err
 	}
-	return &API{
+	a := &API{
 		Config: cfg,
 		Logger: logger,
 		Store:  st,
 		Hasher: hasher,
 		keys:   newKeyCache(cfg.Auth.KeyCacheSize, nil),
-	}, nil
+	}
+	if a.Artifacts, err = NewArtifactStore(cfg.Artifact); err != nil {
+		return nil, err
+	}
+	if a.Artifacts != nil {
+		a.Verifier = NewVerifier(a)
+	}
+	if !cfg.Internal.AuthSecret.IsZero() {
+		a.Signer, err = auth.NewContextSigner(cfg.Internal.AuthSecret.Reveal(), cfg.Internal.AuthMaxAge.Duration(), nil)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return a, nil
 }
 
 // logger returns the request-correlated logger.
@@ -185,6 +210,14 @@ func (a *API) routes() []Route {
 		// Phase 5 controller runs, nothing else advances an in-flight state.
 		{Pattern: "POST /v1/deployments/{deployment_id}/transition", Scope: adminScope, handler: a.transitionDeployment},
 
+		// Routes: the public model names and their weighted targets.
+		{Pattern: "GET /v1/routes", Scope: depsRead, handler: a.listRoutes},
+		{Pattern: "POST /v1/routes", Scope: depsWrite, handler: a.createRoute},
+		{Pattern: "GET /v1/routes/{route_id}", Scope: depsRead, handler: a.getRoute},
+		{Pattern: "PATCH /v1/routes/{route_id}", Scope: depsWrite, handler: a.updateRoute},
+		{Pattern: "DELETE /v1/routes/{route_id}", Scope: depsWrite, handler: a.deleteRoute},
+		{Pattern: "GET /v1/policies/routing", Scope: depsRead, handler: a.listRoutingPolicies},
+
 		{Pattern: "GET /v1/audit-logs", Scope: auditRead, handler: a.listAuditLogs},
 	})
 }
@@ -216,6 +249,7 @@ func (a *API) Mount(mux *http.ServeMux) {
 		}
 		mux.Handle(route.Pattern, a.authenticate(h))
 	}
+	a.mountInternal(mux)
 }
 
 // whoAmI describes the calling credential. It is the endpoint a caller hits when

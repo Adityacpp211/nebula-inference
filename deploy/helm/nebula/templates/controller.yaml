@@ -1,0 +1,159 @@
+{{- $name := "nebula-controller" }}
+{{- $wl := .Values.namespaces.workloads }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+---
+# Write access, and only in the workload namespace. The controller cannot touch
+# NEBULA itself (docs/deployment-architecture.md §3). Deliberately absent, so a
+# reviewer can check: secrets, pods/exec, pods/portforward, any RBAC object.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ $wl }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["", "events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ $wl }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $name }}}
+subjects: [{kind: ServiceAccount, name: {{ $name }}, namespace: {{ .Release.Namespace }}}]
+---
+# Cluster-scoped facts, read-only. Pods are read cluster-wide because capacity
+# admission needs every pod's requests on a node, not only NEBULA's: a node full
+# of someone else's pods is still full.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "namespaces", "pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ $name }}}
+subjects: [{kind: ServiceAccount, name: {{ $name }}, namespace: {{ .Release.Namespace }}}]
+---
+# Leader election: a Lease in the system namespace, nothing else there.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $name }}-leader-election}
+subjects: [{kind: ServiceAccount, name: {{ $name }}, namespace: {{ .Release.Namespace }}}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nebula.labels" . | nindent 4 }}
+    {{- include "nebula.selector" $name | nindent 4 }}
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels: {{- include "nebula.selector" $name | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nebula.labels" . | nindent 8 }}
+        {{- include "nebula.selector" $name | nindent 8 }}
+      annotations:
+        checksum/secrets: {{ include (print $.Template.BasePath "/namespaces-secrets.yaml") . | sha256sum }}
+        {{- include "nebula.scrapeAnnotations" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $name }}
+      securityContext: {{- include "nebula.podSecurity" . | nindent 8 }}
+      {{- if .Values.data.enabled }}
+      initContainers:
+        - name: migrate
+          image: {{ include "nebula.image" (dict "root" . "name" "migrate") }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args: ["up"]
+          env:
+            - name: NEBULA_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: nebula-secrets, key: NEBULA_DATABASE_URL}}
+          securityContext: {{- include "nebula.containerSecurity" . | nindent 12 }}
+      {{- end }}
+      containers:
+        - name: controller
+          image: {{ include "nebula.image" (dict "root" . "name" "controller") }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          ports: [{name: http, containerPort: 8083}, {name: metrics, containerPort: {{ .Values.telemetry.metricsPort }}}]
+          env:
+            {{- include "nebula.commonEnv" . | nindent 12 }}
+            - name: NEBULA_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: nebula-secrets, key: NEBULA_CONTROLLER_DATABASE_URL}}
+            # Column-level grants of nebula_controller: OBSERVED state only.
+            - name: NEBULA_DATABASE_ROLE
+              value: nebula_controller
+            - name: NEBULA_KUBE_WORKLOAD_NAMESPACE
+              value: {{ $wl | quote }}
+            - name: NEBULA_KUBE_SYSTEM_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: NEBULA_KUBE_STARTING_TIMEOUT
+              value: {{ .Values.controller.startingTimeout | quote }}
+            {{- with include "nebula.natsURL" . }}
+            # Passed to worker pods, which publish heartbeats there.
+            - name: NEBULA_NATS_URL
+              value: {{ . | quote }}
+            {{- end }}
+            - name: NEBULA_KUBE_WORKER_IMAGE
+              value: {{ include "nebula.image" (dict "root" . "name" "workerLlamacpp") }}
+            - name: NEBULA_KUBE_MOCK_WORKER_IMAGE
+              value: {{ include "nebula.image" (dict "root" . "name" "workerMock") }}
+            - name: NEBULA_KUBE_PULLER_IMAGE
+              value: {{ include "nebula.image" (dict "root" . "name" "puller") }}
+            - name: NEBULA_KUBE_IMAGE_PULL_POLICY
+              value: {{ .Values.images.pullPolicy | quote }}
+            - name: NEBULA_KUBE_ARTIFACT_CACHE_HOST_PATH
+              value: {{ .Values.artifact.cacheHostPath | quote }}
+          {{- include "nebula.probes" . | nindent 10 }}
+          resources: {{- toYaml .Values.controller.resources | nindent 12 }}
+          securityContext: {{- include "nebula.containerSecurity" . | nindent 12 }}

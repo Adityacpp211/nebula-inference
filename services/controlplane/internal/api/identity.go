@@ -357,9 +357,10 @@ func (a *API) createAPIKey(w http.ResponseWriter, r *http.Request) error {
 //
 // Revocation is idempotent in the store, and the local cache entry is dropped so
 // the key stops working in this process immediately rather than after the cache
-// TTL. Other control-plane replicas still honour their own TTL until Phase 4 adds
-// the invalidation broadcast; that window is the configured KeyCacheTTL, which is
-// why it is a short, deliberate number.
+// TTL. The response names the revoked prefix in a header, which the gateway's admin
+// proxy uses to evict the key from the shared Redis cache; other control-plane
+// replicas and other gateway replicas' in-process caches still honour their own
+// short TTLs, which is why those are small, deliberate numbers.
 func (a *API) revokeAPIKey(w http.ResponseWriter, r *http.Request) error {
 	ident := auth.MustFromContext(r.Context())
 	id, err := pathUUID(r, "key_id", "api key")
@@ -387,6 +388,8 @@ func (a *API) revokeAPIKey(w http.ResponseWriter, r *http.Request) error {
 	}
 	a.keys.forget(prefix)
 
+	// Tells the gateway which cache entry to drop; see HeaderRevokedKeyPrefix.
+	w.Header().Set(HeaderRevokedKeyPrefix, prefix)
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }

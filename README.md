@@ -19,36 +19,25 @@ for chunk in client.chat.completions.create(
 
 ---
 
-> ## Project status — Phase 3 complete
+> ## Project status — Phase 8 complete
 >
-> **A real model now streams real tokens through a real worker. There is still no gateway and no
-> Kubernetes.** The `nebula deploy` commands above describe the finished system, not what runs today.
+> **One request can be followed from a dashboard to its trace to its log lines.** Every service
+> exports Prometheus metrics from a declared catalogue, every request is a single OpenTelemetry trace
+> from the gateway through the worker, and every log line carries that trace's id. The development
+> cluster runs Prometheus, Tempo, Loki and Grafana with four dashboards whose every panel is backed by
+> real series, and histogram exemplars that open the trace behind a bucket.
 >
-> What works now: everything from Phase 2 — the PostgreSQL schema with its constraints, triggers and
-> row-level security, the migration runner, layered configuration, structured logging with request-ID
-> and trace correlation, API-key authentication with scopes, the model registry with immutable
-> versions, deployment records with revision history, and the eight-state deployment lifecycle
-> enforced by a database trigger
-> ([ADR-0027](docs/architecture-decisions/0027-deployment-state-machine.md)) — plus the inference
-> worker: the `InferenceRuntime` abstraction, a llama.cpp adapter that supervises upstream
-> `llama-server` as a child process, a declared mock stub, a bounded priority queue with absolute
-> deadlines, cancellation that actually stops compute, drain, probes and Prometheus metrics.
+> What works now: everything from Phases 1–7 — the schema and row-level security, API-key auth, the
+> registry and lifecycle, the worker with llama.cpp and mock runtimes, the OpenAI-compatible gateway,
+> the deployment controller with verified artifacts, health-aware routing with heartbeats, and the
+> bounded admission queue — plus metrics, traces, correlated logs, dashboards and tested alert rules.
 >
-> The abstraction is verified rather than asserted: one conformance suite runs unchanged against both
-> adapters, with no test skipped or overridden for either, and a separate suite streams tokens out of a
-> real GGUF and asserts on their content. 145 tests, green.
+> What this deliberately does NOT do yet: no autoscaling (Phase 9), retries only before a worker
+> starts work (Phase 10), no canaries (Phase 12) or cost accounting (Phase 13). Usage records are log
+> lines until the durable event stream.
 >
-> What this deliberately does NOT do: route. A worker answers for itself and nothing decides which
-> worker to ask — that is Phase 6, and saying so here keeps a temporary shortcut from becoming the
-> design. There is still no Kubernetes, so `POST /v1/deployments` answers `202 Accepted` with
-> `status.reconciled` false. Artifact upload still has no presigned target, and `finalize` still
-> compares the checksum the client declared against the one it presents rather than hashing the bytes —
-> reported as `verification: declared_checksum`, not as verified. The worker container images are
-> written but unbuilt: no Docker daemon was available where this phase was developed, so CI is what
-> will prove them.
->
-> Next: [Phase 4](docs/roadmap.md#phase-4--api-gateway-and-openai-compatible-api) — the gateway and the
-> OpenAI-compatible API. See [Capability status](#capability-status).
+> Next: [Phase 9](docs/roadmap.md#phase-9--autoscaling) — autoscaling. See
+> [Capability status](#capability-status).
 
 ## Running it today
 
@@ -82,6 +71,31 @@ make worker-test-integration   # 145 tests, streaming real tokens from a real en
 
 [workers/inference/README.md](workers/inference/README.md) has the whole surface: the
 protocol, the endpoints, every environment variable, and what is deliberately absent.
+
+And the gateway, which ties them together. Four terminals, or one command:
+
+```bash
+make deps-up            # PostgreSQL and Redis in Docker
+make run-controlplane   # :8082 — copy the api_key it logs once
+make run-worker-mock    # :8090 — the declared stub
+make run-gateway        # :8080 — routes from deploy/dev/routes.yaml
+
+make e2e-gateway        # or: the whole stack, throwaway, driven by the OpenAI SDK
+make load-gateway       # the same stack under k6
+make load-overload      # three times capacity: bounded queue, flat memory, 429 + Retry-After
+```
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="nbk_...")
+for chunk in client.chat.completions.create(
+        model="nebula-mock", messages=[{"role": "user", "content": "hi"}], stream=True):
+    print(chunk.choices[0].delta.content or "", end="")
+```
+
+The mock generates placeholder tokens, and every response says so: `nebula.runtime` is `"mock"`.
+Point a route at a llama.cpp worker for real text. Every admin call below also works through the
+gateway at `:8080`, which is how a deployed cluster reaches the control plane.
 
 `run-controlplane` logs a line containing `api_key` on its first start. That key is
 shown once and cannot be recovered — the server stores an HMAC — so copy it, then:
@@ -122,8 +136,38 @@ curl -s -H "Authorization: Bearer $KEY" "$BASE/v1/audit-logs?limit=20" | jq -r '
 
 The `mock` format and runtime are a declared development stub: the registry refuses
 them unless `NEBULA_DEV_MOCK_RUNTIME=true`, and always in production. The checksum
-above is a placeholder because nothing reads artifact bytes yet — `finalize` reports
-`verification: declared_checksum` rather than claiming otherwise.
+above is a placeholder, which works only because `s3://nebula/...` is an external URI:
+`finalize` reports `verification: declared_checksum` rather than claiming the bytes were
+read. A version uploaded to NEBULA's own store is verified from the stored bytes instead
+(below).
+
+### On Kubernetes
+
+A kind cluster with the whole system on it — PostgreSQL, Redis, an S3 store, the control
+plane, the controller and the gateway — from Linux, macOS or WSL with docker, kind,
+kubectl and helm:
+
+```bash
+make dev-up      # builds the images, loads them into kind, helm-installs, prints the dev key
+                 # Grafana at http://127.0.0.1:3000 (dashboards in the NEBULA folder)
+make e2e-kind    # the Phase 5 and 6 demos against the live cluster
+make dev-down
+```
+
+On the cluster, a model is registered by asking for a presigned upload URL, `PUT`ting the
+bytes to it, and calling `finalize`, which answers `202` while the control plane hashes
+what arrived. A deployment of a `ready` version is admitted against real node capacity
+(`422 insufficient_capacity` names the resource that does not fit), and its pods appear in
+`kubectl get deploy,pods -n nebula-workloads`. A route makes it callable:
+
+```bash
+curl -sX POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model_name":"chat","targets":[{"deployment":"blue","weight":90},{"deployment":"green","weight":10}]}' \
+  http://127.0.0.1:8080/v1/routes
+```
+
+[tests/e2e/kind/phase5_demo.py](tests/e2e/kind/phase5_demo.py) and
+[phase6_demo.py](tests/e2e/kind/phase6_demo.py) are the worked examples.
 
 ---
 
@@ -238,7 +282,7 @@ All twenty-eight: [docs/architecture-decisions/](docs/architecture-decisions/).
 | [workers/inference/README.md](workers/inference/README.md) | The inference worker: the `InferenceRuntime` contract, both adapters, the worker API, configuration, the fixture model |
 | [roadmap.md](docs/roadmap.md) | Phases 0–18 with deliverables, tests, and exit criteria |
 | [risk-register.md](docs/risk-register.md) | Twenty scored risks with mitigations and residuals |
-| [architecture-decisions/](docs/architecture-decisions/) | ADR index (28); eight of them, including every one written during implementation, as full files |
+| [architecture-decisions/](docs/architecture-decisions/) | ADR index (30); ten of them, including every one written during implementation, as full files |
 
 Written during implementation: `development.md`, `deployment.md`, `model-runtime.md`,
 `reliability.md`, and `security.md` (the operational threat model extending
@@ -278,12 +322,13 @@ checkout.
 | Model registry, immutable versions, deployment records, state machine | ✅ **working** | 2 |
 | Runtime abstraction, llama.cpp + mock runtimes, worker API, queue, deadlines, cancellation | ✅ **working** | 3 |
 | Worker container images (mock and llama.cpp variants) | ⚠️ written, **unverified** — no Docker daemon on the development hardware; CI builds both | 3 |
-| Artifact store: presigned upload, streaming checksum, GGUF metadata | ⬜ moved to 5 — needs MinIO and the pull path the controller introduces | 5 |
-| Gateway, OpenAI-compatible API, streaming | ⬜ not started | 4 |
-| Deployment controller, Kubernetes integration, Helm | ⬜ not started | 5 |
-| Health-aware routing, routing strategies | ⬜ not started | 6 |
-| Bounded queues, concurrency control, backpressure | ⬜ not started | 7 |
-| Metrics, logs, traces, Grafana dashboards | ⬜ not started | 8 |
+| Artifact store: presigned upload, streaming checksum, GGUF metadata | ✅ **working** — verified from stored bytes, re-checked by the puller on every node | 5 |
+| Gateway, OpenAI-compatible API, streaming, rate limiting, admin proxy | ✅ **working** — verified with the unmodified OpenAI SDK; static routes until 6 | 4 |
+| Gateway container image | ✅ **working** — built and run on kind in the Phase 5 demo | 4 |
+| Deployment controller, Kubernetes integration, Helm | ✅ **working** — kind demo 12/12: pods replaced, deleted Deployments recreated, drift reverted | 5 |
+| Health-aware routing, routing strategies | ✅ **working** — kind demo: 50/50 split, all pods of one target killed under load with 0 errors, cold start from snapshot | 6 |
+| Bounded queues, concurrency control, backpressure | ✅ **working** — 3× capacity load test: queue at its bound, heap flat, every refusal a 429 with Retry-After | 7 |
+| Metrics, logs, traces, Grafana dashboards | ✅ **working** — kind demo: exemplar → trace → logs for one request; all 28 panels backed by series | 8 |
 | Autoscaling | ⬜ not started | 9 |
 | Retries, breakers, timeouts, graceful shutdown | ⬜ not started | 10 |
 | Model versioning, rollback | ⬜ not started | 11 |

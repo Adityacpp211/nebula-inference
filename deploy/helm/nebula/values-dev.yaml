@@ -1,0 +1,64 @@
+# kind development values: one replica each, in-cluster PostgreSQL, Redis and an
+# S3-compatible store, the mock runtime allowed, and well-known development
+# secrets that every service refuses when env=production.
+env: dev
+
+images:
+  tag: dev
+  pullPolicy: Never           # images are loaded into kind, never pulled
+
+secrets:
+  keyPepper: nebula-development-pepper-do-not-use-in-production
+  internalAuthSecret: nebula-development-internal-secret-do-not-use
+  databaseURL: postgres://nebula:nebula@postgres.nebula-data:5432/nebula?sslmode=disable
+  controllerDatabaseURL: postgres://nebula:nebula@postgres.nebula-data:5432/nebula?sslmode=disable
+  redisURL: redis://redis.nebula-data:6379/0
+  artifactAccessKey: nebula
+  artifactSecretKey: nebula-dev-secret
+
+artifact:
+  endpoint: s3.nebula-data:8333
+  # The laptop reaches the store through the kind port mapping.
+  publicEndpoint: 127.0.0.1:30333
+  useTLS: false
+
+gateway:
+  replicas: 1
+  service:
+    type: NodePort
+    nodePort: 30080
+  # No static routes: routes come from the control plane (POST /v1/routes) and
+  # endpoints from EndpointSlices, as on any cluster.
+  routes: []
+  # The kind demos drive a few thousand requests a minute through one key.
+  limits:
+    key_rpm: "20000"
+    key_tpm: "5000000"
+    org_rpm: "100000"
+    org_tpm: "50000000"
+
+controlplane:
+  replicas: 1
+  devSeed: true
+  # A fixed, public development key, so recreating the cluster does not strand
+  # you without one. The control plane refuses any seed when env=production.
+  devSeedKey: nbk_devkey0NEBULAdevelopmentKeyDoNotUseInProduction000
+
+controller:
+  replicas: 1
+  startingTimeout: 5m
+
+data:
+  enabled: true
+  s3:
+    nodePort: 30333
+
+telemetry:
+  traceSampleRatio: "1"
+
+observability:
+  enabled: true
+  grafana:
+    adminPassword: nebula-dev
+    anonymousViewer: true
+    service: {type: NodePort, nodePort: 30300}

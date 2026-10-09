@@ -1,7 +1,8 @@
 # NEBULA — Observability Architecture
 
-**Status:** Phase 0 design (architecture, contracts, catalogues). Phase 8 implements it and adds the
-committed Grafana dashboard JSON and alert rules; Phase 18 adds runbooks. This document is the contract
+**Status:** implemented in Phase 8 for everything whose metrics exist
+([ADR-0035](./architecture-decisions/0035-observability-wiring.md)); rows and dashboards marked for later
+phases arrive with them. Phase 18 adds runbooks. This document is the contract
 those phases build against.
 
 The requirement behind "distributed tracing" is not *having spans*. It is that an operator holding one
@@ -97,6 +98,9 @@ outage must never become a traffic-shifting event.
 
 ## 2. Metric catalogue
 
+Rows marked *(Phase N)* are planned and arrive with that phase; every other row is exported today
+and asserted by `packages/telemetry` (`TestCatalogMatchesTheDocumentedCatalogue`).
+
 Naming: `nebula_<subsystem>_<thing>_<unit>`, seconds and bytes as base units, `_total` on counters,
 histograms for anything whose distribution matters. Every metric below is asserted to exist with its
 documented labels by a Phase 8 contract test — otherwise a rename silently empties a dashboard and
@@ -124,14 +128,14 @@ nobody notices until an incident.
 | Metric | Type | Labels | Purpose |
 |--------|------|--------|---------|
 | `nebula_route_decisions_total` | counter | `route`, `strategy`, `outcome` | did routing find an endpoint |
-| `nebula_endpoints` | gauge | `deployment`, `state` (ready\|stale\|breaker_open\|saturated) | the router's own view of health |
+| `nebula_endpoints` | gauge | `deployment`, `state` (ready\|not_ready\|stale\|not_accepting\|breaker_open\|saturated) | the router's own view of health |
 | `nebula_endpoint_staleness_seconds` | histogram | `deployment` | heartbeat freshness — the leading indicator for [risk R-04](./risk-register.md) |
 | `nebula_queue_depth` | gauge | `deployment`, `priority` | **primary autoscaling signal** |
 | `nebula_queue_wait_seconds` | histogram | `deployment`, `priority` | user-visible queueing pain |
 | `nebula_queue_oldest_age_seconds` | gauge | `deployment` | starvation detection |
-| `nebula_queue_drops_total` | counter | `deployment`, `reason` (full\|timeout\|cancelled) | shedding behaviour |
-| `nebula_retries_total` | counter | `deployment`, `reason` | retry volume |
-| `nebula_retries_rejected_budget_total` | counter | `deployment` | the budget doing its job |
+| `nebula_queue_drops_total` | counter | `deployment`, `reason` (queue_full\|queue_timeout\|client_cancelled\|rejected) | shedding behaviour |
+| `nebula_retries_total` *(Phase 10)* | counter | `deployment`, `reason` | retry volume |
+| `nebula_retries_rejected_budget_total` *(Phase 10)* | counter | `deployment` | the budget doing its job |
 | `nebula_breaker_state` | gauge | `deployment`, `endpoint`, `pod` | 0 closed, 1 half-open, 2 open — labelled by gateway pod because breakers are per-replica ([ADR-0014](./architecture-decisions/README.md#adr-0014)) |
 | `nebula_ratelimit_rejections_total` | counter | `scope` (key\|org), `limit` (rpm\|tpm\|concurrency) | quota pressure |
 
@@ -198,13 +202,13 @@ as an engine measurement would be the "fake metrics" failure at small scale (see
 | `nebula_generation_lag` | gauge | `deployment` | `generation − observed_generation`: **the single best "is the control plane keeping up" metric** |
 | `nebula_deployment_replicas` | gauge | `deployment`, `state` (desired\|ready\|updated) | convergence |
 | `nebula_deployment_state` | gauge | `deployment`, `state` | fleet health |
-| `nebula_autoscale_decisions_total` | counter | `deployment`, `direction`, `decision` | includes `suppressed_*`, which is what makes non-action diagnosable |
-| `nebula_autoscale_signal_ratio` | gauge | `deployment`, `signal` | why it scaled |
-| `nebula_rollout_step` / `nebula_rollout_state` | gauge | `route`, `rollout` | progressive delivery position |
+| `nebula_autoscale_decisions_total` *(Phase 9)* | counter | `deployment`, `direction`, `decision` | includes `suppressed_*`, which is what makes non-action diagnosable |
+| `nebula_autoscale_signal_ratio` *(Phase 9)* | gauge | `deployment`, `signal` | why it scaled |
+| `nebula_rollout_step` / `nebula_rollout_state` *(Phase 12)* | gauge | `route`, `rollout` | progressive delivery position |
 | `nebula_capacity_admission_total` | counter | `result` (admitted\|rejected), `reason` | placement rejections |
-| `nebula_usage_events_dropped_total` | counter | `reason` | **must stay zero**; non-zero means cost data is incomplete |
-| `nebula_usage_ingest_lag_seconds` | gauge | — | JetStream consumer backlog age |
-| `nebula_estimated_cost_micros_total` | counter | `org`, `deployment` | cost rate |
+| `nebula_usage_events_dropped_total` *(Phase 13)* | counter | `reason` | **must stay zero**; non-zero means cost data is incomplete |
+| `nebula_usage_ingest_lag_seconds` *(Phase 13)* | gauge | — | JetStream consumer backlog age |
+| `nebula_estimated_cost_micros_total` *(Phase 13)* | counter | `org`, `deployment` | cost rate |
 | `nebula_schema_version` | gauge | `service` | catches partial upgrades |
 
 ### 2.5 Cardinality budget
@@ -335,7 +339,8 @@ evaporates before the morning stand-up has not actually recorded anything.
 
 ## 6. Dashboards
 
-Committed as Grafana JSON under `deploy/grafana/`, provisioned by the chart — version-controlled, so a
+Generated by `deploy/grafana/generate.py` into `deploy/helm/nebula/files/dashboards/` (`make
+dashboards`; CI fails if the committed JSON differs from the generator), provisioned by the chart — version-controlled, so a
 dashboard change is reviewable and a dashboard is never lost with a pod.
 
 | Dashboard | Answers |

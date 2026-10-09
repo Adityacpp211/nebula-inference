@@ -30,13 +30,13 @@ env:
 jobs:
   build:
     name: build and unit tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # so `git describe` can stamp a version
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -59,7 +59,7 @@ jobs:
         run: make test
 
       - name: upload coverage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: coverage.out
@@ -67,21 +67,21 @@ jobs:
 
   lint:
     name: golangci-lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.1
+          version: v2.1.6
           args: --timeout=5m
 
   integration:
     name: integration tests (PostgreSQL)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     services:
       postgres:
@@ -99,8 +99,8 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -119,9 +119,106 @@ jobs:
           NEBULA_TEST_DATABASE_URL: postgres://nebula:nebula@127.0.0.1:5432/nebula?sslmode=disable
         run: go test -race -count=1 ./tests/integration/... ./services/controlplane/tests/...
 
+  e2e-gateway:
+    name: gateway end to end (OpenAI SDK against a live stack)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: install the worker and the SDK the test drives
+        run: python -m pip install -e workers/inference openai httpx pytest
+
+      # The Phase 4 exit criterion: openai.OpenAI(base_url=...).chat.completions
+      # .create(stream=True) streams tokens from a worker through the gateway.
+      - name: e2e
+        env:
+          PY: python
+        run: ./scripts/e2e-gateway.sh
+
+  helm:
+    name: helm chart (lint, render dev and production values)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+      - name: lint and render
+        run: make helm-check
+
+  observability:
+    name: observability (alert rule tests, dashboards up to date)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: alert rules fire and stay quiet as specified
+        run: make alerts-test
+      - name: committed dashboards match their generator
+        run: |
+          make dashboards PY=python
+          git diff --exit-code -- deploy/helm/nebula/files/
+
+  e2e-kind:
+    name: kind end to end (controller, RBAC, network policy, artifacts)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+      - uses: helm/kind-action@v1
+        with:
+          install_only: true
+      # dev-up creates the cluster from deploy/kind/cluster.yaml, builds every image,
+      # loads them into kind and installs the chart; the demo then walks the Phase 5
+      # exit criteria against it.
+      - name: bring NEBULA up
+        run: ./scripts/dev-up.sh
+      - name: phase 5 demo
+        # On failure the demo's last lines become an annotation, readable without
+        # opening the log.
+        run: |
+          set -o pipefail
+          python3 tests/e2e/kind/phase5_demo.py 2>&1 | tee demo.log || {
+            echo "::error title=phase5_demo.py failed::$(tail -n 6 demo.log | tr '\n' ' ' | cut -c1-900)"
+            echo "::error title=control plane (artifact store)::$(kubectl -n nebula-system logs deploy/nebula-controlplane | grep -i -E 'bucket|artifact|s3' | tail -n 8 | tr '\n' ' ' | cut -c1-900)"
+            exit 1
+          }
+      - name: Phase 6 demo (routing, traffic shift, cold start from snapshot)
+        # On failure the demo's last lines become an annotation, readable without
+        # opening the log.
+        run: |
+          set -o pipefail
+          python3 tests/e2e/kind/phase6_demo.py 2>&1 | tee demo.log || {
+            echo "::error title=phase6_demo.py failed::$(tail -n 6 demo.log | tr '\n' ' ' | cut -c1-900)"
+            exit 1
+          }
+      - name: Phase 8 demo (metric exemplar to trace to logs; every dashboard panel has data)
+        # On failure the demo's last lines become an annotation, readable without
+        # opening the log.
+        run: |
+          set -o pipefail
+          python3 tests/e2e/kind/phase8_demo.py 2>&1 | tee demo.log || {
+            echo "::error title=phase8_demo.py failed::$(tail -n 6 demo.log | tr '\n' ' ' | cut -c1-900)"
+            exit 1
+          }
+      - name: diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get all -A
+          kubectl -n nebula-system logs deploy/nebula-controller --tail=200 || true
+          kubectl -n nebula-system logs deploy/nebula-controlplane --tail=200 || true
+
   migrations:
     name: migration cycle (up, down, up)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     services:
       postgres:
@@ -139,8 +236,8 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -181,11 +278,11 @@ jobs:
 
   worker:
     name: inference worker (lint, types, unit tests)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -202,16 +299,16 @@ jobs:
 
   worker-integration:
     name: inference worker (real engine, real model)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     # This is the Phase 3 exit criterion, so it is a job rather than a manual step:
     # client -> worker -> model -> streamed tokens, asserted on the content of real
     # output. The suite also asserts the runtime is named llamacpp, so a silent
     # fallback to the declared stub fails here instead of passing.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -219,7 +316,7 @@ jobs:
 
       - name: cache the engine build
         id: engine-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/nebula/engine
           # Keyed by the pinned ref, so bumping the engine rebuilds and anything
@@ -268,13 +365,13 @@ jobs:
 
   docker:
     name: container images
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
 
       - name: build controlplane image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/docker/Dockerfile.controlplane
@@ -283,8 +380,38 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: build gateway image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.gateway
+          push: false
+          tags: nebula/gateway:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: build controller image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.controller
+          push: false
+          tags: nebula/controller:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: build artifact-puller image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.puller
+          push: false
+          tags: nebula/artifact-puller:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       - name: build migrate image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/docker/Dockerfile.migrate
@@ -294,7 +421,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: build worker image (mock)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/docker/Dockerfile.worker
@@ -311,7 +438,7 @@ jobs:
       # missing shared object into a failed build rather than a failed first
       # request in someone's cluster.
       - name: build worker image (llama.cpp)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/docker/Dockerfile.worker

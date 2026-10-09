@@ -1,0 +1,207 @@
+{{- if .Values.data.enabled }}
+{{- $ns := .Values.namespaces.data }}
+{{- /*
+In-cluster data dependencies for development: PostgreSQL 16, Redis 7 and an
+S3-compatible object store (SeaweedFS). Production normally points NEBULA at
+managed services and sets data.enabled=false — a values change, not a different
+architecture (docs/deployment-architecture.md §1.1).
+
+SeaweedFS rather than MinIO: MinIO stopped publishing community container images
+in 2025, and an install that cannot pull its dependencies is not an install. The
+code speaks plain S3 through minio-go and is indifferent to which server answers.
+*/ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: {{ $ns }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  selector: {app.kubernetes.io/name: nebula-postgres}
+  ports: [{name: postgres, port: 5432, targetPort: 5432}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: {{ $ns }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: nebula-postgres}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: nebula-postgres}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          args: ["-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "max_connections=200"]
+          env:
+            - {name: POSTGRES_USER, value: nebula}
+            - {name: POSTGRES_PASSWORD, value: nebula}
+            - {name: POSTGRES_DB, value: nebula}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+          ports: [{containerPort: 5432}]
+          readinessProbe:
+            exec: {command: ["pg_isready", "-U", "nebula", "-d", "nebula"]}
+            periodSeconds: 2
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 1Gi}
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 2Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: {{ $ns }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  selector: {app.kubernetes.io/name: nebula-redis}
+  ports: [{name: redis, port: 6379, targetPort: 6379}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: {{ $ns }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: nebula-redis}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: nebula-redis}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 999, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          # Transient state only (docs/architecture.md §3.2): no persistence.
+          args: ["--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+          ports: [{containerPort: 6379}]
+          readinessProbe:
+            exec: {command: ["redis-cli", "ping"]}
+            periodSeconds: 2
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 320Mi}
+          securityContext: {{- include "nebula.containerSecurity" . | nindent 12 }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: s3-identities
+  namespace: {{ $ns }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  s3.json: |
+    {"identities": [{"name": "nebula",
+      "credentials": [{"accessKey": {{ .Values.secrets.artifactAccessKey | quote }}, "secretKey": {{ .Values.secrets.artifactSecretKey | quote }}}],
+      "actions": ["Admin", "Read", "List", "Tagging", "Write"]}]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: s3
+  namespace: {{ $ns }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  type: NodePort
+  selector: {app.kubernetes.io/name: nebula-s3}
+  ports:
+    - {name: s3, port: 8333, targetPort: 8333, nodePort: {{ .Values.data.s3.nodePort | default 30333 }}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: s3
+  namespace: {{ $ns }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/name: nebula-s3}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: nebula-s3}
+    spec:
+      automountServiceAccountToken: false
+      # The Service is named "s3", so Kubernetes would inject S3_PORT=tcp://...,
+      # which SeaweedFS reads as its -s3.port flag and refuses to start.
+      enableServiceLinks: false
+      containers:
+        - name: seaweedfs
+          image: chrislusf/seaweedfs:3.97
+          args: ["server", "-s3", "-s3.config=/etc/seaweedfs/s3.json", "-dir=/data"]
+          ports: [{containerPort: 8333}, {containerPort: 9333}]
+          readinessProbe:
+            tcpSocket: {port: 8333}
+            periodSeconds: 2
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 1Gi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: identities, mountPath: /etc/seaweedfs, readOnly: true}
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: identities
+          secret: {secretName: s3-identities}
+---
+# NATS for worker heartbeats (core NATS only; JetStream arrives with durable
+# events). Stateless: a restart loses nothing but a second of heartbeats.
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  namespace: {{ $ns }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  selector: {app.kubernetes.io/name: nebula-nats}
+  ports: [{name: client, port: 4222, targetPort: 4222}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nats
+  namespace: {{ $ns }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: nebula-nats}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: nebula-nats}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: nats
+          image: nats:2.10-alpine
+          args: ["--port", "4222", "--http_port", "8222"]
+          ports: [{containerPort: 4222}, {containerPort: 8222}]
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8222}
+            periodSeconds: 2
+          resources:
+            requests: {cpu: 20m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          securityContext: {{- include "nebula.containerSecurity" . | nindent 12 }}
+{{- end }}

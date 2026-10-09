@@ -1,0 +1,968 @@
+package server
+
+import (
+	"context"
+
+	"errors"
+	"fmt"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	"io"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/adityasatwar321/nebula/packages/auth"
+	"github.com/adityasatwar321/nebula/packages/db/models"
+	"github.com/adityasatwar321/nebula/packages/httpx"
+	"github.com/adityasatwar321/nebula/packages/queue"
+	"github.com/adityasatwar321/nebula/packages/routing"
+	"github.com/adityasatwar321/nebula/packages/telemetry"
+	"github.com/adityasatwar321/nebula/services/gateway/internal/dispatch"
+	"github.com/adityasatwar321/nebula/services/gateway/internal/openai"
+	"github.com/adityasatwar321/nebula/services/gateway/internal/ratelimit"
+	"github.com/adityasatwar321/nebula/services/gateway/internal/router"
+	"github.com/adityasatwar321/nebula/services/gateway/internal/routes"
+	"github.com/adityasatwar321/nebula/services/gateway/internal/usage"
+)
+
+// StatusClientClosedRequest is nginx's 499, used for a client that went away.
+// Logged, never sent (there is nobody to send it to), and not an SLO violation.
+const StatusClientClosedRequest = 499
+
+// exchange is one inference request as it moves through the stages.
+type exchange struct {
+	kind    openai.Kind
+	req     *openai.Request
+	route   *routes.Route
+	target  *routes.Target
+	call    dispatch.Call
+	lease   *ratelimit.Lease
+	reserve int
+	started time.Time
+	ident   auth.Identity
+	id      string // response id: chatcmpl-<request id> or cmpl-<request id>
+	timing  *dispatch.Timing
+
+	// sel is the endpoint of the current attempt; placement is what selected it.
+	sel       *router.Selection
+	placement router.Request
+	attempts  int
+	// verdict is what this request says about the endpoint's health, reported to
+	// the router when the request finishes.
+	verdict router.Outcome
+	// degraded names a degradation the response carries (a failover route).
+	degraded string
+
+	// ticket is the admission queue slot this request holds; queueWait is how long
+	// it waited for it, requeues how often a saturated deployment sent it back.
+	ticket    *queue.Ticket
+	queueWait time.Duration
+	requeues  int
+	reject    bool
+	prio      queue.Priority
+	// inflightOn is the deployment counted in nebula_inflight_requests.
+	inflightOn string
+
+	// attempt is the span of the current dispatch attempt.
+	attempt trace.Span
+
+	// record is filled as the request progresses and emitted exactly once.
+	record usage.Record
+}
+
+func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	g.serve(w, r, openai.KindChat)
+}
+
+func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
+	g.serve(w, r, openai.KindCompletion)
+}
+
+// serve runs stages VALIDATE through FINALIZE for one request.
+func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, kind openai.Kind) {
+	ex, err := g.prepare(w, r, kind)
+	if err != nil {
+		g.m.refused("", kind.String(), err)
+		g.fail(w, r, err)
+		return
+	}
+	defer g.finish(r.Context(), ex)
+
+	if ex.req.Stream {
+		g.stream(w, r, ex)
+		return
+	}
+	g.generate(w, r, ex)
+}
+
+// prepare validates, resolves, admits and builds the worker call. Nothing is
+// charged to the caller's limits until every check that can fail without cost has
+// passed.
+func (g *Gateway) prepare(w http.ResponseWriter, r *http.Request, kind openai.Kind) (*exchange, error) {
+	ctx := r.Context()
+	started := g.d.Now()
+	ident := auth.MustFromContext(ctx)
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			return nil, httpx.ErrPayloadTooLarge(tooBig.Limit)
+		}
+		return nil, httpx.ErrInvalidRequest("the request body could not be read", "unreadable_body", "")
+	}
+	_, vspan := tracer.Start(ctx, "gateway.validate")
+	req, err := openai.Parse(kind, body)
+	vspan.End()
+	if err != nil {
+		return nil, err
+	}
+	root := trace.SpanFromContext(ctx)
+	root.SetAttributes(attribute.String("route", req.Model), attribute.String("endpoint", kind.String()),
+		attribute.Bool("streamed", req.Stream))
+
+	// RESOLVE. A route in another org is reported exactly as a missing one.
+	_, rspan := tracer.Start(ctx, "router.resolve")
+	route, ok := g.d.Router.Table().Lookup(ident.OrgSlug, req.Model)
+	if ok {
+		rspan.SetAttributes(attribute.String("route_id", route.ID), attribute.Int("targets", len(route.Targets)))
+	}
+	rspan.End()
+	if !ok {
+		return nil, &httpx.APIError{
+			Status:  http.StatusNotFound,
+			Message: fmt.Sprintf("the model %q does not exist or you do not have access to it", req.Model),
+			Type:    httpx.TypeNotFound,
+			Code:    "model_not_found",
+			Param:   "model",
+		}
+	}
+	if kind == openai.KindChat && route.Task != routes.TaskChat {
+		return nil, httpx.ErrInvalidRequest(
+			fmt.Sprintf("%s is a text-completion model; use /v1/completions", route.Model), "unsupported_endpoint", "model")
+	}
+
+	defaultMax := route.DefaultMaxTokens
+	if defaultMax == 0 {
+		defaultMax = g.d.Config.Gateway.DefaultMaxTokens
+	}
+	if err := req.Check(route.Model, openai.Limits{
+		ContextWindow:    route.ContextWindow,
+		DefaultMaxTokens: defaultMax,
+		JSONMode:         route.Capabilities.JSONMode,
+		Streaming:        route.Capabilities.Streaming,
+	}); err != nil {
+		return nil, err
+	}
+
+	if req.Nebula.DeploymentID != "" && !ident.Has(auth.ScopeInferencePin) {
+		return nil, forbidden("pinning a deployment with nebula.deployment_id requires the inference:pin scope",
+			"insufficient_scope")
+	}
+
+	// Render before admission, because the reservation is sized from the rendered
+	// prompt: the template's own markup is prompt the model reads.
+	prompt := req.Prompt
+	stops := req.Stop
+	if kind == openai.KindChat {
+		rendered, err := openai.Render(string(route.ChatTemplate), req.Messages)
+		if err != nil {
+			return nil, httpx.ErrInternal(err)
+		}
+		prompt = rendered.Prompt
+		stops = openai.MergeStops(req.Stop, rendered.Stops)
+	}
+
+	timeout := g.d.Config.Gateway.DefaultTimeout.Duration()
+	if route.Timeout > 0 {
+		timeout = route.Timeout
+	}
+	if t := req.Nebula.TimeoutMS; t != nil {
+		timeout = time.Duration(*t) * time.Millisecond
+	}
+	if limit := g.d.Config.Gateway.MaxTimeout.Duration(); timeout > limit {
+		timeout = limit
+	}
+	deadline := started.Add(timeout)
+
+	// SELECT, before admission: a request nothing can serve is refused without
+	// being charged to the caller's limits.
+	requestID := telemetry.RequestID(ctx)
+	placement := router.Request{
+		Key:             requestID,
+		Pin:             req.Nebula.DeploymentID,
+		RequiredContext: (len(prompt)+openai.MaxBytesPerToken-1)/openai.MaxBytesPerToken + *req.MaxTokens,
+		Exclude:         map[string]bool{},
+	}
+	_, sspan := tracer.Start(ctx, "router.select")
+	sel, degraded, err := g.place(ident.OrgSlug, route, placement)
+	if err == nil {
+		sspan.SetAttributes(attribute.String("strategy", sel.Strategy),
+			attribute.String("target_deployment", sel.Target.Deployment), attribute.Int("weight", sel.Target.Weight),
+			attribute.String("variant", sel.Target.Label), attribute.String("chosen_pod", sel.EndpointID))
+		if degraded != "" {
+			sspan.SetAttributes(attribute.String("degraded", degraded))
+		}
+	} else {
+		sspan.SetStatus(codes.Error, err.Error())
+	}
+	sspan.End()
+	if err != nil {
+		strategy := route.Policy.Strategy
+		if strategy == "" {
+			strategy = routing.DefaultStrategy
+		}
+		if errors.Is(err, router.ErrNoTarget) {
+			g.m.decision(route.Model, strategy, "no_target")
+			return nil, httpx.ErrInvalidRequest(
+				fmt.Sprintf("nebula.deployment_id %q is not a deployment of %s", req.Nebula.DeploymentID, route.Model),
+				"deployment_not_in_route", "nebula.deployment_id")
+		}
+		g.m.decision(route.Model, strategy, "no_endpoint")
+		g.logger(ctx).WarnContext(ctx, "no endpoint can serve the request", slog.String("cause", err.Error()))
+		w.Header().Set("Retry-After", "1")
+		return nil, noHealthyEndpoint(err)
+	}
+	if degraded != "" {
+		g.m.decision(route.Model, sel.Strategy, "failover")
+	} else {
+		g.m.decision(route.Model, sel.Strategy, "selected")
+	}
+	g.m.selected(sel)
+	route, target := sel.Route, sel.Target
+
+	// ADMIT. The reservation is an upper bound on what this request can consume:
+	// every token covers at least one byte of prompt, plus the completion's ceiling,
+	// plus a margin for the BOS/EOS tokens an engine adds.
+	reserve := len(prompt) + *req.MaxTokens + 8
+	_, lspan := tracer.Start(ctx, "gateway.ratelimit")
+	lease, err := g.admit(w, r, reserve, timeout+time.Minute, false)
+	if err != nil {
+		lspan.SetStatus(codes.Error, "rate limited")
+	}
+	lspan.End()
+	if err != nil {
+		sel.Done(router.Abandoned)
+		return nil, err
+	}
+
+	priority := string(ident.Priority)
+	if priority == "" {
+		priority = string(models.PriorityNormal)
+	}
+
+	// QUEUE. Wait for room on the chosen deployment, within the request's deadline
+	// (docs/architecture.md §6.3). A request that runs at once never waits here; a
+	// full queue sheds with Retry-After instead of growing.
+	reject := req.Nebula.Queue == "reject"
+	queuedAt := time.Now()
+	ticket, err := g.d.Queues.Gate(sel.Key()).Acquire(ctx, queue.ParsePriority(priority), deadline, reject)
+	if err != nil || ticket.Waited > 0 {
+		// Only a request that actually waited (or was refused) gets a queue span.
+		_, qspan := tracer.Start(ctx, "queue.wait", trace.WithTimestamp(queuedAt))
+		qspan.SetAttributes(attribute.String("priority", priority), attribute.Int64("deadline_ms", deadline.UnixMilli()))
+		if err != nil {
+			qspan.SetStatus(codes.Error, err.Error())
+		} else {
+			qspan.SetAttributes(attribute.Int64("wait_ms", ticket.Waited.Milliseconds()))
+		}
+		qspan.End()
+	}
+	if err != nil {
+		g.m.dropped(sel.Target.Deployment, err)
+		sel.Done(router.Abandoned)
+		lease.Release(ctx, 0)
+		return nil, g.queueError(w, r, err)
+	}
+	if ticket.Waited > 0 {
+		g.m.waited(sel.Target.Deployment, queue.ParsePriority(priority), ticket.Waited, traceID(ctx))
+		// The deployment's endpoints may have changed while the request waited:
+		// place it again, on the same deployment.
+		sel.Done(router.Abandoned)
+		placement.Target = sel.Key()
+		if sel, err = g.d.Router.Select(sel.Route, placement); err != nil {
+			ticket.Release()
+			lease.Release(ctx, 0)
+			w.Header().Set("Retry-After", "1")
+			return nil, noHealthyEndpoint(err)
+		}
+		route, target = sel.Route, sel.Target
+		g.m.selected(sel)
+	}
+	g.m.inflight.WithLabelValues(target.Deployment).Inc()
+
+	ex := &exchange{
+		kind:    kind,
+		req:     req,
+		route:   route,
+		target:  target,
+		lease:   lease,
+		reserve: reserve,
+		started: started,
+		ident:   ident,
+
+		sel:        sel,
+		ticket:     ticket,
+		queueWait:  ticket.Waited,
+		reject:     reject,
+		prio:       queue.ParsePriority(priority),
+		inflightOn: target.Deployment,
+		placement:  placement,
+		attempts:   1,
+		verdict:    router.Succeeded,
+		degraded:   degraded,
+		call: dispatch.Call{
+			Endpoint:  sel.URL,
+			RequestID: requestID,
+
+			Deadline:     deadline,
+			Priority:     priority,
+			ModelVersion: target.ModelVersion,
+			Body:         workerBody(req, prompt, stops),
+		},
+	}
+	g.startAttempt(ctx, ex)
+	if kind == openai.KindChat {
+		ex.id = "chatcmpl-" + requestID
+	} else {
+		ex.id = "cmpl-" + requestID
+	}
+	ex.record = usage.Record{
+		TraceID:      traceID(ctx),
+		OrgID:        ident.OrgID.String(),
+		RequestID:    requestID,
+		APIKeyID:     ident.ActorID.String(),
+		RouteID:      route.ID,
+		Route:        route.Model,
+		Deployment:   target.Deployment,
+		DeploymentID: target.DeploymentID,
+		ModelVersion: target.ModelVersion,
+		Variant:      target.Label,
+		Endpoint:     kind.String(),
+		Priority:     priority,
+		Streamed:     req.Stream,
+		StartedAt:    started.UTC(),
+		Attempts:     1,
+		User:         req.User,
+	}
+	return ex, nil
+}
+
+// workerBody maps OpenAI parameters onto the worker protocol. Parameters the
+// worker body has no field for travel in extra, which the llama.cpp adapter
+// forwards to the engine verbatim.
+func workerBody(req *openai.Request, prompt string, stops []string) dispatch.Body {
+	// OpenAI's defaults, not the worker's: a client that omits temperature expects
+	// OpenAI behaviour from an OpenAI-compatible API.
+	temperature, topP := 1.0, 1.0
+	if req.Temperature != nil {
+		temperature = *req.Temperature
+	}
+	if req.TopP != nil {
+		topP = *req.TopP
+	}
+	b := dispatch.Body{
+		Prompt:      prompt,
+		MaxTokens:   *req.MaxTokens,
+		Temperature: temperature,
+		TopP:        topP,
+		Stop:        stops,
+		Seed:        req.Seed,
+	}
+	extra := map[string]any{}
+	if req.TopK != nil {
+		extra["top_k"] = *req.TopK
+	}
+	if req.PresencePenalty != nil {
+		extra["presence_penalty"] = *req.PresencePenalty
+	}
+	if req.FrequencyPenalty != nil {
+		extra["frequency_penalty"] = *req.FrequencyPenalty
+	}
+	if req.JSONMode {
+		// llama-server constrains output to JSON with an empty schema object.
+		extra["json_schema"] = map[string]any{}
+	}
+	if len(extra) > 0 {
+		b.Extra = extra
+	}
+	return b
+}
+
+// workerContext is the context for the worker call. It is deliberately NOT the
+// client's request context: when the client disconnects, the gateway still has to
+// tell the worker to stop and read the final frame for the tokens already spent.
+// It ends at the request deadline plus the drain allowance, so it cannot outlive
+// the request by more than that.
+func (g *Gateway) workerContext(ctx context.Context, ex *exchange) (context.Context, context.CancelFunc) {
+	return context.WithDeadline(context.WithoutCancel(ctx), ex.call.Deadline.Add(g.d.Config.Gateway.CancelDrainTimeout.Duration()))
+}
+
+// cancelWorker asks the worker to stop. Best effort, bounded, never on the
+// request's own context (which is already done when this is needed).
+func (g *Gateway) cancelWorker(ctx context.Context, ex *exchange) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	if err := g.d.Workers.Cancel(cctx, ex.call.Endpoint, ex.call.RequestID, ex.call.Traceparent); err != nil {
+		g.logger(ctx).WarnContext(ctx, "cancelling the worker failed; it stops at the deadline or on disconnect",
+			slog.String("cause", err.Error()))
+	}
+}
+
+// generate serves a non-streamed request.
+func (g *Gateway) generate(w http.ResponseWriter, r *http.Request, ex *exchange) {
+	ctx := r.Context()
+	wctx, wcancel := g.workerContext(ctx, ex)
+	defer wcancel()
+
+	type outcome struct {
+		res *dispatch.Result
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := g.generateOnce(wctx, ex)
+		done <- outcome{res, err}
+	}()
+
+	var out outcome
+	select {
+	case out = <-done:
+	case <-ctx.Done():
+		// The client left. Stop the worker, then wait a bounded time for its answer,
+		// which carries the tokens that were spent.
+		g.cancelWorker(ctx, ex)
+		select {
+		case out = <-done:
+		case <-time.After(g.d.Config.Gateway.CancelDrainTimeout.Duration()):
+			wcancel()
+			out = <-done
+		}
+		ex.absorb(out.res)
+		ex.record.StatusCode = StatusClientClosedRequest
+		ex.record.Outcome = usage.OutcomeClientCancelled
+		ex.verdict = router.Abandoned
+		return
+	}
+
+	if out.err != nil {
+		ex.verdict = verdictOf(out.err)
+		apiErr := g.workerError(ctx, w, out.err)
+		ex.record.StatusCode = apiErr.Status
+		ex.record.ErrorClass = string(apiErr.Type)
+		ex.record.Outcome = outcomeOf(apiErr)
+		g.fail(w, r, apiErr)
+		return
+	}
+	res := out.res
+	ex.absorb(res)
+
+	switch res.FinishReason {
+	case "stop", "length":
+	case "deadline":
+		ex.record.Outcome = usage.OutcomeDeadlineExceeded
+		ex.record.StatusCode = http.StatusGatewayTimeout
+		ex.record.ErrorClass = string(httpx.TypeTimeout)
+		g.fail(w, r, deadlineError())
+		return
+	default:
+		ex.record.Outcome = usage.OutcomeFailed
+		ex.record.StatusCode = http.StatusBadGateway
+		ex.record.ErrorClass = string(httpx.TypeUpstream)
+		ex.verdict = router.Failed
+		g.fail(w, r, (&httpx.APIError{
+			Status: http.StatusBadGateway, Type: httpx.TypeUpstream, Code: "generation_failed",
+			Message: "the model runtime could not complete the generation",
+		}).WithInternal(fmt.Errorf("worker finish_reason %q", res.FinishReason)))
+		return
+	}
+	if res.Usage == nil {
+		ex.record.Outcome = usage.OutcomeFailed
+		g.fail(w, r, httpx.ErrInternal(errors.New("worker returned no usage")))
+		return
+	}
+
+	meta := ex.meta(g.d.Now())
+	u := openai.NewUsage(res.Usage.PromptTokens, res.Usage.CompletionTokens)
+	created := ex.started.Unix()
+	var body any
+	if ex.kind == openai.KindChat {
+		body = openai.ChatCompletion{
+			ID: ex.id, Object: openai.ObjectChatCompletion, Created: created, Model: ex.route.Model,
+			Choices: []openai.ChatChoice{{
+				Index:        0,
+				Message:      openai.ChatMessage{Role: "assistant", Content: res.Text},
+				FinishReason: res.FinishReason,
+			}},
+			Usage:  u,
+			Nebula: meta,
+		}
+	} else {
+		fr := res.FinishReason
+		body = openai.TextCompletion{
+			ID: ex.id, Object: openai.ObjectTextCompletion, Created: created, Model: ex.route.Model,
+			Choices: []openai.TextChoice{{Index: 0, Text: res.Text, FinishReason: &fr}},
+			Usage:   u,
+			Nebula:  meta,
+		}
+	}
+	ex.record.Outcome = usage.OutcomeCompleted
+	ex.record.StatusCode = http.StatusOK
+	setRoutingHeaders(w.Header(), ex)
+	if err := httpx.WriteJSON(w, http.StatusOK, body); err != nil {
+		g.logger(ctx).WarnContext(ctx, "writing the response failed", slog.String("cause", err.Error()))
+	}
+}
+
+// absorb copies what the runtime reported into the exchange's usage record.
+func (ex *exchange) absorb(res *dispatch.Result) {
+	if res == nil {
+		return
+	}
+	ex.record.FinishReason = res.FinishReason
+	ex.absorbFinal(res.Usage, res.Timing, res.Runtime)
+}
+
+func (ex *exchange) absorbFinal(u *dispatch.Usage, t *dispatch.Timing, rt *dispatch.Runtime) {
+	if u != nil {
+		p, c := u.PromptTokens, u.CompletionTokens
+		ex.record.PromptTokens, ex.record.CompletionTokens = &p, &c
+		ex.record.TokenSource = usage.TokenSourceRuntime
+	}
+	if t != nil {
+		ex.record.QueueWait = t.QueueMS
+		ex.record.TTFT = t.TTFTMS
+		if t.TTFTMS != nil && ex.sel != nil {
+			ex.sel.FirstToken(time.Duration(*t.TTFTMS) * time.Millisecond)
+		}
+		if t.PrefillMS != nil && t.DecodeMS != nil {
+			c := *t.PrefillMS + *t.DecodeMS
+			ex.record.ComputeMS = &c
+		}
+		ex.timing = t
+	}
+	if rt != nil {
+		ex.record.Runtime = rt.Name
+	}
+}
+
+// meta builds the nebula block from what was measured.
+func (ex *exchange) meta(now time.Time) *openai.Meta {
+	d := now.Sub(ex.started).Milliseconds()
+	m := &openai.Meta{
+		RequestID:      ex.call.RequestID,
+		Route:          ex.route.Model,
+		Deployment:     ex.target.Deployment,
+		ModelVersion:   ex.target.ModelVersion,
+		Variant:        ex.target.Label,
+		DurationMS:     &d,
+		Attempts:       ex.attempts,
+		Degraded:       ex.degraded,
+		GatewayQueueMS: gatewayQueueMS(ex),
+		Runtime:        ex.record.Runtime,
+		QueueWaitMS:    ex.record.QueueWait,
+		TTFTMS:         ex.record.TTFT,
+	}
+	if ex.timing != nil && ex.timing.DecodeMS != nil && *ex.timing.DecodeMS > 0 && ex.record.CompletionTokens != nil {
+		tps := float64(*ex.record.CompletionTokens) / (float64(*ex.timing.DecodeMS) / 1000)
+		tps = float64(int64(tps*10+0.5)) / 10
+		m.TokensPerSecond = &tps
+	}
+	return m
+}
+
+// Routing headers. They carry the same context as the nebula block and the stream's
+// meta comment, in the one place every client can read without parsing the body —
+// and, for a stream, before the first token.
+const (
+	HeaderRoute        = "X-Nebula-Route"
+	HeaderDeployment   = "X-Nebula-Deployment"
+	HeaderModelVersion = "X-Nebula-Model-Version"
+	HeaderVariant      = "X-Nebula-Variant"
+	// HeaderDegraded names a degradation that served this response, such as
+	// "failover:<route>". Absent when nothing was degraded.
+	HeaderDegraded = "X-Nebula-Degraded"
+)
+
+func setRoutingHeaders(h http.Header, ex *exchange) {
+	h.Set(HeaderRoute, ex.route.Model)
+	h.Set(HeaderDeployment, ex.target.Deployment)
+	h.Set(HeaderModelVersion, ex.target.ModelVersion)
+	if ex.target.Label != "" {
+		h.Set(HeaderVariant, ex.target.Label)
+	}
+	if ex.degraded != "" {
+		h.Set(HeaderDegraded, ex.degraded)
+	}
+}
+
+// finish is FINALIZE: settle the rate-limit reservation against the runtime's
+// count and emit the usage record. It runs for every request that passed
+// admission, whatever happened after.
+func (g *Gateway) finish(ctx context.Context, ex *exchange) {
+	now := g.d.Now()
+	ex.record.FinishedAt = now.UTC()
+	ex.record.DurationMS = now.Sub(ex.started).Milliseconds()
+	if ex.record.Outcome == "" {
+		ex.record.Outcome = usage.OutcomeFailed
+	}
+
+	// Settle at the runtime's count when there is one. When there is not — a
+	// stream cut before the final frame — the reservation stands: charging the
+	// upper bound is the safe error, charging nothing would make a broken stream
+	// free.
+	actual := ex.reserve
+	if ex.record.PromptTokens != nil && ex.record.CompletionTokens != nil {
+		actual = *ex.record.PromptTokens + *ex.record.CompletionTokens
+	}
+	ex.lease.Release(ctx, actual)
+	ex.ticket.Release()
+	ex.record.Attempts = ex.attempts
+	g.endAttempt(ex, ex.verdict)
+	if ex.sel != nil {
+		g.m.attempt(ex.target.Deployment, ex.verdict)
+		ex.sel.Done(ex.verdict)
+	}
+	g.m.inflight.WithLabelValues(ex.inflightOn).Dec()
+	g.m.finished(&ex.record, ex.req.Stream)
+	g.d.Usage.Emit(context.WithoutCancel(ctx), ex.record)
+}
+
+// place selects an endpoint for a route, following a failover policy to its
+// fallback route when the route itself has nothing eligible. It returns the
+// degradation to report, if any.
+func (g *Gateway) place(org string, route *routes.Route, req router.Request) (*router.Selection, string, error) {
+	sel, err := g.d.Router.Select(route, req)
+	if err == nil {
+		return sel, "", nil
+	}
+	var none *router.NoEndpointError
+	fallback := route.Policy.Fallback()
+	if !errors.As(err, &none) || fallback == "" || req.Pin != "" {
+		return nil, "", err
+	}
+	alt, ok := g.d.Router.Table().Lookup(org, fallback)
+	if !ok || alt.Task != route.Task {
+		return nil, "", err
+	}
+	sel, ferr := g.d.Router.Select(alt, req)
+	if ferr != nil {
+		return nil, "", err
+	}
+	return sel, "failover:" + alt.Model, nil
+}
+
+// maxAttempts bounds how many replicas one request is offered to. Only failures
+// before any work started are retried (dispatch.Error.BeforeWork), so an attempt
+// never generates twice.
+const maxAttempts = 3
+
+// maxRequeues bounds how often one request goes back to the admission queue
+// because every replica it was offered to was saturated.
+const maxRequeues = 2
+
+// replace moves the exchange to another endpoint after a before-work failure,
+// reporting the failed one to the router. It returns false when there is none.
+//
+// A saturated replica (429) is marked so the router and the admission queue treat
+// it as full until its Retry-After. When every replica has refused as saturated,
+// the request goes back to the admission queue — backpressure becomes waiting,
+// within the deadline, instead of an error.
+func (g *Gateway) replace(ctx context.Context, ex *exchange, cause error) bool {
+	var we *dispatch.Error
+	if !errors.As(cause, &we) || !we.BeforeWork() {
+		return false
+	}
+	if we.Status == http.StatusTooManyRequests {
+		ex.sel.Saturated(we.RetryAfter)
+	}
+	if ex.attempts >= maxAttempts || ex.placement.Pin != "" {
+		return we.Status == http.StatusTooManyRequests && g.requeue(ctx, ex, cause)
+	}
+	ex.placement.Exclude[ex.sel.EndpointID] = true
+	sel, err := g.d.Router.Select(ex.route, ex.placement)
+	if err == nil && sel.Target.Key(sel.Route) != ex.sel.Key() && we.Status == http.StatusTooManyRequests {
+		// The only replicas left are on another target; the saturated deployment's
+		// own queue is the fairer place to wait.
+		sel.Done(router.Abandoned)
+		err = errors.New("no other replica of this deployment")
+	}
+	if err != nil {
+		if we.Status == http.StatusTooManyRequests {
+			return g.requeue(ctx, ex, cause)
+		}
+		// Nothing else is eligible: the original failure stands, and finish()
+		// reports it against the endpoint that failed.
+		return false
+	}
+	g.m.attempt(ex.target.Deployment, verdictOf(cause))
+	g.endAttempt(ex, verdictOf(cause))
+	ex.sel.Done(verdictOf(cause))
+	g.m.selected(sel)
+	ex.sel, ex.target = sel, sel.Target
+	ex.call.Endpoint, ex.call.ModelVersion = sel.URL, sel.Target.ModelVersion
+	ex.attempts++
+	g.startAttempt(ctx, ex)
+	ex.record.Deployment, ex.record.DeploymentID = sel.Target.Deployment, sel.Target.DeploymentID
+	ex.record.ModelVersion, ex.record.Variant = sel.Target.ModelVersion, sel.Target.Label
+	return true
+}
+
+// requeue returns a request whose deployment is saturated to its admission queue
+// and places it again once granted. False means it could not wait (asked not to,
+// requeued too often, or the queue refused), and the saturation error stands.
+func (g *Gateway) requeue(ctx context.Context, ex *exchange, cause error) bool {
+	if ex.reject || ex.requeues >= maxRequeues {
+		return false
+	}
+	key := ex.sel.Key()
+	g.m.attempt(ex.target.Deployment, verdictOf(cause))
+	g.endAttempt(ex, verdictOf(cause))
+	ex.sel.Done(verdictOf(cause))
+	ex.ticket.Release()
+	ex.ticket = nil
+	ex.requeues++
+	ticket, err := g.d.Queues.Gate(key).Acquire(ctx, ex.prio, ex.call.Deadline, false)
+	if err != nil {
+		g.m.dropped(ex.target.Deployment, err)
+		ex.sel = nil
+		return false
+	}
+	g.m.waited(ex.target.Deployment, ex.prio, ticket.Waited, ex.record.TraceID)
+	ex.ticket = ticket
+	ex.queueWait += ticket.Waited
+	placement := ex.placement
+	placement.Target, placement.Exclude = key, map[string]bool{}
+	sel, err := g.d.Router.Select(ex.route, placement)
+	if err != nil {
+		ex.sel = nil
+		return false
+	}
+	g.m.selected(sel)
+	ex.sel, ex.target = sel, sel.Target
+	ex.call.Endpoint = sel.URL
+	ex.attempts++
+	g.startAttempt(ctx, ex)
+	return true
+}
+
+// tracer is the gateway's tracer; spans are no-ops unless tracing is configured.
+var tracer = telemetry.Tracer("nebula/gateway")
+
+// startAttempt opens a dispatch.attempt span and makes it the worker's parent.
+//
+// ctx carries the request's trace: the request context in prepare, the worker
+// context (derived from it) on a later attempt.
+func (g *Gateway) startAttempt(ctx context.Context, ex *exchange) {
+	ctx, span := tracer.Start(ctx, "dispatch.attempt", trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attribute.Int("attempt", ex.attempts), attribute.String("endpoint", ex.sel.EndpointID),
+			attribute.String("deployment", ex.target.Deployment)))
+	ex.attempt = span
+	tc, _ := telemetry.Trace(ctx)
+	ex.call.Traceparent = telemetry.Traceparent(ctx, tc)
+}
+
+// endAttempt closes the current attempt span with its outcome.
+func (g *Gateway) endAttempt(ex *exchange, o router.Outcome) {
+	if ex.attempt == nil {
+		return
+	}
+	ex.attempt.SetAttributes(attribute.String("outcome", outcomeName(o)))
+	if o == router.Unreachable || o == router.Failed {
+		ex.attempt.SetStatus(codes.Error, outcomeName(o))
+	}
+	ex.attempt.End()
+	ex.attempt = nil
+}
+
+// generateOnce performs a non-streamed generation, moving to another replica
+// when the chosen one fails before starting work.
+func (g *Gateway) generateOnce(ctx context.Context, ex *exchange) (*dispatch.Result, error) {
+	for {
+		res, err := g.d.Workers.Generate(ctx, ex.call)
+		if err == nil || ctx.Err() != nil || !g.replace(ctx, ex, err) {
+			return res, err
+		}
+	}
+}
+
+// gatewayQueueMS reports the admission queue wait, absent when the request did
+// not wait (axiom A6: measured or absent, never a made-up zero).
+func gatewayQueueMS(ex *exchange) *int64 {
+	if ex.queueWait <= 0 {
+		return nil
+	}
+	ms := ex.queueWait.Milliseconds()
+	return &ms
+}
+
+// queueError maps an admission queue refusal onto the public error.
+func (g *Gateway) queueError(w http.ResponseWriter, r *http.Request, err error) error {
+	var full *queue.FullError
+	switch {
+	case errors.As(err, &full) && full.WouldWait:
+		w.Header().Set("Retry-After", seconds(full.RetryAfter))
+		return &httpx.APIError{
+			Status: http.StatusTooManyRequests, Type: httpx.TypeRateLimit, Code: "capacity_exhausted",
+			Message: "no capacity is free now and the request set nebula.queue to reject; retry after the interval in Retry-After",
+			Reason:  "capacity_exhausted",
+		}
+	case errors.As(err, &full):
+		w.Header().Set("Retry-After", seconds(full.RetryAfter))
+		return &httpx.APIError{
+			Status: http.StatusTooManyRequests, Type: httpx.TypeRateLimit, Code: "queue_full",
+			Message: "this model's queue is full; retry after the interval in Retry-After",
+			Reason:  "queue_full",
+		}
+	case errors.Is(err, queue.ErrTimeout):
+		// A queue timeout, not an inference error: nothing was dispatched.
+		return &httpx.APIError{
+			Status: http.StatusGatewayTimeout, Type: httpx.TypeTimeout, Code: "queue_timeout",
+			Message: "the request's timeout passed while it waited for capacity",
+			Reason:  "queue_timeout",
+		}
+	case errors.Is(err, queue.ErrCancelled):
+		g.logger(r.Context()).InfoContext(r.Context(), "client left while queued")
+		return &httpx.APIError{Status: StatusClientClosedRequest, Type: httpx.TypeInvalidRequest,
+			Code: "client_cancelled", Message: "the client closed the request"}
+	}
+	return httpx.ErrInternal(err)
+}
+
+// verdictOf classifies a dispatch failure for the endpoint's breaker.
+//
+// Saturation (429) is Refused: a full replica is healthy.
+func verdictOf(err error) router.Outcome {
+	var we *dispatch.Error
+	switch {
+	case !errors.As(err, &we):
+		return router.Abandoned
+	case we.Unreachable():
+		return router.Unreachable
+	case we.BeforeWork():
+		return router.Refused
+	case we.Status >= 500 || we.Transport != nil || we.MidStream:
+		return router.Failed
+	}
+	return router.Abandoned
+}
+
+// noHealthyEndpoint is the 503 for a request nothing can serve right now.
+func noHealthyEndpoint(cause error) *httpx.APIError {
+	return (&httpx.APIError{
+		Status: http.StatusServiceUnavailable, Type: httpx.TypeServiceUnavailable, Code: "no_healthy_endpoint",
+		Message: "no replica of this model is ready right now; retry shortly",
+		Reason:  "no_healthy_endpoint",
+	}).WithInternal(cause)
+}
+
+// workerError maps a dispatch failure that happened before any byte reached the
+// client onto the public error it becomes. Worker message text is never passed
+// through: it is upstream detail, which never crosses B1 outward.
+func (g *Gateway) workerError(ctx context.Context, w http.ResponseWriter, err error) *httpx.APIError {
+	var we *dispatch.Error
+	if !errors.As(err, &we) {
+		return httpx.ErrInternal(err)
+	}
+	g.logger(ctx).WarnContext(ctx, "worker call failed",
+		slog.Int("worker_status", we.Status), slog.String("worker_code", we.Code),
+		slog.String("worker_reason", we.Reason), slog.String("cause", we.Error()))
+
+	if we.Transport != nil {
+		if errors.Is(we.Transport, context.DeadlineExceeded) {
+			return deadlineError()
+		}
+		w.Header().Set("Retry-After", "1")
+		return (&httpx.APIError{
+			Status: http.StatusServiceUnavailable, Type: httpx.TypeServiceUnavailable, Code: "no_healthy_endpoint",
+			Message: "no replica of this model is reachable right now; retry shortly",
+			Reason:  "no_healthy_endpoint",
+		}).WithInternal(we)
+	}
+	switch we.Status {
+	case http.StatusTooManyRequests:
+		// The worker knows when it expects capacity back; pass that on rather than
+		// inventing a number.
+		retry := we.RetryAfter
+		if retry < time.Second {
+			retry = time.Second
+		}
+		w.Header().Set("Retry-After", seconds(retry))
+		return (&httpx.APIError{
+			Status: http.StatusTooManyRequests, Type: httpx.TypeRateLimit, Code: "worker_saturated",
+			Message: "this model is at capacity; retry after the interval in Retry-After",
+			Reason:  "queue_full",
+		}).WithInternal(we)
+	case http.StatusConflict:
+		// The route table and the worker disagree about which version it serves. The
+		// worker refused rather than serve the wrong model, which is the guarantee;
+		// the client sees an upstream error, not a model mix-up.
+		return (&httpx.APIError{
+			Status: http.StatusBadGateway, Type: httpx.TypeUpstream, Code: "model_version_mismatch",
+			Message: "the replica selected for this request is serving a different model version",
+		}).WithInternal(we)
+	case http.StatusServiceUnavailable:
+		w.Header().Set("Retry-After", "5")
+		return (&httpx.APIError{
+			Status: http.StatusServiceUnavailable, Type: httpx.TypeServiceUnavailable, Code: "model_loading",
+			Message: "the model is not loaded yet; retry shortly", Reason: "model_loading",
+		}).WithInternal(we)
+	case http.StatusGatewayTimeout:
+		return deadlineError()
+	case http.StatusBadRequest:
+		return (&httpx.APIError{
+			Status: http.StatusBadRequest, Type: httpx.TypeInvalidRequest, Code: nonEmpty(we.Code, "unsupported_parameter"),
+			Message: "the model runtime does not support a parameter of this request",
+		}).WithInternal(we)
+	}
+	return (&httpx.APIError{
+		Status: http.StatusBadGateway, Type: httpx.TypeUpstream, Code: "upstream_error",
+		Message: "the model runtime returned an unusable response",
+	}).WithInternal(we)
+}
+
+func deadlineError() *httpx.APIError {
+	return &httpx.APIError{
+		Status: http.StatusGatewayTimeout, Type: httpx.TypeTimeout, Code: "deadline_exceeded",
+		Message: "the request did not complete within its timeout",
+	}
+}
+
+func outcomeOf(e *httpx.APIError) string {
+	switch e.Status {
+	case http.StatusGatewayTimeout:
+		return usage.OutcomeDeadlineExceeded
+	case http.StatusTooManyRequests:
+		return usage.OutcomeRejected
+	}
+	return usage.OutcomeFailed
+}
+
+func nonEmpty(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
+}
+
+func traceID(ctx context.Context) string {
+	if tc, ok := telemetry.Trace(ctx); ok {
+		return tc.TraceID
+	}
+	return ""
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }
+
+// seconds renders a Retry-After value, rounding up so a client never retries
+// before the limit has actually cleared.
+func seconds(d time.Duration) string {
+	s := int64((d + time.Second - 1) / time.Second)
+	if s < 1 {
+		s = 1
+	}
+	return strconv.FormatInt(s, 10)
+}

@@ -1,0 +1,126 @@
+# NEBULA Helm values — production-shaped defaults.
+#
+# Every secret has NO default: an install that would otherwise create a well-known
+# credential fails instead (docs/deployment-architecture.md §6). values-dev.yaml
+# supplies development values that the services themselves refuse when
+# env=production.
+
+env: production
+
+namespaces:
+  system: nebula-system       # set by `helm install -n`; must match
+  workloads: nebula-workloads
+  data: nebula-data
+  # Create the workload and data namespaces with the release. Turn off when an
+  # operator manages namespaces separately.
+  create: true
+
+images:
+  registry: ""                # prefix, e.g. ghcr.io/adityasatwar321
+  tag: ""                     # required: images are always pinned
+  pullPolicy: IfNotPresent
+  controlplane: nebula/controlplane
+  gateway: nebula/gateway
+  controller: nebula/controller
+  migrate: nebula/migrate
+  puller: nebula/artifact-puller
+  workerLlamacpp: nebula/worker-llamacpp
+  workerMock: nebula/worker-mock
+
+secrets:
+  # All required. Generate with: openssl rand -base64 32
+  keyPepper: ""
+  internalAuthSecret: ""
+  # postgres://user:pass@host:5432/nebula?sslmode=require
+  databaseURL: ""
+  # The controller connects with this URL and assumes the nebula_controller role;
+  # the login user must be a member of it.
+  controllerDatabaseURL: ""
+  redisURL: ""
+  artifactAccessKey: ""
+  artifactSecretKey: ""
+
+artifact:
+  store: s3
+  endpoint: ""                # host:port as services reach it
+  publicEndpoint: ""          # host:port as clients reach it (presigned URLs)
+  bucket: nebula-models
+  region: us-east-1
+  useTLS: true
+  cacheHostPath: /var/lib/nebula/models
+
+gateway:
+  replicas: 2
+  service:
+    type: ClusterIP
+    nodePort: null
+  resources:
+    requests: {cpu: 250m, memory: 256Mi}
+    # No CPU limit on the gateway: throttling is tail latency
+    # (docs/deployment-architecture.md §2.1).
+    limits: {memory: 512Mi}
+  # A static route table with endpoints written in. Empty (the default) routes
+  # from the control plane with endpoints discovered from EndpointSlices, which is
+  # what a cluster should run; a table here is for clusters without that.
+  routes: []
+  # Default rate limits for keys without a policy and for organizations, as
+  # NEBULA_LIMITS_<NAME> (key_rpm, key_tpm, key_concurrency, org_rpm, ...). Empty
+  # keeps the gateway's built-in defaults. Quote numbers: Helm renders large
+  # integers in exponent form.
+  limits: {}
+
+controlplane:
+  replicas: 2
+  devSeed: false
+  devSeedKey: ""
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}
+
+controller:
+  replicas: 2
+  startingTimeout: 10m
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}
+
+# NATS carries worker heartbeats to the gateways (ADR-0007). Empty uses the
+# in-cluster server when data.enabled, otherwise no heartbeats: routing then uses
+# readiness and local observation only.
+nats:
+  url: ""
+
+# In-cluster data dependencies. Production usually runs these externally; turning
+# this off is a values change, not a different architecture.
+data:
+  enabled: false
+
+# Telemetry every NEBULA service exports (docs/observability.md).
+telemetry:
+  metricsPort: 9090
+  # OTLP/HTTP collector host:port. Empty uses the in-cluster collector when the
+  # observability stack is enabled, otherwise exports no spans.
+  otlpEndpoint: ""
+  # Head sampling for traces that start at NEBULA; tail sampling belongs to the
+  # collector.
+  traceSampleRatio: "0.1"
+
+# The in-cluster observability stack (docs/observability.md §1): OTel Collector,
+# Tempo, Loki, Promtail, Prometheus, Grafana. Off by default; production usually
+# points services at its own backends instead.
+observability:
+  enabled: false
+  namespace: nebula-observability
+  images:
+    # The core distribution: OTLP in, batch, OTLP out is all it does here. (The
+    # 0.116.0 images ship a dynamically linked binary with no loader and cannot start.)
+    collector: otel/opentelemetry-collector:0.120.0
+    tempo: grafana/tempo:2.6.1
+    loki: grafana/loki:3.3.2
+    promtail: grafana/promtail:3.3.2
+    prometheus: prom/prometheus:v2.53.4
+    grafana: grafana/grafana:11.4.0
+  grafana:
+    adminPassword: ""
+    anonymousViewer: false
+    service: {type: ClusterIP, nodePort: null}

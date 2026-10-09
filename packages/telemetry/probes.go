@@ -209,7 +209,10 @@ func (p *Probes) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, failed := p.runChecks(r.Context())
+	// Only critical checks decide readiness, so only they are run: a non-critical
+	// dependency that is slow to fail (an unreachable store waiting out its timeout)
+	// must not make the probe itself time out, which Kubernetes would count as unready.
+	results, failed := p.runChecks(r.Context(), true)
 	if failed {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		for _, res := range results {
@@ -226,7 +229,7 @@ func (p *Probes) handleReadyz(w http.ResponseWriter, r *http.Request) {
 // handleHealthz is the operator view: full build identity, dependency detail and
 // the redacted effective configuration.
 func (p *Probes) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	results, failed := p.runChecks(r.Context())
+	results, failed := p.runChecks(r.Context(), false)
 
 	status := "ok"
 	code := http.StatusOK
@@ -272,12 +275,16 @@ func (p *Probes) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// runChecks evaluates every checker concurrently under one deadline and reports
-// whether any CRITICAL checker failed.
-func (p *Probes) runChecks(ctx context.Context) ([]checkResult, bool) {
+// runChecks evaluates checkers concurrently under one deadline and reports whether
+// any CRITICAL checker failed. With criticalOnly, non-critical checkers are skipped.
+func (p *Probes) runChecks(ctx context.Context, criticalOnly bool) ([]checkResult, bool) {
 	p.mu.RLock()
-	checkers := make([]Checker, len(p.checkers))
-	copy(checkers, p.checkers)
+	checkers := make([]Checker, 0, len(p.checkers))
+	for _, c := range p.checkers {
+		if !criticalOnly || c.Critical() {
+			checkers = append(checkers, c)
+		}
+	}
 	p.mu.RUnlock()
 
 	if len(checkers) == 0 {

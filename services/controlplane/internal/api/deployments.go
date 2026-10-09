@@ -15,15 +15,16 @@ import (
 	"github.com/adityasatwar321/nebula/packages/db/models"
 	"github.com/adityasatwar321/nebula/packages/httpx"
 	"github.com/adityasatwar321/nebula/packages/lifecycle"
+	"github.com/adityasatwar321/nebula/packages/scheduler"
 	"github.com/adityasatwar321/nebula/services/controlplane/internal/store"
 )
 
 // The note attached to every response that describes desired state the cluster has
 // not yet been told about. It is not decoration: without it, a 202 and a state of
 // "pending" could be read as "NEBULA is working on it", and in Phase 2 nothing is.
-const pendingControllerNote = "no reconciliation has happened: the Kubernetes controller arrives in " +
-	"Phase 5. This response records desired state in PostgreSQL only. status.reconciled stays false " +
-	"and status.observed_generation stays 0 until a controller reports otherwise."
+const pendingControllerNote = "desired state is recorded; the controller reconciles it into Kubernetes " +
+	"asynchronously. Poll GET /v1/deployments/{id}/status: status.reconciled becomes true once " +
+	"status.observed_generation reaches this generation, and state walks provisioning -> starting -> ready."
 
 // ---------------------------------------------------------------------------
 // reads
@@ -251,6 +252,7 @@ func (a *API) createDeployment(w http.ResponseWriter, r *http.Request) error {
 		CreatedBy:        createdBy(ident),
 	}
 
+	var placement *scheduler.Decision
 	err = a.inTx(r, func(ctx context.Context, q store.Querier) error {
 		version, err := a.Store.Versions.Get(ctx, q, ident.OrgID, req.ModelVersionID)
 		if err != nil {
@@ -261,6 +263,20 @@ func (a *API) createDeployment(w http.ResponseWriter, r *http.Request) error {
 				fmt.Sprintf("model version is %s; only a ready version can be deployed", version.Status),
 				"version_not_ready", "model_version_id")
 		}
+
+		// Capacity admission, before anything is written: a deployment no node could
+		// ever host is refused here with the constraint that failed, rather than
+		// created and left Pending (docs/api.md §4).
+		nodes, err := a.Store.Nodes.ListPresent(ctx, q)
+		if err != nil {
+			return httpx.ErrInternal(err)
+		}
+		decision, err := admit(version, resources, desired, nodes, time.Now())
+		a.recordAdmission(decision, err)
+		if err != nil {
+			return err
+		}
+		placement = &decision
 
 		// The namespace defaults from the organization, not from a constant: a
 		// tenant's objects belong in the namespace its quota and network policy are
@@ -302,6 +318,7 @@ func (a *API) createDeployment(w http.ResponseWriter, r *http.Request) error {
 	w.Header().Set("Location", "/v1/deployments/"+d.ID.String())
 	a.write(w, r, http.StatusAccepted, createdDeploymentResponse{
 		deploymentResponse: newDeploymentResponse(d, time.Now()),
+		Placement:          placement,
 		Note:               pendingControllerNote,
 	})
 	return nil
