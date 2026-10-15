@@ -202,6 +202,18 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.service == ServiceAutoscaler {
+		a := c.Autoscaler
+		if u, err := url.Parse(a.PrometheusURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			v.Add("NEBULA_AUTOSCALER_PROMETHEUS_URL", "must be an absolute http:// or https:// URL (got %q)", a.PrometheusURL)
+		}
+		v.AddIf(a.Interval.Duration() < time.Second, "NEBULA_AUTOSCALER_INTERVAL", "must be at least 1s")
+		v.AddIf(a.QueryTimeout.Duration() <= 0 || a.QueryTimeout.Duration() >= a.Interval.Duration(),
+			"NEBULA_AUTOSCALER_QUERY_TIMEOUT", "must be positive and shorter than NEBULA_AUTOSCALER_INTERVAL")
+		v.AddIf(a.SignalWindow.Duration() < 30*time.Second, "NEBULA_AUTOSCALER_SIGNAL_WINDOW",
+			"must be at least 30s: a rate over fewer than two scrapes is noise")
+	}
+
 	// --- production gating -------------------------------------------------
 	// Every development affordance is a startup FAILURE in production, not a
 	// warning. See docs/architecture.md axiom A9 and risk R-17.
@@ -249,6 +261,7 @@ const (
 	ServiceGateway      = "nebula-gateway"
 	ServiceMigrate      = "nebula-migrate"
 	ServiceController   = "nebula-controller"
+	ServiceAutoscaler   = "nebula-autoscaler"
 )
 
 // usesDatabase reports whether the service opens PostgreSQL. An unknown service

@@ -689,7 +689,75 @@ Loki, and every dashboard panel is backed by a real series.
 
 ---
 
-## Phase 9 — Autoscaling
+## Phase 9 — Autoscaling ✅
+
+**Status: complete**, with the deviations below.
+
+**Delivered**
+
+- `packages/autoscale`: the pure decision engine — `desired = ceil(current × max ratio)` over usable
+  signals, a tolerance band, scale-up and scale-down stabilization windows that must be observed
+  before acting, a cooldown, a maximum step (double up; 10% or one replica down), `[min, max]`
+  clamps, the rollout interlock, and "hold" when every signal is missing. Every decision carries
+  the full signal vector and a sentence saying why; a suppression is recorded when it changes, not
+  on every tick.
+- `services/autoscaler`: reads queue wait p95 and in-flight concurrency per replica from Prometheus
+  (four instant queries per tick for all deployments, joined on `deployment_id`), decides every
+  autoscaled deployment, and writes `desired_replicas` plus the `autoscaling_events` row in one
+  transaction with a compare-and-set on the count it decided from. It connects as
+  `nebula_controller`, never calls the Kubernetes API, and elects one active replica with a
+  PostgreSQL advisory lock. Exports `nebula_autoscale_decisions_total` and
+  `nebula_autoscale_signal_ratio`.
+- Migration 000012: a `desired_replicas` change advances `generation`, so the controller reconciles
+  the autoscaler's decision at once (its role cannot write `generation`).
+- Control plane: `autoscaling` is validated with the autoscaler's own parser
+  (`400 invalid_autoscaling`), and `GET /v1/deployments/{id}/autoscaling-events` returns every
+  recorded decision with its signals, newest first.
+- Gateway: `nebula_queue_depth` and `nebula_queue_wait_seconds` carry `deployment_id`, and queue
+  wait is observed for every admitted request, so its p95 is the user-visible one.
+- Chart: the autoscaler Deployment (no ServiceAccount token, PostgreSQL ingress), Prometheus copying
+  the worker pod's deployment id onto its series, an opt-in CPU HPA for the gateway
+  (`gateway.autoscaling.enabled`), and the Queue & Autoscaling dashboard's replica, signal-ratio and
+  decision panels.
+
+**Tests.** Simulated-clock scenarios over a load model where load per replica falls as replicas
+rise: ramp up (converges, never more than doubling, nothing before the window), plateau (no change,
+no row), ramp down (nothing inside the 300 s window, then one replica at a time to the minimum), a
+one-tick spike (no change), flapping input over a synthetic hour (at most four changes, no
+scale-down), every signal missing (holds for 30 minutes, one row), clamping at max and min (one row
+each), a rollout in progress (no change, one row, scaling resumes after), tolerance, cooldown.
+Database tests as `nebula_controller`: the target list (state, opt-in, rollout interlock), the change
+and its row in one transaction with the generation bump, the compare-and-set refusing an unseen
+user scale and out-of-bounds writes, and the role unable to touch the spec. The loop against fakes:
+load raises and idle lowers, Prometheus down holds, a conflict is not fatal, a list failure decides
+nothing, a cancelled tick records nothing, a forgotten deployment observes its windows afresh.
+`tests/e2e/kind/phase9_demo.py` on kind, with a mock runtime slowed to 2 slots at 20 tokens/s
+and 12 clients: **1 → 2 → 4 replicas within 56 s of load** (queue wait p95 at about 9.7 s against
+500 ms), every request served; **still 4 replicas 45 s into idle**, then 4 → 3 → 2 → 1 one replica
+at a time, back at the minimum 158 s after the load stopped; ten rows explaining all of it — the
+initial `suppressed_no_signal` before any traffic, both scale-ups, a cooldown, the clamp at the
+maximum, the scale-down window being observed, and each step down — and the decision counter in
+Prometheus.
+
+Building it found two defects, now fixed: Prometheus kept its old scrape configuration after an
+upgrade (its pod checksum covered only the alert rules), and an autoscaler tick in flight at
+shutdown would have recorded its cancelled queries as a missing signal.
+
+**Exit:** met — queue growth raises replicas and idle lowers them on a live cluster, and every
+change, and every reason not to change, is a row with the signals that caused it.
+
+**Deviations** ([ADR-0036](./architecture-decisions/0036-autoscaler-writes-desired-state.md)).
+
+- Signals: queue wait p95 and concurrency per replica. Request rate and CPU/GPU utilization are not
+  read yet; the engine takes any number of signals.
+- Scale-to-zero (optional, off by default) is not implemented: there is no activation queue, so a
+  deployment at zero replicas would refuse requests rather than hold them.
+- Leader election is a PostgreSQL advisory lock rather than a Kubernetes Lease, so the autoscaler
+  needs no Kubernetes permissions at all.
+- The gateway HPA needs metrics-server, which kind does not ship, so it is rendered and linted but
+  not exercised in the kind demo.
+
+**Original plan**
 
 **Deliverables**
 

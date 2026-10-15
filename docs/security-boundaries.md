@@ -194,7 +194,8 @@ DENIED — each asserted by a `kubectl auth can-i` negative test in CI
 ```
 
 The gateway gets `EndpointSlice` get/list/watch in `nebula-workloads` and nothing else. The control
-plane and autoscaler get no Kubernetes access at all beyond leases. Every ServiceAccount sets
+plane gets no Kubernetes access at all beyond leases, and the autoscaler none at all: it elects its
+leader with a PostgreSQL advisory lock and mounts no ServiceAccount token (ADR-0036). Every ServiceAccount sets
 `automountServiceAccountToken: false` except where the API is genuinely used.
 
 ### B6 — Zone 3 → Zone 4: the worker's only outbound path

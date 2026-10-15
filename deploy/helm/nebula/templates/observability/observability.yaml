@@ -304,31 +304,7 @@ metadata:
   namespace: {{ $ns }}
 data:
   prometheus.yml: |
-    global: {scrape_interval: 15s, evaluation_interval: 30s}
-    rule_files: [/etc/prometheus/alerts.yaml]
-    scrape_configs:
-      # Every NEBULA pod that asks to be scraped, by annotation. The Prometheus
-      # Operator's ServiceMonitors do the same in clusters that run it.
-      - job_name: nebula
-        # A metric's own labels win: the gateway's "deployment" and "pod" label
-        # NEBULA deployments and endpoints, not the scraped pod.
-        honor_labels: true
-        kubernetes_sd_configs:
-          - role: pod
-            namespaces: {names: [{{ .Release.Namespace }}, {{ .Values.namespaces.workloads }}]}
-        relabel_configs:
-          - {source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape], action: keep, regex: "true"}
-          - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_prometheus_io_port]
-            regex: (.+);(\d+)
-            replacement: $1:$2
-            target_label: __address__
-          - {source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path], regex: (.+), target_label: __metrics_path__}
-          - {source_labels: [__meta_kubernetes_namespace], target_label: namespace}
-          - {source_labels: [__meta_kubernetes_pod_name], target_label: pod}
-          - {source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name], target_label: service}
-          # Worker pods name their NEBULA deployment in a label; the worker's own
-          # metrics deliberately do not carry it (docs/observability.md §2.3).
-          - {source_labels: [__meta_kubernetes_pod_label_nebula_dev_deployment], regex: (.+), target_label: deployment}
+{{ include "nebula.prometheusConfig" . | indent 4 }}
   alerts.yaml: |
 {{ .Files.Get "files/prometheus/alerts.yaml" | indent 4 }}
 ---
@@ -344,7 +320,9 @@ spec:
     metadata:
       labels: {app.kubernetes.io/name: prometheus}
       annotations:
-        checksum/config: {{ .Files.Get "files/prometheus/alerts.yaml" | sha256sum | trunc 12 }}
+        # The scrape configuration and the rules: a change to either rolls Prometheus,
+        # which otherwise keeps the configuration it started with.
+        checksum/config: {{ print (include "nebula.prometheusConfig" .) (.Files.Get "files/prometheus/alerts.yaml") | sha256sum | trunc 12 }}
     spec:
       serviceAccountName: prometheus
       securityContext: {runAsUser: 65534, runAsGroup: 65534, fsGroup: 65534}
@@ -478,4 +456,35 @@ spec:
       {{- if .Values.observability.grafana.service.nodePort }}
       nodePort: {{ .Values.observability.grafana.service.nodePort }}
       {{- end }}
+{{- end }}
+
+{{- define "nebula.prometheusConfig" -}}
+global: {scrape_interval: 15s, evaluation_interval: 30s}
+rule_files: [/etc/prometheus/alerts.yaml]
+scrape_configs:
+  # Every NEBULA pod that asks to be scraped, by annotation. The Prometheus
+  # Operator's ServiceMonitors do the same in clusters that run it.
+  - job_name: nebula
+    # A metric's own labels win: the gateway's "deployment" and "pod" label
+    # NEBULA deployments and endpoints, not the scraped pod.
+    honor_labels: true
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces: {names: [{{ .Release.Namespace }}, {{ .Values.namespaces.workloads }}]}
+    relabel_configs:
+      - {source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape], action: keep, regex: "true"}
+      - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        regex: (.+);(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - {source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path], regex: (.+), target_label: __metrics_path__}
+      - {source_labels: [__meta_kubernetes_namespace], target_label: namespace}
+      - {source_labels: [__meta_kubernetes_pod_name], target_label: pod}
+      - {source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name], target_label: service}
+      # Worker pods name their NEBULA deployment in a label; the worker's own
+      # metrics deliberately do not carry it (docs/observability.md §2.3).
+      - {source_labels: [__meta_kubernetes_pod_label_nebula_dev_deployment], regex: (.+), target_label: deployment}
+      # ...and its id, which is what the autoscaler joins on: a name is unique only
+      # within an organization.
+      - {source_labels: [__meta_kubernetes_pod_label_nebula_dev_deployment_id], regex: (.+), target_label: deployment_id}
 {{- end }}

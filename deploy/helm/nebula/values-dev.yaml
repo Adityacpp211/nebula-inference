@@ -48,6 +48,9 @@ controller:
   replicas: 1
   startingTimeout: 5m
 
+autoscaler:
+  replicas: 1
+
 data:
   enabled: true
   s3:

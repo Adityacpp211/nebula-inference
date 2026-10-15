@@ -164,6 +164,35 @@ func (a *API) listTransitions(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
+// listAutoscalingEvents answers "why did it scale, or not": every decision the
+// autoscaler recorded, with the signal vector it decided on.
+func (a *API) listAutoscalingEvents(w http.ResponseWriter, r *http.Request) error {
+	ident := auth.MustFromContext(r.Context())
+	id, err := pathUUID(r, "deployment_id", "deployment")
+	if err != nil {
+		return err
+	}
+	p, err := page(r)
+	if err != nil {
+		return err
+	}
+	if _, err := a.Store.Deployments.Get(r.Context(), a.Store.Pool(), ident.OrgID, id); err != nil {
+		return storeError(err, "deployment")
+	}
+	rows, err := a.Store.Deployments.ListAutoscalingEvents(r.Context(), a.Store.Pool(), ident.OrgID, id, p)
+	if err != nil {
+		return storeError(err, "deployment")
+	}
+	out := make([]autoscalingEventResponse, 0, len(rows))
+	for _, e := range rows {
+		out = append(out, newAutoscalingEventResponse(e))
+	}
+	a.write(w, r, http.StatusOK, newList(out, p.Limit, func(e autoscalingEventResponse) string {
+		return e.ID.String()
+	}))
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // creation
 // ---------------------------------------------------------------------------
@@ -220,6 +249,9 @@ func (a *API) createDeployment(w http.ResponseWriter, r *http.Request) error {
 	}
 	autoscaling, err := requireJSONObject(req.Autoscaling, "autoscaling")
 	if err != nil {
+		return err
+	}
+	if err := validateAutoscaling(autoscaling); err != nil {
 		return err
 	}
 	queue, err := requireJSONObject(req.Queue, "queue")
@@ -390,6 +422,9 @@ func (a *API) updateDeployment(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 		if err := applyJSONField(req.Autoscaling, "autoscaling", &d.Autoscaling); err != nil {
+			return err
+		}
+		if err := validateAutoscaling(d.Autoscaling); err != nil {
 			return err
 		}
 		if err := applyJSONField(req.Queue, "queue", &d.QueueConfig); err != nil {

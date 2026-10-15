@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/adityasatwar321/nebula/packages/httpx"
@@ -78,9 +79,9 @@ func newGatewayMetrics(m *telemetry.Metrics, rt *router.Router, q *admission.Que
 	m.GaugeFunc("nebula_queue_depth", func() []telemetry.Sample {
 		var out []telemetry.Sample
 		for key, s := range q.Stats() {
-			name := rt.DeploymentName(key)
+			name, id := rt.DeploymentName(key), deploymentID(key)
 			for _, p := range []queue.Priority{queue.Low, queue.Normal, queue.High} {
-				out = append(out, telemetry.Sample{Labels: []string{name, p.String()}, Value: float64(s.ByPrio[p.String()])})
+				out = append(out, telemetry.Sample{Labels: []string{name, id, p.String()}, Value: float64(s.ByPrio[p.String()])})
 			}
 		}
 		return out
@@ -168,8 +169,19 @@ func (m *gwMetrics) selected(sel *router.Selection) {
 	}
 }
 
-func (m *gwMetrics) waited(deployment string, p queue.Priority, d time.Duration, traceID string) {
-	telemetry.Observe(m.queueWait.WithLabelValues(deployment, p.String()), d.Seconds(), traceID)
+func (m *gwMetrics) waited(deployment, key string, p queue.Priority, d time.Duration, traceID string) {
+	telemetry.Observe(m.queueWait.WithLabelValues(deployment, deploymentID(key), p.String()), d.Seconds(), traceID)
+}
+
+// deploymentID is the deployment_id label for a queue key: the deployment's id, or
+// empty for a static route's target, which has none. The autoscaler joins the
+// gateway's queue metrics to worker metrics on it; a name is not unique across
+// organizations.
+func deploymentID(key string) string {
+	if _, err := uuid.Parse(key); err != nil {
+		return ""
+	}
+	return key
 }
 
 func (m *gwMetrics) dropped(deployment string, err error) {

@@ -167,9 +167,9 @@ jobs:
           git diff --exit-code -- deploy/helm/nebula/files/
 
   e2e-kind:
-    name: kind end to end (controller, RBAC, network policy, artifacts)
+    name: kind end to end (controller, RBAC, network policy, artifacts, autoscaling)
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
@@ -209,12 +209,21 @@ jobs:
             echo "::error title=phase8_demo.py failed::$(tail -n 6 demo.log | tr '\n' ' ' | cut -c1-900)"
             exit 1
           }
+      - name: Phase 9 demo (load raises replicas, idle lowers them, every decision a row)
+        run: |
+          set -o pipefail
+          python3 tests/e2e/kind/phase9_demo.py 2>&1 | tee demo.log || {
+            echo "::error title=phase9_demo.py failed::$(tail -n 6 demo.log | tr '\n' ' ' | cut -c1-900)"
+            echo "::error title=autoscaler::$(kubectl -n nebula-system logs deploy/nebula-autoscaler | tail -n 8 | tr '\n' ' ' | cut -c1-900)"
+            exit 1
+          }
       - name: diagnostics on failure
         if: failure()
         run: |
           kubectl get all -A
           kubectl -n nebula-system logs deploy/nebula-controller --tail=200 || true
           kubectl -n nebula-system logs deploy/nebula-controlplane --tail=200 || true
+          kubectl -n nebula-system logs deploy/nebula-autoscaler --tail=200 || true
 
   migrations:
     name: migration cycle (up, down, up)
@@ -397,6 +406,16 @@ jobs:
           file: deploy/docker/Dockerfile.controller
           push: false
           tags: nebula/controller:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: build autoscaler image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.autoscaler
+          push: false
+          tags: nebula/autoscaler:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

@@ -301,6 +301,7 @@ GET    /v1/deployments/{id}/replicas              live pod view, from informer c
 GET    /v1/deployments/{id}/events                worker_events history
 GET    /v1/deployments/{id}/metrics              ?window=1h&step=1m — Prometheus-backed
 GET    /v1/deployments/{id}/logs                 ?follow=true&since=&container= — SSE
+GET    /v1/deployments/{id}/autoscaling-events   every recorded scaling decision, with its signals
 POST   /v1/deployments/{id}/scale                { "replicas": 3 }
 POST   /v1/deployments/{id}/rollback             { "revision": 4 }  (or omit for previous)
 ```
@@ -313,14 +314,21 @@ POST   /v1/deployments/{id}/rollback             { "revision": 4 }  (or omit for
   "model_version_id": "0192f3c1-...",
   "replicas": 2,
   "resources": { "cpu_milli": 4000, "memory_mib": 8192, "gpu_count": 0 },
-  "autoscaling": { "enabled": true, "min_replicas": 1, "max_replicas": 6,
-                   "target_queue_wait_ms": 500, "target_concurrency": 4 },
+  "min_replicas": 1,
+  "max_replicas": 6,
+  "autoscaling": { "enabled": true, "target_queue_wait_ms": 500, "target_concurrency": 4 },
   "queue": { "max_depth": 128, "default_timeout_ms": 60000 },
   "runtime_overrides": { "n_ctx": 8192, "n_parallel": 4 },
   "routing_policy": "least_loaded",
   "route": { "model_name": "qwen2.5-chat", "weight": 100 }
 }
 ```
+
+`autoscaling` takes `enabled`, `target_queue_wait_ms`, `target_concurrency`,
+`scale_up_stabilization_s`, `scale_down_stabilization_s`, `cooldown_s` and `tolerance`; the bounds
+it scales within are the deployment's own `min_replicas` and `max_replicas`. It is parsed by the
+autoscaler's own parser on write, so an unknown field or an out-of-range value is a
+`400 invalid_autoscaling` rather than a deployment that silently never scales.
 
 Response is `202 Accepted` with the created deployment at `state: "pending"` and a `Location`
 header. **Deliberate:** deployment is a reconciled intent, not a synchronous action. Returning 201

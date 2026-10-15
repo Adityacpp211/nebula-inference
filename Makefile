@@ -32,7 +32,9 @@ BIN_DIR := bin
 CMD_nebula-controlplane := ./services/controlplane
 CMD_nebula-gateway      := ./services/gateway
 CMD_nebula-migrate      := ./cmd/nebula-migrate
-BINARIES := nebula-controlplane nebula-gateway nebula-migrate
+CMD_nebula-controller   := ./services/controller
+CMD_nebula-autoscaler   := ./services/autoscaler
+BINARIES := nebula-controlplane nebula-gateway nebula-migrate nebula-controller nebula-autoscaler
 
 # ---- local development database --------------------------------------------
 # Development credentials. Deliberately NOT valid in production: config
@@ -336,7 +338,8 @@ helm-check:
 	@helm template nebula deploy/helm/nebula -n nebula-system --set images.tag=ci \
 		--set secrets.keyPepper=x --set secrets.internalAuthSecret=x --set secrets.databaseURL=x \
 		--set secrets.controllerDatabaseURL=x --set secrets.redisURL=x --set secrets.artifactAccessKey=x \
-		--set secrets.artifactSecretKey=x --set artifact.endpoint=s3.example:443 >/dev/null
+		--set secrets.artifactSecretKey=x --set artifact.endpoint=s3.example:443 \
+		--set autoscaler.prometheusURL=http://prometheus.example:9090 --set gateway.autoscaling.enabled=true >/dev/null
 	@echo "chart lints and renders for dev and production values"
 
 ## load-gateway: the Phase 4 load baseline (k6) against the same live stack
@@ -356,6 +359,12 @@ docker-build:
 	@docker build -f deploy/docker/Dockerfile.migrate \
 		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
 		-t nebula/migrate:$(VERSION) .
+	@docker build -f deploy/docker/Dockerfile.controller \
+		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
+		-t nebula/controller:$(VERSION) .
+	@docker build -f deploy/docker/Dockerfile.autoscaler \
+		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
+		-t nebula/autoscaler:$(VERSION) .
 	@docker build -f deploy/docker/Dockerfile.worker --target mock \
 		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
 		-t nebula/worker-mock:$(VERSION) .

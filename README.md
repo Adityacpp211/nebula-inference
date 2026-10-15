@@ -19,24 +19,25 @@ for chunk in client.chat.completions.create(
 
 ---
 
-> ## Project status — Phase 8 complete
+> ## Project status — Phase 9 complete
 >
-> **One request can be followed from a dashboard to its trace to its log lines.** Every service
-> exports Prometheus metrics from a declared catalogue, every request is a single OpenTelemetry trace
-> from the gateway through the worker, and every log line carries that trace's id. The development
-> cluster runs Prometheus, Tempo, Loki and Grafana with four dashboards whose every panel is backed by
-> real series, and histogram exemplars that open the trace behind a bucket.
+> **Load raises replicas, idle lowers them, and every decision is a database row.** A deployment that
+> opts in to autoscaling is scaled by `nebula-autoscaler` from Prometheus signals — queue wait p95
+> and in-flight concurrency per replica — with stabilization windows, a cooldown, a maximum step,
+> its replica bounds and a rollout interlock. When it cannot see, it holds rather than guessing.
+> Every change, and every reason not to change, is an `autoscaling_events` row with the signals
+> behind it, readable through `GET /v1/deployments/{id}/autoscaling-events`.
 >
-> What works now: everything from Phases 1–7 — the schema and row-level security, API-key auth, the
+> What works now: everything from Phases 1–8 — the schema and row-level security, API-key auth, the
 > registry and lifecycle, the worker with llama.cpp and mock runtimes, the OpenAI-compatible gateway,
-> the deployment controller with verified artifacts, health-aware routing with heartbeats, and the
-> bounded admission queue — plus metrics, traces, correlated logs, dashboards and tested alert rules.
+> the deployment controller with verified artifacts, health-aware routing with heartbeats, the
+> bounded admission queue, metrics, traces, correlated logs and dashboards — plus autoscaling.
 >
-> What this deliberately does NOT do yet: no autoscaling (Phase 9), retries only before a worker
-> starts work (Phase 10), no canaries (Phase 12) or cost accounting (Phase 13). Usage records are log
-> lines until the durable event stream.
+> What this deliberately does NOT do yet: no scale-to-zero, retries only before a worker starts work
+> (Phase 10), no canaries (Phase 12) or cost accounting (Phase 13). Usage records are log lines until
+> the durable event stream.
 >
-> Next: [Phase 9](docs/roadmap.md#phase-9--autoscaling) — autoscaling. See
+> Next: [Phase 10](docs/roadmap.md#phase-10--reliability-mechanisms) — reliability mechanisms. See
 > [Capability status](#capability-status).
 
 ## Running it today
@@ -329,7 +330,7 @@ checkout.
 | Health-aware routing, routing strategies | ✅ **working** — kind demo: 50/50 split, all pods of one target killed under load with 0 errors, cold start from snapshot | 6 |
 | Bounded queues, concurrency control, backpressure | ✅ **working** — 3× capacity load test: queue at its bound, heap flat, every refusal a 429 with Retry-After | 7 |
 | Metrics, logs, traces, Grafana dashboards | ✅ **working** — kind demo: exemplar → trace → logs for one request; all 28 panels backed by series | 8 |
-| Autoscaling | ⬜ not started | 9 |
+| Autoscaling | ✅ **working** — kind demo: 1 → 4 replicas under load, back to 1 after the idle window, every decision a row; gateway CPU HPA opt-in | 9 |
 | Retries, breakers, timeouts, graceful shutdown | ⬜ not started | 10 |
 | Model versioning, rollback | ⬜ not started | 11 |
 | Canary rollouts, A/B testing | ⬜ not started | 12 |

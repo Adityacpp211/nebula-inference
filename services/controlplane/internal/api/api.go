@@ -199,6 +199,7 @@ func (a *API) routes() []Route {
 		{Pattern: "GET /v1/deployments/{deployment_id}/status", Scope: depsRead, handler: a.deploymentStatus},
 		{Pattern: "GET /v1/deployments/{deployment_id}/revisions", Scope: depsRead, handler: a.listRevisions},
 		{Pattern: "GET /v1/deployments/{deployment_id}/transitions", Scope: depsRead, handler: a.listTransitions},
+		{Pattern: "GET /v1/deployments/{deployment_id}/autoscaling-events", Scope: depsRead, handler: a.listAutoscalingEvents},
 		{Pattern: "POST /v1/deployments/{deployment_id}/scale", Scope: depsWrite, handler: a.scaleDeployment},
 		{Pattern: "POST /v1/deployments/{deployment_id}/rollback", Scope: depsWrite, handler: a.rollbackDeployment},
 		{Pattern: "POST /v1/deployments/{deployment_id}/stop", Scope: depsWrite, handler: a.stopDeployment},

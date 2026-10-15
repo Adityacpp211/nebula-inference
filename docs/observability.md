@@ -130,8 +130,8 @@ nobody notices until an incident.
 | `nebula_route_decisions_total` | counter | `route`, `strategy`, `outcome` | did routing find an endpoint |
 | `nebula_endpoints` | gauge | `deployment`, `state` (ready\|not_ready\|stale\|not_accepting\|breaker_open\|saturated) | the router's own view of health |
 | `nebula_endpoint_staleness_seconds` | histogram | `deployment` | heartbeat freshness — the leading indicator for [risk R-04](./risk-register.md) |
-| `nebula_queue_depth` | gauge | `deployment`, `priority` | **primary autoscaling signal** |
-| `nebula_queue_wait_seconds` | histogram | `deployment`, `priority` | user-visible queueing pain |
+| `nebula_queue_depth` | gauge | `deployment`, `deployment_id`, `priority` | **primary autoscaling signal** |
+| `nebula_queue_wait_seconds` | histogram | `deployment`, `deployment_id`, `priority` | user-visible queueing pain; observed for every admitted request, including a wait of zero, so its p95 is the autoscaler's |
 | `nebula_queue_oldest_age_seconds` | gauge | `deployment` | starvation detection |
 | `nebula_queue_drops_total` | counter | `deployment`, `reason` (queue_full\|queue_timeout\|client_cancelled\|rejected) | shedding behaviour |
 | `nebula_retries_total` *(Phase 10)* | counter | `deployment`, `reason` | retry volume |
@@ -202,8 +202,8 @@ as an engine measurement would be the "fake metrics" failure at small scale (see
 | `nebula_generation_lag` | gauge | `deployment` | `generation − observed_generation`: **the single best "is the control plane keeping up" metric** |
 | `nebula_deployment_replicas` | gauge | `deployment`, `state` (desired\|ready\|updated) | convergence |
 | `nebula_deployment_state` | gauge | `deployment`, `state` | fleet health |
-| `nebula_autoscale_decisions_total` *(Phase 9)* | counter | `deployment`, `direction`, `decision` | includes `suppressed_*`, which is what makes non-action diagnosable |
-| `nebula_autoscale_signal_ratio` *(Phase 9)* | gauge | `deployment`, `signal` | why it scaled |
+| `nebula_autoscale_decisions_total` | counter | `deployment`, `direction`, `decision` | includes `suppressed_*`, which is what makes non-action diagnosable |
+| `nebula_autoscale_signal_ratio` | gauge | `deployment`, `signal` | why it scaled |
 | `nebula_rollout_step` / `nebula_rollout_state` *(Phase 12)* | gauge | `route`, `rollout` | progressive delivery position |
 | `nebula_capacity_admission_total` | counter | `result` (admitted\|rejected), `reason` | placement rejections |
 | `nebula_usage_events_dropped_total` *(Phase 13)* | counter | `reason` | **must stay zero**; non-zero means cost data is incomplete |

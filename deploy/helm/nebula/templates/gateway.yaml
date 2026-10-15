@@ -52,7 +52,9 @@ metadata:
     {{- include "nebula.labels" . | nindent 4 }}
     {{- include "nebula.selector" $name | nindent 4 }}
 spec:
+  {{- if not .Values.gateway.autoscaling.enabled }}
   replicas: {{ .Values.gateway.replicas }}
+  {{- end }}
   selector:
     matchLabels: {{- include "nebula.selector" $name | nindent 6 }}
   template:
@@ -147,4 +149,30 @@ spec:
   minAvailable: 50%
   selector:
     matchLabels: {{- include "nebula.selector" $name | nindent 6 }}
+{{- end }}
+{{- if .Values.gateway.autoscaling.enabled }}
+---
+# The gateway is a stateless, CPU-bound HTTP service, so it scales the ordinary way:
+# a Kubernetes HPA on CPU. Model deployments are a different problem — their cost
+# is queueing at a few expensive replicas — and nebula-autoscaler owns those.
+# Needs metrics-server; off by default because kind does not ship one.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: {{ $name }}}
+  minReplicas: {{ .Values.gateway.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.gateway.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: {{ .Values.gateway.autoscaling.targetCPUUtilization }}}
+  behavior:
+    # The same shape as nebula-autoscaler's guards: quick up, slow down.
+    scaleUp: {stabilizationWindowSeconds: 30}
+    scaleDown: {stabilizationWindowSeconds: 300}
 {{- end }}

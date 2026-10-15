@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/adityasatwar321/nebula/packages/autoscale"
 	"github.com/adityasatwar321/nebula/packages/httpx"
 )
 
@@ -129,6 +130,19 @@ func requireJSONObject(in json.RawMessage, field string) (json.RawMessage, error
 			field+" must be a JSON object", "invalid_type", field)
 	}
 	return in, nil
+}
+
+// validateAutoscaling refuses an autoscaling object the autoscaler could not use,
+// with the same parser the autoscaler runs, so a typo is a 400 now rather than a
+// deployment that silently never scales.
+func validateAutoscaling(raw json.RawMessage) error {
+	if _, err := autoscale.ParseSettings(raw); err != nil {
+		return httpx.ErrInvalidRequest(err.Error()+
+			" (fields: enabled, target_queue_wait_ms, target_concurrency, scale_up_stabilization_s,"+
+			" scale_down_stabilization_s, cooldown_s, tolerance; replica bounds are the deployment's"+
+			" min_replicas and max_replicas)", "invalid_autoscaling", "autoscaling")
+	}
+	return nil
 }
 
 // replicaBounds validates the replica triple as a unit.

@@ -398,6 +398,24 @@ func newRevisionResponse(rev *models.DeploymentRevision) revisionResponse {
 	}
 }
 
+type autoscalingEventResponse struct {
+	ID           uuid.UUID       `json:"id"`
+	FromReplicas int32           `json:"from_replicas"`
+	ToReplicas   int32           `json:"to_replicas"`
+	Direction    string          `json:"direction"`
+	Decision     string          `json:"decision"`
+	Reason       string          `json:"reason"`
+	Signals      json.RawMessage `json:"signals"`
+	CreatedAt    time.Time       `json:"created_at"`
+}
+
+func newAutoscalingEventResponse(e *models.AutoscalingEvent) autoscalingEventResponse {
+	return autoscalingEventResponse{
+		ID: e.ID, FromReplicas: e.FromReplicas, ToReplicas: e.ToReplicas, Direction: string(e.Direction),
+		Decision: string(e.Decision), Reason: e.Reason, Signals: e.Signals, CreatedAt: e.CreatedAt,
+	}
+}
+
 type transitionResponse struct {
 	ID         uuid.UUID  `json:"id"`
 	FromState  *string    `json:"from_state"`

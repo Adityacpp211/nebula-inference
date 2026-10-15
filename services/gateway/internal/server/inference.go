@@ -277,8 +277,11 @@ func (g *Gateway) prepare(w http.ResponseWriter, r *http.Request, kind openai.Ki
 		lease.Release(ctx, 0)
 		return nil, g.queueError(w, r, err)
 	}
+	// Every admitted request is observed, including the ones that waited zero: the
+	// p95 of this histogram is the autoscaler's primary signal, and a histogram of
+	// only the requests that waited would overstate it.
+	g.m.waited(sel.Target.Deployment, sel.Key(), queue.ParsePriority(priority), ticket.Waited, traceID(ctx))
 	if ticket.Waited > 0 {
-		g.m.waited(sel.Target.Deployment, queue.ParsePriority(priority), ticket.Waited, traceID(ctx))
 		// The deployment's endpoints may have changed while the request waited:
 		// place it again, on the same deployment.
 		sel.Done(router.Abandoned)
@@ -731,7 +734,7 @@ func (g *Gateway) requeue(ctx context.Context, ex *exchange, cause error) bool {
 		ex.sel = nil
 		return false
 	}
-	g.m.waited(ex.target.Deployment, ex.prio, ticket.Waited, ex.record.TraceID)
+	g.m.waited(ex.target.Deployment, key, ex.prio, ticket.Waited, ex.record.TraceID)
 	ex.ticket = ticket
 	ex.queueWait += ticket.Waited
 	placement := ex.placement

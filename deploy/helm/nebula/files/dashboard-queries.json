@@ -117,6 +117,18 @@
     [
       "Worker slots busy / total",
       "sum(nebula_worker_slots_busy) / clamp_min(sum(nebula_worker_slots_total), 1)"
+    ],
+    [
+      "Replicas: desired vs ready",
+      "sum by (deployment, state) (nebula_deployment_replicas{state=~\"desired|ready\"})"
+    ],
+    [
+      "Autoscaling signal ratio (1 = on target)",
+      "max by (deployment, signal) (nebula_autoscale_signal_ratio) or vector(0)"
+    ],
+    [
+      "Autoscaling decisions (15m), suppressed included",
+      "sum by (deployment, direction, decision) (increase(nebula_autoscale_decisions_total{decision!=\"scaled\"}[15m])) or sum by (deployment, direction, decision) (increase(nebula_autoscale_decisions_total{direction!=\"hold\"}[15m])) or vector(0)"
     ]
   ]
 }

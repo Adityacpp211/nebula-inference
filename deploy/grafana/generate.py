@@ -138,6 +138,16 @@ queue = dashboard("nebula-queue", "NEBULA / Queue & Autoscaling", [
     panel("Worker queue depth", 'sum by (pod) (nebula_worker_queue_depth)', legend="{{pod}}"),
     panel("Worker slots busy / total", 'sum(nebula_worker_slots_busy) / clamp_min(sum(nebula_worker_slots_total), 1)',
           unit="percentunit"),
+    panel("Replicas: desired vs ready", 'sum by (deployment, state) (nebula_deployment_replicas{state=~"desired|ready"})',
+          legend="{{deployment}} {{state}}"),
+    # 1 is on target; above 1 the autoscaler wants more replicas. Absent while a
+    # signal is missing: a missing signal is never drawn as idle.
+    panel("Autoscaling signal ratio (1 = on target)",
+          'max by (deployment, signal) (nebula_autoscale_signal_ratio) or vector(0)', legend="{{deployment}} {{signal}}"),
+    panel("Autoscaling decisions (15m), suppressed included",
+          'sum by (deployment, direction, decision) (increase(nebula_autoscale_decisions_total{decision!="scaled"}[15m]))'
+          ' or sum by (deployment, direction, decision) (increase(nebula_autoscale_decisions_total{direction!="hold"}[15m]))'
+          ' or vector(0)', legend="{{deployment}} {{direction}} {{decision}}", w=24),
 ])
 
 if __name__ == "__main__":

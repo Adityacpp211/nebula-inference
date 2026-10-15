@@ -51,6 +51,7 @@ if [ "${NEBULA_SKIP_BUILD:-0}" != "1" ]; then
   build Dockerfile.controlplane "" controlplane
   build Dockerfile.gateway "" gateway
   build Dockerfile.controller "" controller
+  build Dockerfile.autoscaler "" autoscaler
   build Dockerfile.migrate "" migrate
   build Dockerfile.puller "" artifact-puller
   build Dockerfile.worker mock worker-mock

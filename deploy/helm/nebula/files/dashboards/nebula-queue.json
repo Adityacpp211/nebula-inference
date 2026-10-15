@@ -249,6 +249,123 @@
         "y": 16
       },
       "id": 6
+    },
+    {
+      "type": "timeseries",
+      "title": "Replicas: desired vs ready",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (deployment, state) (nebula_deployment_replicas{state=~\"desired|ready\"})",
+          "legendFormat": "{{deployment}} {{state}}",
+          "exemplar": false
+        }
+      ],
+      "gridPos": {
+        "w": 12,
+        "h": 8,
+        "x": 0,
+        "y": 24
+      },
+      "id": 7
+    },
+    {
+      "type": "timeseries",
+      "title": "Autoscaling signal ratio (1 = on target)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (deployment, signal) (nebula_autoscale_signal_ratio) or vector(0)",
+          "legendFormat": "{{deployment}} {{signal}}",
+          "exemplar": false
+        }
+      ],
+      "gridPos": {
+        "w": 12,
+        "h": 8,
+        "x": 12,
+        "y": 24
+      },
+      "id": 8
+    },
+    {
+      "type": "timeseries",
+      "title": "Autoscaling decisions (15m), suppressed included",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (deployment, direction, decision) (increase(nebula_autoscale_decisions_total{decision!=\"scaled\"}[15m])) or sum by (deployment, direction, decision) (increase(nebula_autoscale_decisions_total{direction!=\"hold\"}[15m])) or vector(0)",
+          "legendFormat": "{{deployment}} {{direction}} {{decision}}",
+          "exemplar": false
+        }
+      ],
+      "gridPos": {
+        "w": 24,
+        "h": 8,
+        "x": 0,
+        "y": 32
+      },
+      "id": 9
     }
   ]
 }

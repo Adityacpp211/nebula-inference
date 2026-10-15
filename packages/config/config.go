@@ -47,19 +47,20 @@ type Config struct {
 	// Env gates development-only behaviour. Set with NEBULA_ENV.
 	Env Env `json:"env" yaml:"env" env:"NEBULA_ENV" flag:"env" usage:"deployment environment: dev, staging, production" default:"dev"`
 
-	Log       LogConfig       `json:"log" yaml:"log"`
-	HTTP      HTTPConfig      `json:"http" yaml:"http"`
-	Database  DatabaseConfig  `json:"database" yaml:"database"`
-	Auth      AuthConfig      `json:"auth" yaml:"auth"`
-	Internal  InternalConfig  `json:"internal" yaml:"internal"`
-	Redis     RedisConfig     `json:"redis" yaml:"redis"`
-	Gateway   GatewayConfig   `json:"gateway" yaml:"gateway"`
-	Limits    LimitsConfig    `json:"limits" yaml:"limits"`
-	Artifact  ArtifactConfig  `json:"artifact" yaml:"artifact"`
-	Kube      KubeConfig      `json:"kube" yaml:"kube"`
-	NATS      NATSConfig      `json:"nats" yaml:"nats"`
-	Telemetry TelemetryConfig `json:"telemetry" yaml:"telemetry"`
-	Dev       DevConfig       `json:"dev" yaml:"dev"`
+	Log        LogConfig        `json:"log" yaml:"log"`
+	HTTP       HTTPConfig       `json:"http" yaml:"http"`
+	Database   DatabaseConfig   `json:"database" yaml:"database"`
+	Auth       AuthConfig       `json:"auth" yaml:"auth"`
+	Internal   InternalConfig   `json:"internal" yaml:"internal"`
+	Redis      RedisConfig      `json:"redis" yaml:"redis"`
+	Gateway    GatewayConfig    `json:"gateway" yaml:"gateway"`
+	Limits     LimitsConfig     `json:"limits" yaml:"limits"`
+	Artifact   ArtifactConfig   `json:"artifact" yaml:"artifact"`
+	Kube       KubeConfig       `json:"kube" yaml:"kube"`
+	Autoscaler AutoscalerConfig `json:"autoscaler" yaml:"autoscaler"`
+	NATS       NATSConfig       `json:"nats" yaml:"nats"`
+	Telemetry  TelemetryConfig  `json:"telemetry" yaml:"telemetry"`
+	Dev        DevConfig        `json:"dev" yaml:"dev"`
 
 	// service is set by the binary, never by configuration.
 	service string `yaml:"-"`
@@ -362,6 +363,20 @@ type KubeConfig struct {
 	// controller references it by name and never reads it (it holds no secrets
 	// permission, docs/deployment-architecture.md §3).
 	ArtifactSecretName string `json:"artifact_secret_name" yaml:"artifact_secret_name" env:"NEBULA_KUBE_ARTIFACT_SECRET_NAME" default:"nebula-artifact-store"`
+}
+
+// AutoscalerConfig configures nebula-autoscaler (docs/architecture.md §4.4).
+type AutoscalerConfig struct {
+	// PrometheusURL is where signals are read. A signal Prometheus cannot answer is
+	// missing, never zero: with every signal missing the autoscaler holds.
+	PrometheusURL string `json:"prometheus_url" yaml:"prometheus_url" env:"NEBULA_AUTOSCALER_PROMETHEUS_URL" flag:"prometheus-url" usage:"Prometheus base URL the signals are read from" default:"http://prometheus.nebula-system.svc:9090"`
+	// Interval is the decision cadence. It should be at least Prometheus' scrape
+	// interval: deciding faster than the data changes only repeats decisions.
+	Interval Duration `json:"interval" yaml:"interval" env:"NEBULA_AUTOSCALER_INTERVAL" default:"15s"`
+	// QueryTimeout bounds one Prometheus query.
+	QueryTimeout Duration `json:"query_timeout" yaml:"query_timeout" env:"NEBULA_AUTOSCALER_QUERY_TIMEOUT" default:"5s"`
+	// SignalWindow is the rate window histogram signals are computed over.
+	SignalWindow Duration `json:"signal_window" yaml:"signal_window" env:"NEBULA_AUTOSCALER_SIGNAL_WINDOW" default:"1m"`
 }
 
 // DevConfig holds affordances that must never be enabled in production. Every

@@ -61,7 +61,7 @@ Six first-party services, four shared infrastructure dependencies, one CLI, one 
 | `nebula-gateway` | Go | N (HPA) | stateless; caches in-process + Redis | Data plane. Auth, rate limit, validation, routing, admission queue, dispatch, streaming, usage emission. |
 | `nebula-controlplane` | Go | N | stateless; PostgreSQL is truth | Admin API. Owns all writes to PostgreSQL. Registry, deployments, keys, policies, usage read models, audit. |
 | `nebula-controller` | Go | 1 active (leader-elected) | none | Reconcilers: deployment → Kubernetes objects; rollout/canary state machine; node & capacity inventory; usage ingestion. |
-| `nebula-autoscaler` | Go | 1 active (leader-elected) | none | Scaling control loop. Reads signals, writes `desired_replicas`, records decisions. |
+| `nebula-autoscaler` | Go | 1 active (PostgreSQL advisory lock) | none | Scaling control loop. Reads signals, writes `desired_replicas`, records decisions. |
 | `nebula-worker` | Python | per deployment replica | model weights in node cache | Inference worker. Hosts a runtime adapter, bounded local queue, health, metrics, token accounting. |
 | `nebula-dashboard` | React + TS | N | none | Operator UI. Talks only to the gateway. |
 
@@ -394,6 +394,11 @@ Guards, all mandatory: scale-up stabilization 30 s, scale-down stabilization 300
 any change, max step (double up, 10%-or-1 down), `[min,max]` clamp, and a hard "no scaling while a
 rollout is progressing" interlock. Every decision writes an `autoscaling_events` row containing the
 full signal vector, so oscillation is diagnosable rather than mysterious.
+
+Implemented (Phase 9, [ADR-0036](./architecture-decisions/0036-autoscaler-writes-desired-state.md)):
+queue wait p95 and in-flight concurrency per replica, read from Prometheus and joined on
+`deployment_id`; the request-rate and utilization signals are not read yet. A suppression is recorded
+when it changes, not on every tick, so a decision held for an hour is one row.
 
 Scale-to-zero is designed (gateway holds the request in an *activation* queue with an extended
 deadline while replicas come up) but is a Phase 9 stretch goal, off by default, because a cold model

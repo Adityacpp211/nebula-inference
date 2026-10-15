@@ -844,6 +844,39 @@ paths:
                         items: { $ref: "#/components/schemas/DeploymentTransition" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /v1/deployments/{deployment_id}/autoscaling-events:
+    parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [deployments]
+      operationId: listDeploymentAutoscalingEvents
+      summary: Every recorded autoscaling decision, newest first.
+      description: |
+        Written by nebula-autoscaler for every change and for every new reason not
+        to change — a held decision is one row, not one per tick. Each row carries
+        the full signal vector the decision was made on, so "why did it scale" and
+        "why didn't it" are both a read rather than an argument.
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: A page of decisions.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/AutoscalingEvent" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /v1/deployments/{deployment_id}/scale:
     parameters:
       - name: deployment_id
@@ -2055,7 +2088,7 @@ components:
         max_replicas: { type: [integer, "null"], format: int32, minimum: 0 }
         resources: { type: object, additionalProperties: true }
         runtime_overrides: { type: object, additionalProperties: true }
-        autoscaling: { type: object, additionalProperties: true }
+        autoscaling: { $ref: "#/components/schemas/Autoscaling" }
         queue: { type: object, additionalProperties: true }
         routing_policy_id: { type: [string, "null"], format: uuid }
 
@@ -2074,7 +2107,7 @@ components:
         max_replicas: { type: [integer, "null"], format: int32 }
         resources: { type: object, additionalProperties: true }
         runtime_overrides: { type: object, additionalProperties: true }
-        autoscaling: { type: object, additionalProperties: true }
+        autoscaling: { $ref: "#/components/schemas/Autoscaling" }
         queue: { type: object, additionalProperties: true }
         routing_policy_id: { type: [string, "null"], format: uuid }
 
@@ -2150,6 +2183,56 @@ components:
         actor_type: { type: string, enum: [user, api_key, system] }
         actor_id: { type: [string, "null"], format: uuid }
         occurred_at: { type: string, format: date-time }
+
+    Autoscaling:
+      type: object
+      additionalProperties: false
+      description: |
+        A deployment's autoscaling settings. Replica bounds are the deployment's own
+        min_replicas and max_replicas. Unknown fields are refused, so a typo is a
+        400 rather than a deployment that silently never scales.
+      properties:
+        enabled: { type: boolean, default: false }
+        target_queue_wait_ms: { type: number, minimum: 0, default: 500 }
+        target_concurrency:
+          type: number
+          minimum: 0
+          description: Requests in flight or queued per replica. 0 uses the worker's parallel slots.
+        scale_up_stabilization_s: { type: integer, minimum: 0, maximum: 3600, default: 30 }
+        scale_down_stabilization_s: { type: integer, minimum: 0, maximum: 3600, default: 300 }
+        cooldown_s: { type: integer, minimum: 0, maximum: 3600, default: 30 }
+        tolerance: { type: number, minimum: 0, exclusiveMaximum: 1, default: 0.1 }
+
+    AutoscalingSignal:
+      type: object
+      required: [name, observed, target, ratio, source, stale, selected]
+      properties:
+        name: { type: string, enum: [concurrency_per_replica, queue_wait_p95_ms] }
+        observed: { type: number }
+        target: { type: number }
+        ratio: { type: number, description: observed / target; 0 when stale. }
+        source: { type: string }
+        stale: { type: boolean, description: The signal could not be read. It is never used as zero. }
+        selected: { type: boolean, description: The signal with the largest ratio, which the decision used. }
+
+    AutoscalingEvent:
+      type: object
+      required: [id, from_replicas, to_replicas, direction, decision, reason, signals, created_at]
+      description: Immutable. A database trigger refuses UPDATE.
+      properties:
+        id: { type: string, format: uuid }
+        from_replicas: { type: integer, format: int32, minimum: 0 }
+        to_replicas: { type: integer, format: int32, minimum: 0 }
+        direction: { type: string, enum: [up, down, hold] }
+        decision:
+          type: string
+          enum: [scaled, suppressed_cooldown, suppressed_stabilization, suppressed_rollout,
+                 suppressed_no_signal, clamped_max, clamped_min, disabled]
+        reason: { type: string }
+        signals:
+          type: array
+          items: { $ref: "#/components/schemas/AutoscalingSignal" }
+        created_at: { type: string, format: date-time }
 
     DeploymentLifecycle:
       type: object

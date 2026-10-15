@@ -22,6 +22,7 @@ images:
   controlplane: nebula/controlplane
   gateway: nebula/gateway
   controller: nebula/controller
+  autoscaler: nebula/autoscaler
   migrate: nebula/migrate
   puller: nebula/artifact-puller
   workerLlamacpp: nebula/worker-llamacpp
@@ -68,6 +69,13 @@ gateway:
   # keeps the gateway's built-in defaults. Quote numbers: Helm renders large
   # integers in exponent form.
   limits: {}
+  # A CPU HPA for the gateway itself (needs metrics-server). When enabled it owns
+  # the replica count and gateway.replicas is ignored.
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilization: 70
 
 controlplane:
   replicas: 2
@@ -83,6 +91,21 @@ controller:
   resources:
     requests: {cpu: 100m, memory: 128Mi}
     limits: {cpu: "1", memory: 512Mi}
+
+# nebula-autoscaler decides model deployments' replica counts from Prometheus
+# signals (docs/architecture.md §7.2). Each deployment opts in with
+# autoscaling.enabled; the windows and targets are per deployment.
+autoscaler:
+  enabled: true
+  replicas: 2
+  # Empty uses the in-cluster Prometheus when observability.enabled; otherwise it
+  # is required.
+  prometheusURL: ""
+  # Decision cadence: no faster than Prometheus scrapes.
+  interval: 15s
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi}
 
 # NATS carries worker heartbeats to the gateways (ADR-0007). Empty uses the
 # in-cluster server when data.enabled, otherwise no heartbeats: routing then uses
