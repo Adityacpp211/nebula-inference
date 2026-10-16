@@ -186,6 +186,13 @@ def main() -> None:
          "app.kubernetes.io/name=nebula-controlplane", "-o", "name") == "", timeout=120)
     kubectl("-n", "nebula-system", "rollout", "restart", "deploy/nebula-gateway")
     kubectl("-n", "nebula-system", "rollout", "status", "deploy/nebula-gateway", "--timeout=180s")
+    # The old gateway drains for up to its grace period after the rollout reports
+    # done, and until the new pod's endpoint propagates kube-proxy may still send
+    # a connection to it — a gateway that DID reach the control plane. Only the
+    # restarted gateway may answer the checks below.
+    wait("only the restarted gateway left", lambda: len(kubectl(
+        "-n", "nebula-system", "get", "pods", "-l", "app.kubernetes.io/name=nebula-gateway",
+        "-o", "name").split()) == 1, timeout=120)
     try:
         def routes_again() -> bool:
             try:
