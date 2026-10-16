@@ -167,7 +167,7 @@ jobs:
           git diff --exit-code -- deploy/helm/nebula/files/
 
   e2e-kind:
-    name: kind end to end (controller, RBAC, network policy, artifacts, autoscaling, failure, versions, canaries)
+    name: kind end to end (controller, RBAC, network policy, artifacts, autoscaling, failure, versions, canaries, costs)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -237,6 +237,14 @@ jobs:
           python3 tests/e2e/kind/phase12_demo.py 2>&1 | tee demo.log || {
             echo "::error title=phase12_demo.py failed::$(tail -n 8 demo.log | tr '\n' ' ' | cut -c1-900)"
             echo "::error title=controller::$(kubectl -n nebula-system logs deploy/nebula-controller | grep -i rollout | tail -n 8 | tr '\n' ' ' | cut -c1-900)"
+            exit 1
+          }
+      - name: Phase 13 demo (1 000 requests reconciled to the cost report)
+        run: |
+          set -o pipefail
+          python3 tests/e2e/kind/phase13_demo.py 2>&1 | tee demo.log || {
+            echo "::error title=phase13_demo.py failed::$(tail -n 8 demo.log | tr '\n' ' ' | cut -c1-900)"
+            echo "::error title=usage ingester::$(kubectl -n nebula-system logs deploy/nebula-controller | grep -i usage | tail -n 6 | tr '\n' ' ' | cut -c1-900)"
             exit 1
           }
       - name: diagnostics on failure

@@ -154,7 +154,7 @@ spec:
         - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ $sys }}}}
           podSelector:
             matchExpressions:
-              - {key: app.kubernetes.io/name, operator: In, values: [nebula-controlplane, nebula-controller, nebula-autoscaler]}
+              - {key: app.kubernetes.io/name, operator: In, values: [nebula-controlplane, nebula-controller, nebula-autoscaler, nebula-migrate]}
       ports: [{port: 5432, protocol: TCP}]
 ---
 apiVersion: networking.k8s.io/v1
@@ -183,12 +183,14 @@ spec:
   podSelector: {matchLabels: {app.kubernetes.io/name: nebula-nats}}
   policyTypes: [Ingress]
   ingress:
-    # Workers publish heartbeats; gateways subscribe.
+    # Workers publish heartbeats; gateways subscribe and publish usage records;
+    # the controller consumes them.
     - from:
         - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ $wl }}}}
         - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ $sys }}}}
           podSelector:
-            matchLabels: {{- include "nebula.selector" "nebula-gateway" | nindent 14 }}
+            matchExpressions:
+              - {key: app.kubernetes.io/name, operator: In, values: [nebula-gateway, nebula-controller]}
       ports: [{port: 4222, protocol: TCP}]
 ---
 apiVersion: networking.k8s.io/v1

@@ -256,7 +256,10 @@ paths are org-scoped by the caller's credential; `org_id` is never a client-supp
 > abort); the controller advances them on Prometheus analysis (ADR-0038). A request's OpenAI `user`
 > field makes weighted routing sticky.
 >
-> Not yet implemented: embeddings (§2), experiments, usage, costs, nodes, rate-limit
+> Since Phase 13: `/v1/usage`, `/v1/costs` (with the assumptions behind every figure) and
+> `/v1/pricing-profiles` (immutable versions).
+>
+> Not yet implemented: embeddings (§2), experiments, nodes, rate-limit
 > policies, pricing, and the `/replicas`, `/events`, `/metrics` and `/logs` sub-resources of a
 > deployment. Session tokens are refused with `unsupported_credential`; API keys are the only
 > accepted credential until the dashboard.

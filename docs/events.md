@@ -215,7 +215,7 @@ Decisions embedded in this shape:
   would have to say so here, and the cost API could surface the distinction rather than mixing measured
   and guessed numbers (axiom A2).
 - **`outcome`** is separate from `status_code`, with values `completed`, `client_cancelled`,
-  `stream_interrupted`, `deadline_exceeded`, `queue_timeout`, `rejected`. A cancelled stream that
+  `stream_interrupted`, `deadline_exceeded`, `queue_timeout`, `rejected`, `failed`. A cancelled stream that
   produced 60 tokens is billable work and an availability non-event; one field cannot carry both facts.
 - **Partial usage is always emitted.** Client disconnect, mid-stream worker death, and deadline
   expiry all produce a record with the tokens actually generated — the compute happened.

@@ -312,6 +312,19 @@ func run() error {
 		},
 	})
 
+	// Usage records: always a log line; with NATS, also published to the usage
+	// stream the controller ingests into requests and the hourly rollups.
+	var usageSink usage.Sink = usage.LogSink{Logger: logger}
+	if cfg.NATS.URL != "" {
+		published := usage.NewJetStreamSink(cfg.NATS.URL, logger, metrics.Counter("nebula_usage_events_dropped_total"))
+		go func() {
+			if err := published.Run(ctx); err != nil && ctx.Err() == nil {
+				logger.Error("usage publisher stopped", slog.String("cause", err.Error()))
+			}
+		}()
+		usageSink = usage.Tee{usage.LogSink{Logger: logger}, published}
+	}
+
 	handler := server.New(server.Deps{
 		Config:      cfg,
 		Logger:      logger,
@@ -324,7 +337,7 @@ func run() error {
 		Metrics:     metrics,
 		Workers:     dispatch.New(dispatch.Options{}),
 		Proxy:       proxy,
-		Usage:       usage.LogSink{Logger: logger},
+		Usage:       usageSink,
 		RetryBudget: &reliability.Budget{
 			Ratio: cfg.Gateway.RetryBudgetRatio, MinPerSecond: cfg.Gateway.RetryBudgetMinPerSecond,
 			Window: 10 * time.Second,

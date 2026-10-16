@@ -207,9 +207,9 @@ as an engine measurement would be the "fake metrics" failure at small scale (see
 | `nebula_rollout_step` | gauge | `route`, `rollout` | progressive delivery position: the canary's weight, in percent |
 | `nebula_rollout_state` | gauge | `route`, `rollout`, `state` | 1 for an unfinished rollout's state (pending, progressing, paused); the series goes when it finishes |
 | `nebula_capacity_admission_total` | counter | `result` (admitted\|rejected), `reason` | placement rejections |
-| `nebula_usage_events_dropped_total` *(Phase 13)* | counter | `reason` | **must stay zero**; non-zero means cost data is incomplete |
-| `nebula_usage_ingest_lag_seconds` *(Phase 13)* | gauge | — | JetStream consumer backlog age |
-| `nebula_estimated_cost_micros_total` *(Phase 13)* | counter | `org`, `deployment` | cost rate |
+| `nebula_usage_events_dropped_total` | counter | `reason` | **must stay zero**; non-zero means cost data is incomplete |
+| `nebula_usage_ingest_lag_seconds` | gauge | — | JetStream consumer backlog age |
+| `nebula_estimated_cost_micros_total` | counter | `org`, `deployment` | cost rate |
 | `nebula_schema_version` | gauge | `service` | catches partial upgrades |
 
 ### 2.5 Cardinality budget

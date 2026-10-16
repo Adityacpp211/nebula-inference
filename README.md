@@ -19,7 +19,7 @@ for chunk in client.chat.completions.create(
 
 ---
 
-> ## Project status — Phase 12 complete
+> ## Project status — Phase 13 complete
 >
 > **Rolling updates, crashes and dependency outages under live load cost no requests.**
 > `make test-failure` keeps clients streaming while every worker is replaced, the gateway restarts,
@@ -34,8 +34,7 @@ for chunk in client.chat.completions.create(
 > bounded admission queue, metrics, traces, correlated logs and dashboards, and autoscaling — plus
 > the reliability mechanisms in [docs/reliability.md](docs/reliability.md).
 >
-> What this deliberately does NOT do yet: no scale-to-zero, no cost accounting or experiment
-> comparisons (Phase 13). Usage records are log lines until
+> What this deliberately does NOT do yet: no scale-to-zero, no CLI (Phase 14) or dashboard (Phase 15). Usage records are log lines until
 > the durable event stream.
 >
 > Model versions change as rolling updates with zero client errors, a version that cannot load fails
@@ -46,7 +45,11 @@ for chunk in client.chat.completions.create(
 > the baseline, and roll back automatically on a breach with the reason recorded
 > ([ADR-0038](docs/architecture-decisions/0038-canary-rollouts.md)).
 >
-> Next: [Phase 13](docs/roadmap.md#phase-13--cost-accounting) — cost accounting. Reliability rules:
+> Every request's usage flows through JetStream into priced request rows and hourly rollups; usage and
+> estimated cost are reported with their assumptions, and a price change never rewrites history
+> ([ADR-0039](docs/architecture-decisions/0039-usage-pipeline-and-costing.md)).
+>
+> Next: [Phase 14](docs/roadmap.md#phase-14--cli) — the CLI. Reliability rules:
 > [docs/reliability.md](docs/reliability.md). See
 > [Capability status](#capability-status).
 
@@ -344,7 +347,7 @@ checkout.
 | Retries, breakers, timeouts, graceful shutdown | ✅ **working** — `make test-failure`: 9,165 requests through rolling updates, a killed pod and four dependency outages, 3 errors (the crashed process's in-flight) | 10 |
 | Model versioning, rollback | ✅ **working** — kind demo: v1 → v2 → an unloadable v3 → rollback → v1 under load, zero client errors; the failed rollout names the worker's reason | 11 |
 | Canary rollouts, A/B testing | ✅ **working** — kind demo: a healthy canary promoted 10 → 100 with zero errors; failing and slow canaries rolled back automatically with the reason; sticky A/B by `user`; experiment comparisons with Phase 13 | 12 |
-| Token accounting, cost estimation, usage analytics | ⬜ not started | 13 |
+| Token accounting, cost estimation, usage analytics | ✅ **working** — kind demo: 1 000 requests reconciled exactly from client tokens to request rows to rollups to `/v1/costs`, with stated assumptions; history unchanged by a price change | 13 |
 | CLI | ⬜ not started | 14 |
 | Dashboard | ⬜ not started | 15 |
 | Load testing, failure testing | ⬜ not started | 16 |

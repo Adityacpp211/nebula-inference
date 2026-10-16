@@ -195,7 +195,12 @@ spec:
       containers:
         - name: nats
           image: nats:2.10-alpine
-          args: ["--port", "4222", "--http_port", "8222"]
+          # JetStream carries usage records to the controller's ingester
+          # (docs/events.md §4.1). Development storage is an emptyDir: a restarted
+          # NATS pod loses records not yet ingested, which a production NATS with a
+          # persistent volume and replicas does not.
+          args: ["--port", "4222", "--http_port", "8222", "--jetstream", "--store_dir", "/data"]
+          volumeMounts: [{name: data, mountPath: /data}]
           ports: [{containerPort: 4222}, {containerPort: 8222}]
           readinessProbe:
             httpGet: {path: /healthz, port: 8222}
@@ -204,4 +209,7 @@ spec:
             requests: {cpu: 20m, memory: 32Mi}
             limits: {memory: 128Mi}
           securityContext: {{- include "nebula.containerSecurity" . | nindent 12 }}
+      volumes:
+        - name: data
+          emptyDir: {sizeLimit: 1Gi}
 {{- end }}

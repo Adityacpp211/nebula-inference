@@ -153,6 +153,7 @@ func (a *API) routes() []Route {
 		rolloutsWrite = auth.ScopeRolloutsWrite
 		adminScope    = auth.ScopeAdmin
 		auditRead     = auth.ScopeAuditRead
+		usageRead     = auth.ScopeUsageRead
 		noScope       = auth.Scope("")
 	)
 
@@ -214,6 +215,11 @@ func (a *API) routes() []Route {
 		{Pattern: "POST /v1/deployments/{deployment_id}/transition", Scope: adminScope, handler: a.transitionDeployment},
 
 		// Routes: the public model names and their weighted targets.
+		{Pattern: "GET /v1/usage", Scope: usageRead, handler: a.getUsage},
+		{Pattern: "GET /v1/costs", Scope: usageRead, handler: a.getCosts},
+		{Pattern: "GET /v1/pricing-profiles", Scope: usageRead, handler: a.listPricingProfiles},
+		{Pattern: "POST /v1/pricing-profiles", Scope: adminScope, handler: a.createPricingProfile},
+
 		{Pattern: "GET /v1/rollouts", Scope: depsRead, handler: a.listRollouts},
 		{Pattern: "POST /v1/rollouts", Scope: rolloutsWrite, handler: a.createRollout},
 		{Pattern: "GET /v1/rollouts/{rollout_id}", Scope: depsRead, handler: a.getRollout},

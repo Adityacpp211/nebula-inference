@@ -37,6 +37,7 @@ import (
 	"github.com/adityasatwar321/nebula/services/controller/internal/rolloutctrl"
 	"github.com/adityasatwar321/nebula/services/controller/internal/run"
 	"github.com/adityasatwar321/nebula/services/controller/internal/store"
+	"github.com/adityasatwar321/nebula/services/controller/internal/usagectrl"
 )
 
 const serviceName = config.ServiceController
@@ -198,6 +199,18 @@ func runMain() error {
 			}
 		}
 	}()
+
+	// Usage ingestion: the stream's single durable consumer, on the leader only,
+	// so rollups are never recomputed by two replicas at once (docs/events.md §4.1).
+	if cfg.NATS.URL != "" {
+		ingester := &usagectrl.Ingester{URL: cfg.NATS.URL, Store: st, Logger: logger, Metrics: metrics,
+			IsLeader: ctrl.IsLeader}
+		go func() {
+			if err := ingester.Run(ctx); err != nil && ctx.Err() == nil {
+				logger.Error("usage ingester stopped", slog.String("cause", err.Error()))
+			}
+		}()
+	}
 
 	errc := make(chan error, 2)
 	go func() { errc <- srv.Run(ctx) }()

@@ -962,7 +962,61 @@ it and restores baseline weights automatically, with the reason recorded.
 
 ---
 
-## Phase 13 — Cost accounting
+## Phase 13 — Cost accounting ✅
+
+**Status: complete**, with the deviations below.
+
+**Delivered** ([ADR-0039](./architecture-decisions/0039-usage-pipeline-and-costing.md))
+
+- `packages/costing`: exact integer-micro arithmetic (rationals, rounded once, half up), versioned
+  pricing profiles, compute-time attribution (a replica's resources over its parallel slots, for the
+  request's generation time), sampling correction, and the stated assumptions.
+- Gateway: every usage record is also published to the `NEBULA_USAGE` JetStream WorkQueue, with the
+  event id as the message id (2-minute de-duplication), from a bounded buffer that sheds into
+  `nebula_usage_events_dropped_total` rather than block or lose silently.
+- Controller usage ingester, on the leader: the stream's single durable consumer; each batch is
+  priced, stored in `requests` idempotently, its hourly `usage_records` rebuilt from the rows, and
+  acknowledged only after it commits. `nebula_usage_ingest_lag_seconds`,
+  `nebula_estimated_cost_micros_total{org,deployment}`.
+- Control plane: `GET /v1/usage` and `GET /v1/costs` (grouped by deployment, API key, hour or not
+  at all; costs with their assumptions and the profile versions used), `GET`/`POST
+  /v1/pricing-profiles` (each create is the next immutable version).
+- Migration 000013 (a request may be `failed`); `nebula-migrate up` keeps three months of
+  `requests` and `audit_logs` partitions ahead, run by every migrate init container and a daily
+  CronJob; JetStream on the development NATS.
+
+**Tests.** Golden costs — known inputs to exact micros, half-up rounding at the boundary, GPUs,
+markup, 1 000 one-second requests summing to exactly 12 000 µ, a historical cost unchanged under a
+new version; sampling correction. Store, as `nebula_controller`: pricing, storage and rollup; a
+redelivered batch changes nothing; a later price change leaves history, and a mid-hour one prices
+only the later requests; a record from before the organization's profile falls back to the default.
+Ingester against embedded JetStream: records stored and acknowledged, an unreadable one removed and
+counted, a failed batch redelivered, only the leader ingests. Gateway sink: one message per record,
+a redelivered record de-duplicated, a full buffer shed and counted, records held through an outage.
+Control plane: pricing versions, usage grouping and totals, costs with assumptions, refusals.
+`tests/e2e/kind/phase13_demo.py`: **1 000 requests reconciled exactly** — the client's 5 000 prompt
+and 8 000 completion tokens equal the new request rows; rows, rollups, `/v1/usage` and `/v1/costs`
+agree on every count and on the cost (1 032 µ); after a price change the first requests still cost
+1 032 µ, the 50 after it cost 199 µ under v2, and the rebuilt rollups hold exactly 1 231 µ.
+
+Building it found two defects, now fixed: a version effective partway through an hour would have
+priced that hour's later requests inconsistently with the rollup's recorded profile (pricing is now
+per request, by the instant it ran); and a record older than the organization's first version would
+have failed its whole batch forever (it now falls back to the global default).
+
+**Exit:** met — 1 000 requests reconcile from the client's counts to the request rows to the
+rollups to the reported cost, and the cost report explains its assumptions. `nebula costs` arrives
+with the CLI in Phase 14.
+
+**Deviations** (ADR-0039).
+
+- The usage record does not yet carry a denormalised `resource_profile`; the ingester reads the
+  deployment's resources at ingestion.
+- No local-file spool behind the gateway's buffer: its root filesystem is read-only. Loss beyond the
+  buffer is shed and counted.
+- Development NATS keeps JetStream on an emptyDir.
+
+**Original plan**
 
 **Deliverables**
 

@@ -53,6 +53,7 @@ type Store struct {
 	Deployments   *DeploymentRepo
 	Routes        *RouteRepo
 	Rollouts      *RolloutRepo
+	Usage         *UsageRepo
 	Policies      *RoutingPolicyRepo
 	Audit         *AuditRepo
 }
@@ -71,6 +72,7 @@ func New(pool *db.Pool) *Store {
 		Deployments:   &DeploymentRepo{},
 		Routes:        &RouteRepo{},
 		Rollouts:      &RolloutRepo{},
+		Usage:         &UsageRepo{},
 		Policies:      &RoutingPolicyRepo{},
 		Audit:         &AuditRepo{},
 	}

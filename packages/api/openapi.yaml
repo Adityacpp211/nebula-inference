@@ -61,6 +61,8 @@ tags:
     description: Deployment records and the deployment state machine.
   - name: routing
     description: Routes (public model names), their weighted targets, and routing policies.
+  - name: usage
+    description: Usage and estimated cost from the hourly rollups, and the pricing profiles they are priced by.
   - name: rollouts
     description: Canary rollouts. The control plane starts them and applies an operator's verbs; the controller moves the weights.
   - name: audit
@@ -1037,6 +1039,102 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /v1/usage:
+    get:
+      tags: [usage]
+      operationId: getUsage
+      summary: Requests, errors, tokens and compute from the hourly rollups.
+      description: |
+        Read from usage_records, which the controller's usage ingester recomputes from
+        the stored requests. The newest hour is still filling; sampled counts are
+        scaled back by their sample rate.
+      parameters:
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+          description: Start, widened to its hour. Default 24 hours before `to`.
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+          description: End, widened to the end of its hour. Default the end of the current hour.
+        - name: group_by
+          in: query
+          schema: { type: string, enum: [deployment, api_key, hour, none], default: deployment }
+      responses:
+        "200":
+          description: Usage in the range.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Usage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /v1/costs:
+    get:
+      tags: [usage]
+      operationId: getCosts
+      summary: Estimated cost in the range, with the assumptions behind it.
+      description: |
+        Integer micros of the pricing profile's currency. Every response states its
+        assumptions and the pricing profile versions it was computed under; a price
+        change never alters a cost already computed.
+      parameters:
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+          description: Start, widened to its hour. Default 24 hours before `to`.
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+          description: End, widened to the end of its hour. Default the end of the current hour.
+        - name: group_by
+          in: query
+          schema: { type: string, enum: [deployment, api_key, hour, none], default: deployment }
+      responses:
+        "200":
+          description: Costs in the range.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Costs" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /v1/pricing-profiles:
+    get:
+      tags: [usage]
+      operationId: listPricingProfiles
+      summary: Pricing profiles visible to the organization, every version.
+      responses:
+        "200":
+          description: Profiles, newest version first per name; in_use marks the family the organization is priced by.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/PricingProfile" }
+    post:
+      tags: [usage]
+      operationId: createPricingProfile
+      summary: Add the next version of a pricing profile.
+      description: |
+        Versions are immutable: a price change is a new version, effective from
+        effective_from (default now), applied from the first full hour after it.
+        With use (default true) the organization is priced by this profile.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreatePricingProfile" }
+      responses:
+        "201":
+          description: The new version.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PricingProfile" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   /v1/rollouts:
     get:
@@ -2394,6 +2492,75 @@ components:
           type: array
           items: { $ref: "#/components/schemas/AutoscalingSignal" }
         created_at: { type: string, format: date-time }
+
+    UsageRow:
+      type: object
+      required: [requests, errors, prompt_tokens, completion_tokens, compute_seconds, estimated_cost_micros]
+      properties:
+        deployment_id: { type: string, format: uuid }
+        deployment: { type: string }
+        api_key_id: { type: string, format: uuid }
+        hour: { type: string, format: date-time }
+        requests: { type: integer, format: int64 }
+        errors: { type: integer, format: int64 }
+        prompt_tokens: { type: integer, format: int64 }
+        completion_tokens: { type: integer, format: int64 }
+        compute_seconds: { type: number }
+        estimated_cost_micros: { type: integer, format: int64 }
+
+    Usage:
+      type: object
+      required: [from, to, group_by, data, totals, note]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        group_by: { type: string }
+        data: { type: array, items: { $ref: "#/components/schemas/UsageRow" } }
+        totals: { $ref: "#/components/schemas/UsageRow" }
+        note: { type: string }
+
+    Costs:
+      type: object
+      required: [from, to, currency, total_micros, data, pricing_profiles, assumptions]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        currency: { type: string }
+        total_micros: { type: integer, format: int64 }
+        data: { type: array, items: { $ref: "#/components/schemas/UsageRow" } }
+        pricing_profiles: { type: array, items: { $ref: "#/components/schemas/PricingProfile" } }
+        assumptions: { type: array, items: { type: string } }
+
+    PricingProfile:
+      type: object
+      required: [id, name, version, currency, cpu_core_hour_micros, memory_gib_hour_micros, gpu_hour_micros,
+                 markup_basis_points, effective_from, created_at, in_use]
+      properties:
+        id: { type: string, format: uuid }
+        org_id: { type: [string, "null"], format: uuid, description: Null for a global profile. }
+        name: { type: string }
+        version: { type: integer, format: int32 }
+        currency: { type: string }
+        cpu_core_hour_micros: { type: integer, format: int64 }
+        memory_gib_hour_micros: { type: integer, format: int64 }
+        gpu_hour_micros: { type: object, additionalProperties: { type: integer, format: int64 } }
+        markup_basis_points: { type: integer, format: int32 }
+        effective_from: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        in_use: { type: boolean }
+
+    CreatePricingProfile:
+      type: object
+      required: [name, cpu_core_hour_micros, memory_gib_hour_micros]
+      properties:
+        name: { type: string }
+        currency: { type: string, default: USD }
+        cpu_core_hour_micros: { type: integer, format: int64, minimum: 0 }
+        memory_gib_hour_micros: { type: integer, format: int64, minimum: 0 }
+        gpu_hour_micros: { type: object, additionalProperties: { type: integer, format: int64, minimum: 0 } }
+        markup_basis_points: { type: integer, format: int32, minimum: 0 }
+        effective_from: { type: string, format: date-time }
+        use: { type: boolean, default: true }
 
     RolloutState:
       type: string
