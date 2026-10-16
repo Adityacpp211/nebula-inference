@@ -68,9 +68,9 @@ var (
 var Catalog = []Def{
 	// §2.1 request path (gateway)
 	{Name: "nebula_requests_total", Kind: KindCounter, Help: "Inference requests, by outcome.",
-		Labels: []string{"route", "deployment", "model_version", "endpoint", "status_class", "error_class", "variant"}},
+		Labels: []string{"route", "deployment", "deployment_id", "model_version", "endpoint", "status_class", "error_class", "variant"}},
 	{Name: "nebula_request_duration_seconds", Kind: KindHistogram, Help: "Inference request duration.",
-		Labels: []string{"route", "deployment", "endpoint", "streamed"}, Buckets: latencyBuckets},
+		Labels: []string{"route", "deployment", "deployment_id", "endpoint", "streamed"}, Buckets: latencyBuckets},
 	{Name: "nebula_ttft_seconds", Kind: KindHistogram, Help: "Time to first token, as the worker measured it.",
 		Labels: []string{"route", "deployment", "model_version"}, Buckets: ttftBuckets},
 	{Name: "nebula_tokens_total", Kind: KindCounter, Help: "Tokens, as the runtime counted them.",
@@ -127,6 +127,10 @@ var Catalog = []Def{
 		Labels: []string{"deployment", "direction", "decision"}},
 	{Name: "nebula_autoscale_signal_ratio", Kind: KindGauge, Help: "Each signal's observed/target ratio at the last decision.",
 		Labels: []string{"deployment", "signal"}},
+	{Name: "nebula_rollout_step", Kind: KindGauge, Help: "A rollout's canary weight, in percent.",
+		Labels: []string{"route", "rollout"}},
+	{Name: "nebula_rollout_state", Kind: KindGauge, Help: "1 for an unfinished rollout's current state.",
+		Labels: []string{"route", "rollout", "state"}},
 	{Name: "nebula_capacity_admission_total", Kind: KindCounter, Help: "Capacity admission decisions.",
 		Labels: []string{"result", "reason"}},
 	{Name: "nebula_schema_version", Kind: KindGauge, Help: "The schema version this service expects.",

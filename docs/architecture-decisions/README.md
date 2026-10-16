@@ -52,6 +52,7 @@ Status values: `Proposed` · `Accepted` · `Rejected` · `Superseded` · `Deprec
 | [0035](./0035-observability-wiring.md) | Observability wiring: a declared catalogue, OTLP/HTTP, a separate metrics port | Accepted | 8 |
 | [0036](./0036-autoscaler-writes-desired-state.md) | The autoscaler writes desired state in PostgreSQL, reads Prometheus, and holds when blind | Accepted | 9 |
 | [0037](./0037-version-changes-are-rolling-updates.md) | A version change is a rolling update: two versions serve, and a failed load is named | Accepted | 11 |
+| [0038](./0038-canary-rollouts.md) | Canary rollouts: the controller moves weights, Prometheus judges, a breach wins | Accepted | 12 |
 | 0036+ | reserved — written in the phase that makes the decision | — | — |
 
 ADRs 0001, 0003, 0004, 0005, 0006, 0025 and 0027 have full files because their reasoning is long and they are the

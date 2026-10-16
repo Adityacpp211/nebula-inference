@@ -10,18 +10,15 @@ package signals
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
-	"net/url"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/adityasatwar321/nebula/packages/autoscale"
+	"github.com/adityasatwar321/nebula/packages/promquery"
 )
 
 // Signal names, as they appear in autoscaling_events.signals and in the
@@ -55,7 +52,11 @@ type Prometheus struct {
 
 // Queries are exported for the documentation and the tests.
 func (p *Prometheus) Queries() map[string]string {
-	w := promDuration(p.Window)
+	window := p.Window
+	if window <= 0 {
+		window = time.Minute
+	}
+	w := promquery.Duration(window, 0)
 	return map[string]string{
 		"worker_load":    `sum by (deployment_id) (nebula_worker_in_flight{deployment_id!=""} + nebula_worker_queue_depth{deployment_id!=""})`,
 		"gateway_queued": `sum by (deployment_id) (nebula_queue_depth{deployment_id!=""})`,
@@ -86,61 +87,18 @@ func (p *Prometheus) Read(ctx context.Context) Reading {
 	return r
 }
 
-type apiResponse struct {
-	Status    string `json:"status"`
-	ErrorType string `json:"errorType"`
-	Error     string `json:"error"`
-	Data      struct {
-		ResultType string `json:"resultType"`
-		Result     []struct {
-			Metric map[string]string `json:"metric"`
-			Value  [2]any            `json:"value"`
-		} `json:"result"`
-	} `json:"data"`
-}
-
-// query runs one instant query and returns its finite values by deployment_id.
-// NaN (a quantile over no requests) and Inf are dropped: they are absences.
+// query runs one instant query and returns its values by deployment_id. Series
+// without a parseable id are dropped, as promquery drops non-finite values.
 func (p *Prometheus) query(ctx context.Context, q string) (map[uuid.UUID]float64, error) {
-	u := strings.TrimRight(p.BaseURL, "/") + "/api/v1/query?query=" + url.QueryEscape(q)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, http.NoBody)
+	raw, err := (&promquery.Client{BaseURL: p.BaseURL, HTTP: p.Client}).Vector(ctx, q, "deployment_id")
 	if err != nil {
 		return nil, err
 	}
-	client := p.Client
-	if client == nil {
-		client = http.DefaultClient
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	var body apiResponse
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, fmt.Errorf("decoding the response (HTTP %d): %w", resp.StatusCode, err)
-	}
-	if body.Status != "success" {
-		return nil, fmt.Errorf("prometheus: %s: %s", body.ErrorType, body.Error)
-	}
-	if body.Data.ResultType != "vector" {
-		return nil, fmt.Errorf("prometheus: want a vector, got %q", body.Data.ResultType)
-	}
-	out := make(map[uuid.UUID]float64, len(body.Data.Result))
-	for _, s := range body.Data.Result {
-		id, err := uuid.Parse(s.Metric["deployment_id"])
-		if err != nil {
-			continue
+	out := make(map[uuid.UUID]float64, len(raw))
+	for k, v := range raw {
+		if id, err := uuid.Parse(k); err == nil {
+			out[id] = v
 		}
-		raw, ok := s.Value[1].(string)
-		if !ok {
-			continue
-		}
-		v, err := strconv.ParseFloat(raw, 64)
-		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
-			continue
-		}
-		out[id] = v
 	}
 	return out, nil
 }
@@ -176,12 +134,4 @@ func For(r Reading, id uuid.UUID, current int32, s autoscale.Settings) []autosca
 		wait.Stale = false
 	}
 	return []autoscale.Signal{conc, wait}
-}
-
-// promDuration renders a duration in PromQL's syntax.
-func promDuration(d time.Duration) string {
-	if d <= 0 {
-		d = time.Minute
-	}
-	return strconv.Itoa(int(d.Seconds())) + "s"
 }

@@ -487,3 +487,38 @@ func TestStaticEndpointsArePinnedToTheirVersion(t *testing.T) {
 		t.Fatalf("a static endpoint serving another version must be excluded: %v", err)
 	}
 }
+
+// Sticky bucketing: the same key lands on the same arm of a weighted split on
+// every gateway replica and after a restart — here, two independent routers — and
+// different keys spread across both arms by weight.
+func TestStickyBucketingAcrossReplicas(t *testing.T) {
+	t.Parallel()
+	c := &clock{t: time.Unix(1_800_000_000, 0)}
+	ra, rt := newRouter(t, c, false)
+	rb, _ := newRouter(t, c, false)
+	for _, r := range []*router.Router{ra, rb} {
+		r.SetEndpoints(depA, pods("a", 2, true))
+		r.SetEndpoints(depB, pods("b", 2, true))
+	}
+	arms := map[string]int{}
+	for i := range 400 {
+		key := fmt.Sprintf("user:org:%d", i)
+		first := ""
+		for _, r := range []*router.Router{ra, rb, ra} {
+			sel, err := r.Select(rt, router.Request{Key: key})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first == "" {
+				first = sel.Target.Deployment
+			} else if sel.Target.Deployment != first {
+				t.Fatalf("key %s moved from %s to %s", key, first, sel.Target.Deployment)
+			}
+			sel.Done(router.Succeeded)
+		}
+		arms[first]++
+	}
+	if arms["a"] < 150 || arms["b"] < 150 {
+		t.Errorf("a 50/50 split bucketed %v", arms)
+	}
+}

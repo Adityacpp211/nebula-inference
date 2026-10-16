@@ -110,8 +110,8 @@ nobody notices until an incident.
 
 | Metric | Type | Labels | Purpose |
 |--------|------|--------|---------|
-| `nebula_requests_total` | counter | `route`, `deployment`, `model_version`, `endpoint`, `status_class`, `error_class`, `variant` | RED: rate and errors |
-| `nebula_request_duration_seconds` | histogram | `route`, `deployment`, `endpoint`, `streamed` | latency p50/p95/p99 |
+| `nebula_requests_total` | counter | `route`, `deployment`, `deployment_id`, `model_version`, `endpoint`, `status_class`, `error_class`, `variant` | RED: rate and errors |
+| `nebula_request_duration_seconds` | histogram | `route`, `deployment`, `deployment_id`, `endpoint`, `streamed` | latency p50/p95/p99 |
 | `nebula_ttft_seconds` | histogram | `route`, `deployment`, `model_version` | **the metric users feel**; separate from total duration because total duration is dominated by output length |
 | `nebula_tokens_total` | counter | `direction` (prompt\|completion), `deployment`, `model_version` | throughput and billing cross-check |
 | `nebula_tokens_per_second` | histogram | `deployment`, `model_version` | decode throughput per request |
@@ -204,7 +204,8 @@ as an engine measurement would be the "fake metrics" failure at small scale (see
 | `nebula_deployment_state` | gauge | `deployment`, `state` | fleet health |
 | `nebula_autoscale_decisions_total` | counter | `deployment`, `direction`, `decision` | includes `suppressed_*`, which is what makes non-action diagnosable |
 | `nebula_autoscale_signal_ratio` | gauge | `deployment`, `signal` | why it scaled |
-| `nebula_rollout_step` / `nebula_rollout_state` *(Phase 12)* | gauge | `route`, `rollout` | progressive delivery position |
+| `nebula_rollout_step` | gauge | `route`, `rollout` | progressive delivery position: the canary's weight, in percent |
+| `nebula_rollout_state` | gauge | `route`, `rollout`, `state` | 1 for an unfinished rollout's state (pending, progressing, paused); the series goes when it finishes |
 | `nebula_capacity_admission_total` | counter | `result` (admitted\|rejected), `reason` | placement rejections |
 | `nebula_usage_events_dropped_total` *(Phase 13)* | counter | `reason` | **must stay zero**; non-zero means cost data is incomplete |
 | `nebula_usage_ingest_lag_seconds` *(Phase 13)* | gauge | — | JetStream consumer backlog age |

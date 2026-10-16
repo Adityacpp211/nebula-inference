@@ -149,9 +149,11 @@ func (a *API) routes() []Route {
 		modelsWrite = auth.ScopeModelsWrite
 		depsRead    = auth.ScopeDeploymentsRead
 		depsWrite   = auth.ScopeDeploymentsWrite
-		adminScope  = auth.ScopeAdmin
-		auditRead   = auth.ScopeAuditRead
-		noScope     = auth.Scope("")
+		// rollouts:write moves live traffic, so it is its own grant (docs/api.md §1).
+		rolloutsWrite = auth.ScopeRolloutsWrite
+		adminScope    = auth.ScopeAdmin
+		auditRead     = auth.ScopeAuditRead
+		noScope       = auth.Scope("")
 	)
 
 	return build([]Route{
@@ -212,6 +214,14 @@ func (a *API) routes() []Route {
 		{Pattern: "POST /v1/deployments/{deployment_id}/transition", Scope: adminScope, handler: a.transitionDeployment},
 
 		// Routes: the public model names and their weighted targets.
+		{Pattern: "GET /v1/rollouts", Scope: depsRead, handler: a.listRollouts},
+		{Pattern: "POST /v1/rollouts", Scope: rolloutsWrite, handler: a.createRollout},
+		{Pattern: "GET /v1/rollouts/{rollout_id}", Scope: depsRead, handler: a.getRollout},
+		{Pattern: "POST /v1/rollouts/{rollout_id}/pause", Scope: rolloutsWrite, handler: a.pauseRollout},
+		{Pattern: "POST /v1/rollouts/{rollout_id}/resume", Scope: rolloutsWrite, handler: a.resumeRollout},
+		{Pattern: "POST /v1/rollouts/{rollout_id}/promote", Scope: rolloutsWrite, handler: a.promoteRollout},
+		{Pattern: "POST /v1/rollouts/{rollout_id}/abort", Scope: rolloutsWrite, handler: a.abortRollout},
+
 		{Pattern: "GET /v1/routes", Scope: depsRead, handler: a.listRoutes},
 		{Pattern: "POST /v1/routes", Scope: depsWrite, handler: a.createRoute},
 		{Pattern: "GET /v1/routes/{route_id}", Scope: depsRead, handler: a.getRoute},

@@ -1,9 +1,6 @@
 {{- if .Values.autoscaler.enabled }}
 {{- $name := "nebula-autoscaler" }}
-{{- $prom := .Values.autoscaler.prometheusURL }}
-{{- if and (not $prom) .Values.observability.enabled }}
-{{- $prom = printf "http://prometheus.%s.svc:9090" .Values.observability.namespace }}
-{{- end }}
+{{- $prom := include "nebula.prometheusURL" . }}
 {{- if not $prom }}
 {{- fail "autoscaler.prometheusURL is required unless observability.enabled is true (or set autoscaler.enabled=false to run without autoscaling)" }}
 {{- end }}

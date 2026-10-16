@@ -186,9 +186,9 @@ func TestRequestRecordsMetrics(t *testing.T) {
 	h.metrics.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", http.NoBody))
 	text := rec.Body.String()
 	for _, want := range []string{
-		`nebula_requests_total{deployment="tiny-a",endpoint="chat.completions",error_class="",model_version="tiny:v1",route="tiny",status_class="2xx",variant="baseline"} 1`,
-		`nebula_requests_total{deployment="",endpoint="chat.completions",error_class="not_found_error",model_version="",route="",status_class="4xx",variant=""} 1`,
-		`nebula_request_duration_seconds_count{deployment="tiny-a",endpoint="chat.completions",route="tiny",streamed="false"} 1`,
+		`nebula_requests_total{deployment="tiny-a",deployment_id="0192f3c1-0000-7000-8000-00000000000a",endpoint="chat.completions",error_class="",model_version="tiny:v1",route="tiny",status_class="2xx",variant="baseline"} 1`,
+		`nebula_requests_total{deployment="",deployment_id="",endpoint="chat.completions",error_class="not_found_error",model_version="",route="",status_class="4xx",variant=""} 1`,
+		`nebula_request_duration_seconds_count{deployment="tiny-a",deployment_id="0192f3c1-0000-7000-8000-00000000000a",endpoint="chat.completions",route="tiny",streamed="false"} 1`,
 		`nebula_tokens_total{deployment="tiny-a",direction="completion",model_version="tiny:v1"} 2`,
 		`nebula_route_decisions_total{outcome="selected",route="tiny",strategy="least_loaded"} 1`,
 		`nebula_request_attempts_total{deployment="tiny-a",outcome="succeeded"} 1`,

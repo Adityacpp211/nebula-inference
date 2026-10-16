@@ -61,6 +61,8 @@ tags:
     description: Deployment records and the deployment state machine.
   - name: routing
     description: Routes (public model names), their weighted targets, and routing policies.
+  - name: rollouts
+    description: Canary rollouts. The control plane starts them and applies an operator's verbs; the controller moves the weights.
   - name: audit
     description: The append-only record of every change.
   - name: meta
@@ -1035,6 +1037,165 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /v1/rollouts:
+    get:
+      tags: [rollouts]
+      operationId: listRollouts
+      summary: Canary rollouts, newest first.
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+        - name: state
+          in: query
+          schema: { $ref: "#/components/schemas/RolloutState" }
+      responses:
+        "200":
+          description: A page of rollouts.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Rollout" }
+    post:
+      tags: [rollouts]
+      operationId: createRollout
+      summary: Start a canary on a route.
+      description: |
+        The route must send every request to one deployment (its baseline). The canary
+        joins the route at weight 0 and the controller moves it through the steps,
+        holding each and comparing both arms' error rate and p95 latency before it
+        advances; a breach puts every request back on the baseline, with the reason on
+        the rollout. One active rollout per route, enforced by the database.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateRollout" }
+      responses:
+        "201":
+          description: The rollout, pending; the controller starts it within seconds.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rollout" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /v1/rollouts/{rollout_id}:
+    parameters:
+      - name: rollout_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [rollouts]
+      operationId: getRollout
+      summary: A rollout, with its step, the canary's weight and the last analysis.
+      responses:
+        "200":
+          description: The rollout.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rollout" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/rollouts/{rollout_id}/pause:
+    parameters:
+      - name: rollout_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [rollouts]
+      operationId: pauseRollout
+      summary: Hold the canary at its current weight.
+      description: |
+        From pending or progressing. Weights stay where they are until resumed, promoted or aborted.
+      responses:
+        "200":
+          description: The rollout after the change.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rollout" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/rollouts/{rollout_id}/resume:
+    parameters:
+      - name: rollout_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [rollouts]
+      operationId: resumeRollout
+      summary: Continue a paused rollout.
+      description: |
+        Starts a fresh hold window: observations from before the pause say nothing about the step now.
+      responses:
+        "200":
+          description: The rollout after the change.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rollout" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/rollouts/{rollout_id}/promote:
+    parameters:
+      - name: rollout_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [rollouts]
+      operationId: promoteRollout
+      summary: "Skip the remaining steps: the canary serves every request."
+      description: |
+        The canary becomes the route's baseline.
+      responses:
+        "200":
+          description: The rollout after the change.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rollout" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/rollouts/{rollout_id}/abort:
+    parameters:
+      - name: rollout_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [rollouts]
+      operationId: abortRollout
+      summary: Put every request back on the baseline.
+      description: |
+        The reason, if given, is recorded with the rollout.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        "200":
+          description: The rollout after the change.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rollout" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   /v1/routes:
     get:
@@ -2232,6 +2393,64 @@ components:
         signals:
           type: array
           items: { $ref: "#/components/schemas/AutoscalingSignal" }
+        created_at: { type: string, format: date-time }
+
+    RolloutState:
+      type: string
+      enum: [pending, progressing, paused, promoted, aborted, rolled_back, failed]
+
+    RolloutAnalysis:
+      type: object
+      additionalProperties: false
+      properties:
+        hold_s: { type: integer, minimum: 10, maximum: 86400, default: 120 }
+        min_requests: { type: integer, minimum: 1, default: 100 }
+        max_error_rate_increase:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0.01
+          description: How far the canary's error rate may exceed the baseline's, as a fraction (0.01 is one point).
+        max_p95_ratio: { type: number, minimum: 1, default: 1.2 }
+        on_insufficient_data: { type: string, enum: [extend, pause, fail], default: extend }
+        max_extensions: { type: integer, minimum: 0, maximum: 100, default: 3 }
+
+    CreateRollout:
+      type: object
+      description: The route by id or model name, and the canary by id or name.
+      properties:
+        route_id: { type: string, format: uuid }
+        route: { type: string }
+        canary_deployment_id: { type: string, format: uuid }
+        canary_deployment: { type: string }
+        steps:
+          type: array
+          items: { type: integer, minimum: 1, maximum: 100 }
+          description: Canary weights, strictly increasing, ending at 100. Default [10, 25, 50, 100].
+        analysis: { $ref: "#/components/schemas/RolloutAnalysis" }
+
+    Rollout:
+      type: object
+      required: [id, route_id, baseline_deployment_id, canary_deployment_id, steps, current_step, canary_weight,
+                 analysis, state, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        route_id: { type: string, format: uuid }
+        baseline_deployment_id: { type: string, format: uuid }
+        canary_deployment_id: { type: string, format: uuid }
+        steps: { type: array, items: { type: integer } }
+        current_step: { type: integer, format: int32 }
+        canary_weight: { type: integer, format: int32, minimum: 0, maximum: 100 }
+        analysis: { $ref: "#/components/schemas/RolloutAnalysis" }
+        state: { $ref: "#/components/schemas/RolloutState" }
+        last_analysis:
+          type: [object, "null"]
+          description: The last verdict — outcome, reason, both arms' observations and each check.
+          additionalProperties: true
+        abort_reason: { type: [string, "null"] }
+        started_at: { type: [string, "null"], format: date-time }
+        step_entered_at: { type: [string, "null"], format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
         created_at: { type: string, format: date-time }
 
     DeploymentLifecycle:

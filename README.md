@@ -19,7 +19,7 @@ for chunk in client.chat.completions.create(
 
 ---
 
-> ## Project status — Phase 11 complete
+> ## Project status — Phase 12 complete
 >
 > **Rolling updates, crashes and dependency outages under live load cost no requests.**
 > `make test-failure` keeps clients streaming while every worker is replaced, the gateway restarts,
@@ -34,16 +34,20 @@ for chunk in client.chat.completions.create(
 > bounded admission queue, metrics, traces, correlated logs and dashboards, and autoscaling — plus
 > the reliability mechanisms in [docs/reliability.md](docs/reliability.md).
 >
-> What this deliberately does NOT do yet: no scale-to-zero, no canaries (Phase 12) or cost
-> accounting (Phase 13). Usage records are log lines until
+> What this deliberately does NOT do yet: no scale-to-zero, no cost accounting or experiment
+> comparisons (Phase 13). Usage records are log lines until
 > the durable event stream.
 >
 > Model versions change as rolling updates with zero client errors, a version that cannot load fails
 > its rollout with the worker's own reason while the old version keeps serving, and rollback is a new
 > revision ([ADR-0037](docs/architecture-decisions/0037-version-changes-are-rolling-updates.md)).
 >
-> Next: [Phase 12](docs/roadmap.md#phase-12--canary-deployments-and-ab-testing) — canary deployments
-> and A/B testing. Reliability rules: [docs/reliability.md](docs/reliability.md). See
+> Canary rollouts step a new deployment's weight 10 → 25 → 50 → 100 on its error rate and p95 against
+> the baseline, and roll back automatically on a breach with the reason recorded
+> ([ADR-0038](docs/architecture-decisions/0038-canary-rollouts.md)).
+>
+> Next: [Phase 13](docs/roadmap.md#phase-13--cost-accounting) — cost accounting. Reliability rules:
+> [docs/reliability.md](docs/reliability.md). See
 > [Capability status](#capability-status).
 
 ## Running it today
@@ -339,7 +343,7 @@ checkout.
 | Autoscaling | ✅ **working** — kind demo: 1 → 4 replicas under load, back to 1 after the idle window, every decision a row; gateway CPU HPA opt-in | 9 |
 | Retries, breakers, timeouts, graceful shutdown | ✅ **working** — `make test-failure`: 9,165 requests through rolling updates, a killed pod and four dependency outages, 3 errors (the crashed process's in-flight) | 10 |
 | Model versioning, rollback | ✅ **working** — kind demo: v1 → v2 → an unloadable v3 → rollback → v1 under load, zero client errors; the failed rollout names the worker's reason | 11 |
-| Canary rollouts, A/B testing | ⬜ not started | 12 |
+| Canary rollouts, A/B testing | ✅ **working** — kind demo: a healthy canary promoted 10 → 100 with zero errors; failing and slow canaries rolled back automatically with the reason; sticky A/B by `user`; experiment comparisons with Phase 13 | 12 |
 | Token accounting, cost estimation, usage analytics | ⬜ not started | 13 |
 | CLI | ⬜ not started | 14 |
 | Dashboard | ⬜ not started | 15 |

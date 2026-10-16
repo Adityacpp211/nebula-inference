@@ -193,7 +193,7 @@ func (g *Gateway) prepare(w http.ResponseWriter, r *http.Request, kind openai.Ki
 	// being charged to the caller's limits.
 	requestID := telemetry.RequestID(ctx)
 	placement := router.Request{
-		Key:             requestID,
+		Key:             bucketKey(req, ident.OrgID.String(), requestID),
 		Pin:             req.Nebula.DeploymentID,
 		RequiredContext: (len(prompt)+openai.MaxBytesPerToken-1)/openai.MaxBytesPerToken + *req.MaxTokens,
 		Exclude:         map[string]bool{},
@@ -884,6 +884,19 @@ func (g *Gateway) queueError(w http.ResponseWriter, r *http.Request, err error) 
 			Code: "client_cancelled", Message: "the client closed the request"}
 	}
 	return httpx.ErrInternal(err)
+}
+
+// bucketKey decides which weighted target a request lands on. With the OpenAI
+// "user" field it is sticky: the same end user always gets the same arm of an A/B
+// split or a canary, on every gateway replica and across restarts, because the
+// bucket is a hash of the key and nothing else (docs/architecture.md §7.3).
+// Scoped to the organization, so two tenants' identically named users are not
+// bucketed together. Without it, each request is bucketed on its own.
+func bucketKey(req *openai.Request, org, requestID string) string {
+	if req.User != "" {
+		return "user:" + org + ":" + req.User
+	}
+	return requestID
 }
 
 // assertedVersion is the model version the gateway asserts to the worker, which

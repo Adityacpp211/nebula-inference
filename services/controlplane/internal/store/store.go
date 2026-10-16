@@ -52,6 +52,7 @@ type Store struct {
 	Versions      *ModelVersionRepo
 	Deployments   *DeploymentRepo
 	Routes        *RouteRepo
+	Rollouts      *RolloutRepo
 	Policies      *RoutingPolicyRepo
 	Audit         *AuditRepo
 }
@@ -69,6 +70,7 @@ func New(pool *db.Pool) *Store {
 		Versions:      &ModelVersionRepo{},
 		Deployments:   &DeploymentRepo{},
 		Routes:        &RouteRepo{},
+		Rollouts:      &RolloutRepo{},
 		Policies:      &RoutingPolicyRepo{},
 		Audit:         &AuditRepo{},
 	}
@@ -218,6 +220,8 @@ func constraintDescription(name string) string {
 		return "a route with that model name already exists in this organization"
 	case "uq_route_targets__route_dep":
 		return "a deployment may appear only once in a route"
+	case "uq_canary_rollouts__one_active_per_route":
+		return "the route already has a rollout in progress: finish, abort or promote it first"
 	case "uq_route_targets__one_baseline":
 		return "a route may have only one baseline target"
 	case "ck_routes__model_name_format":

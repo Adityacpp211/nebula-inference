@@ -99,3 +99,13 @@ development server, else none (no heartbeats). */}}
 nats://nats.{{ .Values.namespaces.data }}:4222
 {{- end -}}
 {{- end -}}
+
+{{/* Where services that decide from metrics read Prometheus: the configured URL,
+else the in-cluster one when the observability stack is installed, else nothing. */}}
+{{- define "nebula.prometheusURL" -}}
+{{- if .Values.autoscaler.prometheusURL -}}
+{{ .Values.autoscaler.prometheusURL }}
+{{- else if .Values.observability.enabled -}}
+http://prometheus.{{ .Values.observability.namespace }}.svc:9090
+{{- end -}}
+{{- end -}}

@@ -895,7 +895,55 @@ trail.
 
 ---
 
-## Phase 12 — Canary deployments and A/B testing
+## Phase 12 — Canary deployments and A/B testing ✅
+
+**Status: complete**, with the deviations below.
+
+**Delivered** ([ADR-0038](./architecture-decisions/0038-canary-rollouts.md))
+
+- `packages/rollout`: steps (strictly increasing, ending at 100), analysis settings with defaults
+  (hold 120 s, 100 requests, error rate within one point, p95 within ×1.2, `extend` up to three
+  windows), and the per-arm verdict — pass, breach with a reason, or insufficient data. A breach is
+  judged before sufficiency.
+- The controller's rollout reconciler, on the leader: starts pending rollouts, holds each step,
+  analyses both arms from Prometheus by `deployment_id`, advances, promotes (the canary becomes the
+  route's baseline) or rolls back with the reason; `extend` / `pause` / `fail` on insufficient data;
+  metrics it cannot read are never a pass. Every move is a compare-and-set with the route's weights
+  and an audit row in one transaction. Exports `nebula_rollout_step` and `nebula_rollout_state`.
+- Control plane `/v1/rollouts`: start (by route and canary, id or name), list, read, pause, resume,
+  promote, abort; one active rollout per route by the database's unique index (`409 rollout_active`).
+- Gateway: `deployment_id` on the request metrics, and sticky bucketing on the OpenAI `user` field.
+
+**Tests.** Rollout package: steps, analysis defaults and refusals, a healthy pass, error-rate and
+latency breaches, a breach judged before sufficiency, insufficient data, an unknown p95 neither a
+breach nor unserialisable. Reconciler on a fake clock: 10 → 25 → 50 → 100 with each step held,
+error-rate and latency rollbacks, `extend` then pause, `pause`, `fail` restoring the baseline, blind
+never healthy, an operator's change winning, the gauges following the rollout. Controller store as
+`nebula_controller`: weights, state and audit move together; a stale compare-and-set changes
+nothing; promotion swaps the baseline. Control plane: the lifecycle through the API and every
+refusal. Router: a key stays on one arm across two independent routers.
+`tests/e2e/kind/phase12_demo.py` under continuous load: a healthy canary walked 10 → 25 → 50 → 100
+and was promoted in 102 s with **3,766 requests and zero errors**; a second rollout on the route was
+refused while one was active; a canary failing every generation was rolled back 40 s after it
+started (`canary error rate 100.00% exceeds the baseline's 0.00% + 1.00 pp`) having failed 10 of 1,186
+requests at 10%, and no request failed after the rollback; a canary six times slower was rolled back
+on `canary p95 2425 ms exceeds the baseline's 247 ms × 1.20`; the audit trail held all eleven moves.
+
+Building it found a defect, now fixed: promotion swapped the route's baseline flag in one statement,
+which a row-by-row unique index can refuse depending on row order; the swap now clears the old flag
+first.
+
+**Exit:** met — a canary walks 10 → 25 → 50 → 100 on healthy metrics; an injected error rate on the
+canary aborts it and restores baseline weights automatically, with the reason recorded.
+
+**Deviations.**
+
+- Experiments' comparison read model (per-arm metrics with bootstrap intervals) needs per-request
+  records, which arrive with the durable usage stream in Phase 13; it is built there. Fixed-weight
+  A/B splits with sticky bucketing work now through `/v1/routes`.
+- The CLI and dashboard surfaces arrive with the CLI (Phase 14) and the dashboard (Phase 15).
+
+**Original plan**
 
 **Deliverables**
 

@@ -123,7 +123,7 @@ func TestUndeclaredMetricPanics(t *testing.T) {
 func TestHandlerServesDeclaredMetricsWithExemplars(t *testing.T) {
 	t.Parallel()
 	m := telemetry.NewMetrics()
-	m.Counter("nebula_requests_total").WithLabelValues("r", "d", "v", "chat", "2xx", "", "").Inc()
+	m.Counter("nebula_requests_total").WithLabelValues("r", "d", "", "v", "chat", "2xx", "", "").Inc()
 	telemetry.Observe(m.Histogram("nebula_ttft_seconds").WithLabelValues("r", "d", "v"), 0.12,
 		"4bf92f3577b34da6a3ce929d0e0e4736")
 	m.GaugeFunc("nebula_endpoints", func() []telemetry.Sample {
@@ -137,7 +137,7 @@ func TestHandlerServesDeclaredMetricsWithExemplars(t *testing.T) {
 	body, _ := io.ReadAll(rec.Body)
 	text := string(body)
 	for _, want := range []string{
-		`nebula_requests_total{deployment="d",endpoint="chat"`,
+		`nebula_requests_total{deployment="d",deployment_id="",endpoint="chat"`,
 		`nebula_endpoints{deployment="d",state="ready"} 2`,
 		`trace_id="4bf92f3577b34da6a3ce929d0e0e4736"`,
 		"go_goroutines",

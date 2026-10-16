@@ -313,7 +313,7 @@ dev-up:
 dev-down:
 	@./scripts/dev-down.sh
 
-## e2e-kind: the Phase 5, 6, 8, 9 and 11 demos against the kind cluster dev-up created
+## e2e-kind: the Phase 5, 6, 8, 9, 11 and 12 demos against the kind cluster dev-up created
 .PHONY: e2e-kind
 e2e-kind:
 	@$(PY) tests/e2e/kind/phase5_demo.py
@@ -321,6 +321,7 @@ e2e-kind:
 	@$(PY) tests/e2e/kind/phase8_demo.py
 	@$(PY) tests/e2e/kind/phase9_demo.py
 	@$(PY) tests/e2e/kind/phase11_demo.py
+	@$(PY) tests/e2e/kind/phase12_demo.py
 
 ## test-failure: rolling updates, a killed pod and dependency outages under live load (kind)
 .PHONY: test-failure

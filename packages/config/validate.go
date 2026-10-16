@@ -187,6 +187,12 @@ func (c *Config) Validate() error {
 		v.AddIf(k.ResyncInterval.Duration() < time.Second, "NEBULA_KUBE_RESYNC_INTERVAL", "must be at least 1s")
 		v.AddIf(k.PollInterval.Duration() <= 0, "NEBULA_KUBE_POLL_INTERVAL", "must be positive")
 		v.AddIf(k.StartingTimeout.Duration() < time.Minute, "NEBULA_KUBE_STARTING_TIMEOUT", "must be at least 1m")
+		v.AddIf(k.RolloutInterval.Duration() < time.Second, "NEBULA_ROLLOUT_INTERVAL", "must be at least 1s")
+		if k.RolloutPrometheusURL != "" {
+			if u, err := url.Parse(k.RolloutPrometheusURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				v.Add("NEBULA_ROLLOUT_PROMETHEUS_URL", "must be an absolute http:// or https:// URL (got %q)", k.RolloutPrometheusURL)
+			}
+		}
 		for name, img := range map[string]string{
 			"NEBULA_KUBE_WORKER_IMAGE": k.WorkerImage, "NEBULA_KUBE_MOCK_WORKER_IMAGE": k.MockWorkerImage,
 			"NEBULA_KUBE_PULLER_IMAGE": k.PullerImage,

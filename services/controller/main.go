@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -29,9 +30,11 @@ import (
 	"github.com/adityasatwar321/nebula/packages/db/migrate"
 	"github.com/adityasatwar321/nebula/packages/httpx"
 	"github.com/adityasatwar321/nebula/packages/k8s"
+	"github.com/adityasatwar321/nebula/packages/promquery"
 	"github.com/adityasatwar321/nebula/packages/telemetry"
 	"github.com/adityasatwar321/nebula/packages/version"
 	"github.com/adityasatwar321/nebula/services/controller/internal/deploymentctrl"
+	"github.com/adityasatwar321/nebula/services/controller/internal/rolloutctrl"
 	"github.com/adityasatwar321/nebula/services/controller/internal/run"
 	"github.com/adityasatwar321/nebula/services/controller/internal/store"
 )
@@ -172,6 +175,29 @@ func runMain() error {
 	mux := probes.Handler()
 	srv := httpx.NewServer(httpx.ServerOptions{Config: cfg.HTTP, Handler: mux, Logger: logger, Drainer: probes})
 	probes.MarkReady()
+
+	// Canary rollouts advance on the leader only: two reconcilers would each read
+	// the other's step change as an operator's and stand down, which is safe but
+	// pointless (docs/architecture.md §7.3).
+	rollouts := &rolloutctrl.Reconciler{Store: st, Logger: logger, Metrics: metrics, Analyzer: &rolloutctrl.Prometheus{
+		Client: &promquery.Client{BaseURL: cfg.Kube.RolloutPrometheusURL, HTTP: &http.Client{Timeout: 5 * time.Second}}}}
+	go func() {
+		t := time.NewTicker(cfg.Kube.RolloutInterval.Duration())
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if !ctrl.IsLeader() {
+					continue
+				}
+				if err := rollouts.Tick(ctx); err != nil && ctx.Err() == nil {
+					logger.WarnContext(ctx, "rollouts not advanced: cannot list them", slog.String("cause", err.Error()))
+				}
+			}
+		}
+	}()
 
 	errc := make(chan error, 2)
 	go func() { errc <- srv.Run(ctx) }()

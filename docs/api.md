@@ -252,7 +252,11 @@ paths are org-scoped by the caller's credential; `org_id` is never a client-supp
 > (`409 in_use`) until the route stops targeting it. The `route` shortcut on `POST /v1/deployments`
 > shown below is not implemented; create the route separately.
 >
-> Not yet implemented: embeddings (§2), rollouts and experiments, usage, costs, nodes, rate-limit
+> Since Phase 12: canary rollouts (`/v1/rollouts`: start, list, read, pause, resume, promote,
+> abort); the controller advances them on Prometheus analysis (ADR-0038). A request's OpenAI `user`
+> field makes weighted routing sticky.
+>
+> Not yet implemented: embeddings (§2), experiments, usage, costs, nodes, rate-limit
 > policies, pricing, and the `/replicas`, `/events`, `/metrics` and `/logs` sub-resources of a
 > deployment. Session tokens are refused with `unsupported_credential`; API keys are the only
 > accepted credential until the dashboard.

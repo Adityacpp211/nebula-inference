@@ -114,9 +114,12 @@ func breakerValue(s interface{ String() string }) int {
 // record is already the single, complete account of what happened.
 func (m *gwMetrics) finished(rec *usage.Record, streamed bool) {
 	errClass := rec.ErrorClass
-	m.requests.WithLabelValues(rec.Route, rec.Deployment, rec.ModelVersion, rec.Endpoint,
+	// deployment_id identifies a rollout's arm unambiguously: a name is unique only
+	// within an organization (docs/architecture.md §7.3).
+	depID := deploymentID(rec.DeploymentID)
+	m.requests.WithLabelValues(rec.Route, rec.Deployment, depID, rec.ModelVersion, rec.Endpoint,
 		telemetry.StatusClass(rec.StatusCode), errClass, rec.Variant).Inc()
-	telemetry.Observe(m.duration.WithLabelValues(rec.Route, rec.Deployment, rec.Endpoint, strconv.FormatBool(streamed)),
+	telemetry.Observe(m.duration.WithLabelValues(rec.Route, rec.Deployment, depID, rec.Endpoint, strconv.FormatBool(streamed)),
 		float64(rec.DurationMS)/1000, rec.TraceID)
 	if rec.TTFT != nil {
 		telemetry.Observe(m.ttft.WithLabelValues(rec.Route, rec.Deployment, rec.ModelVersion),
@@ -142,7 +145,7 @@ func (m *gwMetrics) refused(route, endpoint string, err error) {
 	if errors.As(err, &apiErr) {
 		status, class = apiErr.Status, string(apiErr.Type)
 	}
-	m.requests.WithLabelValues(route, "", "", endpoint, telemetry.StatusClass(status), class, "").Inc()
+	m.requests.WithLabelValues(route, "", "", "", endpoint, telemetry.StatusClass(status), class, "").Inc()
 }
 
 func (m *gwMetrics) decision(route, strategy, outcome string) {

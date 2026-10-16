@@ -139,6 +139,12 @@ spec:
               value: {{ .Release.Namespace | quote }}
             - name: NEBULA_KUBE_STARTING_TIMEOUT
               value: {{ .Values.controller.startingTimeout | quote }}
+            {{- with include "nebula.prometheusURL" . }}
+            # Canary analysis reads each arm's request metrics here; without it no
+            # rollout advances (docs/architecture.md §7.3).
+            - name: NEBULA_ROLLOUT_PROMETHEUS_URL
+              value: {{ . | quote }}
+            {{- end }}
             {{- with include "nebula.natsURL" . }}
             # Passed to worker pods, which publish heartbeats there.
             - name: NEBULA_NATS_URL

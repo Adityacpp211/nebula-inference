@@ -363,6 +363,12 @@ type KubeConfig struct {
 	ImagePullPolicy string `json:"image_pull_policy" yaml:"image_pull_policy" env:"NEBULA_KUBE_IMAGE_PULL_POLICY" default:"IfNotPresent"`
 	// ArtifactCacheHostPath is the node-local, content-addressed model cache.
 	ArtifactCacheHostPath string `json:"artifact_cache_host_path" yaml:"artifact_cache_host_path" env:"NEBULA_KUBE_ARTIFACT_CACHE_HOST_PATH" default:"/var/lib/nebula/models"`
+	// RolloutPrometheusURL is where the rollout reconciler reads each arm's request
+	// metrics. Empty means rollouts cannot be analysed: every step is insufficient
+	// data, and a rollout never advances blind (docs/architecture.md §7.3).
+	RolloutPrometheusURL string `json:"rollout_prometheus_url" yaml:"rollout_prometheus_url" env:"NEBULA_ROLLOUT_PROMETHEUS_URL"`
+	// RolloutInterval is how often active rollouts are advanced.
+	RolloutInterval Duration `json:"rollout_interval" yaml:"rollout_interval" env:"NEBULA_ROLLOUT_INTERVAL" default:"5s"`
 	// ArtifactSecretName holds the store credentials the puller reads. The
 	// controller references it by name and never reads it (it holds no secrets
 	// permission, docs/deployment-architecture.md §3).

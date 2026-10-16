@@ -69,6 +69,12 @@ const (
 	ActionRouteCreate = "route.create"
 	ActionRouteUpdate = "route.update"
 	ActionRouteDelete = "route.delete"
+
+	ActionRolloutCreate  = "rollout.create"
+	ActionRolloutPause   = "rollout.pause"
+	ActionRolloutResume  = "rollout.resume"
+	ActionRolloutPromote = "rollout.promote"
+	ActionRolloutAbort   = "rollout.abort"
 )
 
 // Audit resource types.
@@ -80,6 +86,7 @@ const (
 	ResourceModelVersion = "model_version"
 	ResourceDeployment   = "deployment"
 	ResourceRoute        = "route"
+	ResourceRollout      = "rollout"
 )
 
 // Entry is one audit record.

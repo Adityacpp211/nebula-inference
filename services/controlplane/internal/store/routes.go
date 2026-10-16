@@ -98,6 +98,12 @@ func (r *RouteRepo) Get(ctx context.Context, q Querier, orgID, id uuid.UUID) (*m
 	return scanRoute(q.QueryRow(ctx, `SELECT `+routeColumns+` FROM routes WHERE id = $1 AND org_id = $2`, id, orgID))
 }
 
+// GetByName returns an org's route by its model name.
+func (r *RouteRepo) GetByName(ctx context.Context, q Querier, orgID uuid.UUID, name string) (*models.Route, error) {
+	return scanRoute(q.QueryRow(ctx, `SELECT `+routeColumns+` FROM routes WHERE model_name = $1 AND org_id = $2`,
+		name, orgID))
+}
+
 // List pages through an org's routes, newest first.
 func (r *RouteRepo) List(ctx context.Context, q Querier, orgID uuid.UUID, p Page) ([]*models.Route, error) {
 	rows, err := q.Query(ctx, `SELECT `+routeColumns+`
