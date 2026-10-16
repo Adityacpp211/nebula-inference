@@ -203,6 +203,10 @@ const (
 	ReasonDrained               Reason = "Drained"
 	ReasonStopFailed            Reason = "StopFailed"
 	ReasonQuotaExceeded         Reason = "QuotaExceeded"
+	// ReasonPartiallyReady: starting, some replicas ready and some not yet.
+	ReasonPartiallyReady Reason = "ReplicasPartiallyReady"
+	// ReasonStartTimeout: no replica became ready within the start budget.
+	ReasonStartTimeout Reason = "StartTimeout"
 )
 
 // Reasons returns every reason, for validation and documentation.
@@ -213,7 +217,7 @@ func Reasons() []Reason {
 		ReasonRolledBack, ReasonInsufficientCapacity, ReasonApplyFailed,
 		ReasonModelLoadFailed, ReasonArtifactChecksumError, ReasonAllReplicasLost,
 		ReasonStopRequested, ReasonStartRequested, ReasonDrained, ReasonStopFailed,
-		ReasonQuotaExceeded,
+		ReasonQuotaExceeded, ReasonPartiallyReady, ReasonStartTimeout,
 	}
 }
 

@@ -34,7 +34,7 @@ nebula/
 ├── services/
 │   ├── gateway/                    # data plane
 │   │   ├── main.go
-│   │   └── internal/{server,middleware,openai,stream,dispatch,adminproxy,routerstate}/
+│   │   └── internal/{server,openai,routes,credentials,ratelimit,dispatch,adminproxy,controlplane,usage}/
 │   ├── controlplane/               # admin API; only writer of PostgreSQL
 │   │   ├── main.go
 │   │   └── internal/{server,handlers,registry,deployments,routes,rollouts,keys,usage,audit}/

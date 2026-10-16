@@ -454,3 +454,34 @@ func TestCheckTimeoutIsEnforced(t *testing.T) {
 		t.Fatal("readyz did not return within 2s; the check timeout is not being enforced")
 	}
 }
+
+// A slow non-critical dependency must not slow readiness: kubelet probes time out
+// in about a second, and a timed-out probe counts as unready. Found on kind, where
+// an unreachable artifact store took the control plane out of service.
+func TestReadyzDoesNotWaitForNonCriticalChecks(t *testing.T) {
+	t.Parallel()
+
+	p := newProbes(t)
+	p.Register(telemetry.CheckFunc{
+		CheckName:  "slow-optional",
+		IsCritical: false,
+		Fn: func(ctx context.Context) error {
+			<-ctx.Done() // blocks until the check timeout, like an unreachable host
+			return ctx.Err()
+		},
+	})
+	p.MarkReady()
+
+	start := time.Now()
+	rec := get(t, p.Handler(), telemetry.PathReadyz)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("readyz = %d", rec.Code)
+	}
+	if took := time.Since(start); took > 200*time.Millisecond {
+		t.Errorf("readyz took %s: it waited for a non-critical check", took)
+	}
+	// /healthz still reports it, for operators.
+	if body := get(t, p.Handler(), telemetry.PathHealthz).Body.String(); !strings.Contains(body, "slow-optional") {
+		t.Errorf("healthz must still report the non-critical check: %s", body)
+	}
+}

@@ -1,8 +1,8 @@
 # Local development dependencies.
 #
-# Phase 1 needs PostgreSQL and nothing else. Redis and NATS are added by the
-# phases that first use them (Phase 4 and Phase 6 respectively) rather than
-# running here unused, because a dependency nobody exercises is a dependency
+# PostgreSQL since Phase 1; Redis since Phase 4, for the gateway's rate limiter
+# and credential cache. NATS is added by Phase 6, the phase that first uses it,
+# rather than running here unused: a dependency nobody exercises is a dependency
 # nobody notices breaking.
 #
 # Credentials here are deliberately well known. Config validation refuses them
@@ -49,6 +49,23 @@ services:
       # Log slow statements so a bad query is visible during development.
       - -c
       - log_min_duration_statement=200
+
+  redis:
+    image: redis:7-alpine
+    container_name: nebula-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    # Everything NEBULA keeps in Redis is transient and rebuildable
+    # (docs/architecture.md §3.2), so persistence is off: a restart that loses the
+    # rate-limit buckets and the credential cache loses nothing that matters.
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb",
+              "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
 volumes:
   postgres-data:

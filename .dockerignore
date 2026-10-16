@@ -1,0 +1,13 @@
+# Keep build contexts small and free of local state: nothing here is needed by any
+# image, and a virtualenv or a cache in the context is both slow and a leak risk.
+.git
+.venv
+.cache
+bin
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+coverage.*
+*.gguf
+tests/load/results

@@ -3,12 +3,15 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/google/uuid"
 
+	"github.com/adityasatwar321/nebula/packages/artifact"
 	"github.com/adityasatwar321/nebula/packages/auth"
 	"github.com/adityasatwar321/nebula/packages/db"
 	"github.com/adityasatwar321/nebula/packages/db/models"
@@ -256,11 +259,19 @@ func (a *API) createVersion(w http.ResponseWriter, r *http.Request) error {
 	if err := a.requireRuntimeAvailable(models.Runtime(req.Runtime), models.ModelFormat(req.Format)); err != nil {
 		return err
 	}
-	if err := requireArtifactURI(req.ArtifactURI, !a.Config.Env.IsProduction()); err != nil {
-		return err
-	}
 	checksum, err := requireChecksum(deref(req.ChecksumSHA256), "checksum_sha256")
 	if err != nil {
+		return err
+	}
+	// With an artifact store, the registry mints the content-addressed location
+	// and issues an upload target; the client does not choose where weights live.
+	// A client may still register an external artifact_uri, which keeps the
+	// declared-checksum behaviour and says so at finalize.
+	minted := false
+	if req.ArtifactURI == "" && a.Artifacts != nil {
+		req.ArtifactURI = a.Artifacts.URI(artifact.KeyFor(hexString(checksum)))
+		minted = true
+	} else if err := requireArtifactURI(req.ArtifactURI, !a.Config.Env.IsProduction()); err != nil {
 		return err
 	}
 	if req.SizeBytes == nil || *req.SizeBytes <= 0 {
@@ -320,13 +331,34 @@ func (a *API) createVersion(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	a.write(w, r, http.StatusCreated, createdVersionResponse{
-		versionResponse: newVersionResponse(v),
-		Upload:          nil,
-		Note: "upload is null because object storage arrives in Phase 3: the version is registered " +
-			"against the artifact_uri you supplied, and no presigned upload target was issued. " +
-			"Call POST /v1/model-versions/" + v.ID.String() + "/finalize once the artifact is in place.",
-	})
+	resp := createdVersionResponse{versionResponse: newVersionResponse(v)}
+	finalize := "POST /v1/model-versions/" + v.ID.String() + "/finalize"
+	switch {
+	case !minted:
+		resp.Note = "registered against the artifact_uri you supplied, which is outside this installation's " +
+			"artifact store: no upload target was issued, and finalize can only compare declared checksums. " +
+			"Call " + finalize + " once the artifact is in place."
+	default:
+		up, err := a.Artifacts.PresignPut(r.Context(), artifact.KeyFor(hexString(checksum)),
+			a.Config.Artifact.PresignTTL.Duration())
+		switch {
+		case err == nil:
+			resp.Upload = &uploadTarget{Method: up.Method, URL: up.URL, Headers: up.Headers,
+				ExpiresAt: up.ExpiresAt, MaxBytes: up.MaxBytes}
+			resp.Note = "PUT the artifact bytes to upload.url, then call " + finalize +
+				". Finalize reads the stored bytes and computes their SHA-256; the version becomes ready only if it matches."
+		case errors.Is(err, artifact.ErrPresignUnsupported):
+			resp.Note = "this installation's artifact store cannot issue upload URLs; place the file at " +
+				v.ArtifactURI + " out of band, then call " + finalize + "."
+		default:
+			// The version exists; only the upload target failed. Say so rather than
+			// failing a request whose write committed.
+			a.logger(r).WarnContext(r.Context(), "presigning an upload failed", slog.String("cause", err.Error()))
+			resp.Note = "the version was registered, but the artifact store could not issue an upload target " +
+				"just now; ask the operator to check the store, or place the file at " + v.ArtifactURI + " out of band"
+		}
+	}
+	a.write(w, r, http.StatusCreated, resp)
 	return nil
 }
 
@@ -344,19 +376,22 @@ func (a *API) getVersion(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// finalizeVersion moves a version from uploading to ready.
+// finalizeVersion ends the upload phase of a version.
 //
-// What actually happens, stated plainly because the difference matters: the
-// control plane compares the checksum the client declared at creation with the one
-// it presents now. It does NOT hash the artifact bytes — that is the artifact
-// service's job in Phase 3, and this endpoint is the transition it will call. The
-// response says which verification was performed, and the audit record stores it,
-// so a version that became ready without its bytes being read is identifiable
-// afterwards rather than indistinguishable from a verified one (axiom A6).
+// Two paths, and the response says which one ran, because the difference matters:
 //
-// Both transitions (uploading -> verifying -> ready) happen in one transaction: a
-// version stuck in verifying with nothing running to move it would need manual
-// repair, which is a worse outcome than a single atomic step.
+//   - The artifact is in this installation's store (the registry minted its URI):
+//     the version moves to verifying and the call returns 202. The verifier reads
+//     every stored byte, computes the SHA-256, and moves the version to ready or to
+//     failed with the computed value in failure_reason (verification: computed).
+//   - The artifact_uri is external: the control plane can only compare the checksum
+//     declared at creation with the one presented now, and says so
+//     (verification: declared_checksum), so a version that became ready without its
+//     bytes being read stays identifiable (axiom A6).
+//
+// Either way a presented checksum that disagrees with the declared one fails the
+// version at once: a mismatch is terminal, and leaving it retryable would let a
+// caller keep guessing.
 func (a *API) finalizeVersion(w http.ResponseWriter, r *http.Request) error {
 	ident := auth.MustFromContext(r.Context())
 	id, err := pathUUID(r, "version_id", "model version")
@@ -375,6 +410,7 @@ func (a *API) finalizeVersion(w http.ResponseWriter, r *http.Request) error {
 
 	var out *models.ModelVersion
 	var mismatch *httpx.APIError
+	var verifying bool
 
 	err = a.inTx(r, func(ctx context.Context, q store.Querier) error {
 		before, err := a.Store.Versions.Get(ctx, q, ident.OrgID, id)
@@ -407,6 +443,52 @@ func (a *API) finalizeVersion(w http.ResponseWriter, r *http.Request) error {
 			}
 			mismatch = unprocessable(reason, "checksum_mismatch", "checksum_sha256")
 			return nil
+		}
+
+		if key, ok := a.storeKey(before.ArtifactURI); ok {
+			// The artifact is in this installation's store: the bytes will be read.
+			// Refuse to start verification of something that was never uploaded —
+			// the version stays uploading, so the client can finish the upload.
+			info, err := a.Artifacts.Stat(ctx, key)
+			if errors.Is(err, artifact.ErrNotFound) {
+				return conflict("the artifact has not been uploaded yet: PUT it to the upload target first",
+					"artifact_not_uploaded")
+			}
+			if err != nil {
+				return httpx.ErrServiceUnavailable("the artifact store is unreachable; retry shortly",
+					"artifact_store_unavailable").WithInternal(err)
+			}
+			if info.Size != before.SizeBytes {
+				reason := fmt.Sprintf("size mismatch: declared %d bytes at creation, the store holds %d",
+					before.SizeBytes, info.Size)
+				if err := a.Store.Versions.SetStatus(ctx, q, ident.OrgID, id,
+					models.VersionUploading, models.VersionFailed, &reason); err != nil {
+					return storeError(err, "model version")
+				}
+				entry := auditFor(r, store.ActionModelVersionFail, store.ResourceModelVersion)
+				entry.ResourceID = &id
+				entry.Before = newVersionResponse(before)
+				entry.After = map[string]any{"status": string(models.VersionFailed), "failure_reason": reason}
+				if err := a.Store.Audit.AppendFromContext(ctx, q, entry); err != nil {
+					return err
+				}
+				mismatch = unprocessable(reason, "size_mismatch", "size_bytes")
+				return nil
+			}
+			if err := a.Store.Versions.SetStatus(ctx, q, ident.OrgID, id,
+				models.VersionUploading, models.VersionVerifying, nil); err != nil {
+				return storeError(err, "model version")
+			}
+			after, err := a.Store.Versions.Get(ctx, q, ident.OrgID, id)
+			if err != nil {
+				return storeError(err, "model version")
+			}
+			out, verifying = after, true
+			entry := auditFor(r, store.ActionModelVersionFinalize, store.ResourceModelVersion)
+			entry.ResourceID = &id
+			entry.Before = newVersionResponse(before)
+			entry.After = map[string]any{"status": string(after.Status), "verification": "pending"}
+			return a.Store.Audit.AppendFromContext(ctx, q, entry)
 		}
 
 		if err := a.Store.Versions.SetStatus(ctx, q, ident.OrgID, id,
@@ -442,6 +524,21 @@ func (a *API) finalizeVersion(w http.ResponseWriter, r *http.Request) error {
 	if mismatch != nil {
 		return mismatch
 	}
+	if verifying {
+		a.Verifier.Kick()
+		a.write(w, r, http.StatusAccepted, struct {
+			versionResponse
+			Verification string `json:"verification"`
+			Note         string `json:"note"`
+		}{
+			versionResponse: newVersionResponse(out),
+			Verification:    "pending",
+			Note: "the control plane is reading the stored artifact and computing its SHA-256. Poll " +
+				"GET /v1/model-versions/" + out.ID.String() + ": status becomes ready when the bytes match, " +
+				"or failed with the computed checksum in failure_reason when they do not.",
+		})
+		return nil
+	}
 
 	a.write(w, r, http.StatusOK, struct {
 		versionResponse
@@ -451,14 +548,14 @@ func (a *API) finalizeVersion(w http.ResponseWriter, r *http.Request) error {
 		versionResponse: newVersionResponse(out),
 		Verification:    verificationDeclared,
 		Note: "the control plane compared the checksum declared at creation with the one presented " +
-			"here; it did not read the artifact bytes. Byte-level verification is performed by the " +
-			"artifact service in Phase 3.",
+			"here; it did not read the artifact bytes, because the artifact_uri is outside this " +
+			"installation's artifact store. Register without artifact_uri to have the bytes verified.",
 	})
 	return nil
 }
 
-// verificationDeclared names the weakest verification the registry will record. A
-// stronger one ("computed") is what Phase 3 writes.
+// verificationDeclared names the weakest verification the registry records; the
+// verifier records verificationComputed.
 const verificationDeclared = "declared_checksum"
 
 // failVersion records that a version could not be made ready.

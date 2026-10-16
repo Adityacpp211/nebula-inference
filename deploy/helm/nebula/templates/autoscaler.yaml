@@ -1,0 +1,77 @@
+{{- if .Values.autoscaler.enabled }}
+{{- $name := "nebula-autoscaler" }}
+{{- $prom := include "nebula.prometheusURL" . }}
+{{- if not $prom }}
+{{- fail "autoscaler.prometheusURL is required unless observability.enabled is true (or set autoscaler.enabled=false to run without autoscaling)" }}
+{{- end }}
+# The autoscaler has no Kubernetes permissions at all: it changes the desired
+# replica count in PostgreSQL and the controller reconciles it (docs/architecture.md
+# §4.4). Its ServiceAccount exists only so it does not run as "default", and it
+# mounts no token.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nebula.labels" . | nindent 4 }}
+    {{- include "nebula.selector" $name | nindent 4 }}
+spec:
+  # One replica decides at a time, chosen by a PostgreSQL advisory lock; a second
+  # is a warm standby. 0 disables autoscaling without touching anything else.
+  replicas: {{ .Values.autoscaler.replicas }}
+  selector:
+    matchLabels: {{- include "nebula.selector" $name | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nebula.labels" . | nindent 8 }}
+        {{- include "nebula.selector" $name | nindent 8 }}
+      annotations:
+        checksum/secrets: {{ include (print $.Template.BasePath "/namespaces-secrets.yaml") . | sha256sum }}
+        {{- include "nebula.scrapeAnnotations" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: false
+      securityContext: {{- include "nebula.podSecurity" . | nindent 8 }}
+      {{- if .Values.data.enabled }}
+      # Like the control plane and the controller: the schema this build expects is
+      # applied before it starts, rather than crash-looping until another pod does it.
+      initContainers:
+        - name: migrate
+          image: {{ include "nebula.image" (dict "root" . "name" "migrate") }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args: ["up"]
+          env:
+            - name: NEBULA_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: nebula-secrets, key: NEBULA_DATABASE_URL}}
+          securityContext: {{- include "nebula.containerSecurity" . | nindent 12 }}
+      {{- end }}
+      containers:
+        - name: autoscaler
+          image: {{ include "nebula.image" (dict "root" . "name" "autoscaler") }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          ports: [{name: http, containerPort: 8084}, {name: metrics, containerPort: {{ .Values.telemetry.metricsPort }}}]
+          env:
+            {{- include "nebula.commonEnv" . | nindent 12 }}
+            - name: NEBULA_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: nebula-secrets, key: NEBULA_CONTROLLER_DATABASE_URL}}
+            # desired_replicas and autoscaling_events, nothing else (migration 000007).
+            - name: NEBULA_DATABASE_ROLE
+              value: nebula_controller
+            - name: NEBULA_AUTOSCALER_PROMETHEUS_URL
+              value: {{ $prom | quote }}
+            - name: NEBULA_AUTOSCALER_INTERVAL
+              value: {{ .Values.autoscaler.interval | quote }}
+          {{- include "nebula.probes" . | nindent 10 }}
+          resources: {{- toYaml .Values.autoscaler.resources | nindent 12 }}
+          securityContext: {{- include "nebula.containerSecurity" . | nindent 12 }}
+{{- end }}

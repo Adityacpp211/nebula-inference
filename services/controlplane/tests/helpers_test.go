@@ -32,6 +32,7 @@ import (
 	"github.com/adityasatwar321/nebula/packages/db/models"
 	"github.com/adityasatwar321/nebula/packages/telemetry"
 	"github.com/adityasatwar321/nebula/packages/testsupport/dbtest"
+	"github.com/adityasatwar321/nebula/packages/testsupport/netx"
 	"github.com/adityasatwar321/nebula/packages/version"
 	cpapi "github.com/adityasatwar321/nebula/services/controlplane/internal/api"
 	"github.com/adityasatwar321/nebula/services/controlplane/internal/server"
@@ -67,10 +68,16 @@ func newFixture(t *testing.T) *fixture {
 // newFixtureOn builds a fixture over an existing pool, so two tenants can share a
 // database and tenant isolation can actually be tested.
 func newFixtureOn(t *testing.T, pool *pgxpool.Pool) *fixture {
+	return newFixtureWith(t, pool, nil)
+}
+
+// newFixtureWith builds a fixture with extra configuration, keyed by environment
+// variable name.
+func newFixtureWith(t *testing.T, pool *pgxpool.Pool, extra map[string]string) *fixture {
 	t.Helper()
 	ctx := dbtest.Context(t)
 
-	cfg := testConfig(t)
+	cfg := testConfigWith(t, extra)
 	st := store.New(pool)
 
 	api, err := cpapi.New(cfg, telemetry.Discard(), st)
@@ -87,22 +94,26 @@ func newFixtureOn(t *testing.T, pool *pgxpool.Pool) *fixture {
 		Probes: newProbes(cfg),
 		API:    api,
 	})
-	f.Server = httptest.NewServer(handler)
-	t.Cleanup(f.Server.Close)
+	f.Server = netx.NewServer(t, handler)
 
 	return f
 }
 
-func testConfig(t *testing.T) *config.Config {
+func testConfigWith(t *testing.T, extra map[string]string) *config.Config {
 	t.Helper()
 	cfg, err := config.Loader{
 		Service: "nebula-controlplane",
 		Getenv: func(k string) string {
+			if v, ok := extra[k]; ok {
+				return v
+			}
 			switch k {
 			case "NEBULA_DATABASE_URL":
 				return dbtest.BaseURL()
 			case "NEBULA_AUTH_KEY_PEPPER":
 				return testPepper
+			case "NEBULA_INTERNAL_AUTH_SECRET":
+				return testInternalSecret
 			case "NEBULA_DEV_MOCK_RUNTIME":
 				// The registry refuses mock artifacts unless the stub is enabled, and
 				// these tests register mock artifacts, so the tests must enable it

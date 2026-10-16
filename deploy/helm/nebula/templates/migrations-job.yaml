@@ -1,0 +1,51 @@
+{{- if not .Values.data.enabled }}
+# With an external database the schema is migrated before any pod of the new
+# release starts: a pre-install and pre-upgrade hook that must succeed. (With
+# in-cluster data there is no database at pre-install time; the control plane and
+# controller migrate in an init container instead.)
+#
+# The Secret is a hook too, created first (weight -1): the release's own Secret
+# does not exist yet at pre-install, and a credential in the Job's spec would be
+# readable by anyone who can read Jobs.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nebula-migrate-db
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-1"
+    helm.sh/hook-delete-policy: before-hook-creation
+type: Opaque
+stringData:
+  NEBULA_DATABASE_URL: {{ required "secrets.databaseURL is required" .Values.secrets.databaseURL | quote }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nebula-migrate-{{ .Release.Revision }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext: {{- include "nebula.podSecurity" . | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "nebula.image" (dict "root" . "name" "migrate") }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args: ["up"]
+          env:
+            - name: NEBULA_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: nebula-migrate-db, key: NEBULA_DATABASE_URL}}
+          securityContext: {{- include "nebula.containerSecurity" . | nindent 12 }}
+{{- end }}

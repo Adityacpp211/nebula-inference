@@ -30,6 +30,11 @@ type Loader struct {
 	ReadFile func(string) ([]byte, error)
 	// Output receives flag parse errors and -help. Defaults to os.Stderr.
 	Output io.Writer
+	// Defaults overrides code defaults for this binary, keyed by environment
+	// variable name, e.g. {"NEBULA_HTTP_ADDR": ":8080"}. Lowest precedence after the
+	// struct tags, so a file, the environment or a flag still wins. It exists because
+	// two services sharing one struct cannot share one listen port.
+	Defaults map[string]string
 }
 
 // ErrHelpRequested is returned when -help was passed, so the caller can exit 0
@@ -54,6 +59,11 @@ func (l Loader) Load() (*Config, error) {
 	cfg := &Config{service: l.Service}
 	if err := applyDefaults(cfg); err != nil {
 		return nil, fmt.Errorf("applying defaults: %w", err)
+	}
+	if len(l.Defaults) > 0 {
+		if err := applyEnv(cfg, func(k string) string { return l.Defaults[k] }); err != nil {
+			return nil, fmt.Errorf("applying service defaults: %w", err)
+		}
 	}
 
 	// Layer 2: file. Its path may come from a flag or the environment, so the

@@ -107,7 +107,6 @@ linters:
     goconst:
       min-len: 4
       min-occurrences: 4
-      ignore-tests: true
 
   exclusions:
     generated: lax

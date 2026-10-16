@@ -83,9 +83,12 @@ func TestSpecMatchesMountedRoutes(t *testing.T) {
 
 	documented := map[string]bool{}
 	for path, ops := range s.Paths {
-		for method := range ops {
+		for method, node := range ops {
 			if !httpMethods[strings.ToLower(method)] {
 				continue // "parameters", "summary" and friends
+			}
+			if servedBy(node) != "" {
+				continue // served by another service; its own test checks it
 			}
 			documented[strings.ToUpper(method)+" "+path] = true
 		}
@@ -147,6 +150,30 @@ func TestSpecPathParametersMatchPatterns(t *testing.T) {
 				t.Errorf("%s: path parameter {%s} is not declared in the specification (declared: %v)",
 					r.Pattern, w, declared)
 			}
+		}
+	}
+}
+
+// servedBy returns an operation's x-nebula-served-by, "" for the control plane.
+func servedBy(op yaml.Node) string {
+	var v struct {
+		ServedBy string `yaml:"x-nebula-served-by"`
+	}
+	_ = op.Decode(&v)
+	return v.ServedBy
+}
+
+// The internal surface must never be documented in the public contract.
+func TestInternalRoutesAreNotInThePublicSpec(t *testing.T) {
+	t.Parallel()
+	s := loadSpec(t)
+	a := newAPI(t)
+	for _, r := range a.InternalRoutes() {
+		if !strings.HasPrefix(r.Path, "/internal/") {
+			t.Errorf("internal route %s is not under /internal/", r.Pattern)
+		}
+		if _, ok := s.Paths[r.Path]; ok {
+			t.Errorf("internal route %s appears in the public specification", r.Pattern)
 		}
 	}
 }

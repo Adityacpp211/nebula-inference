@@ -69,7 +69,7 @@ func New(opts Options) http.Handler {
 
 	chain := httpx.Chain(
 		httpx.RequestID(),
-		httpx.Trace(),
+		httpx.Trace("controlplane.request"),
 		httpx.WithLogger(opts.Logger),
 		httpx.APIVersion(),
 		httpx.AccessLog(opts.Logger, telemetry.PathLivez, telemetry.PathReadyz, telemetry.PathHealthz),

@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/adityasatwar321/nebula/packages/artifact"
 	"github.com/adityasatwar321/nebula/packages/auth"
 	"github.com/adityasatwar321/nebula/packages/config"
 	"github.com/adityasatwar321/nebula/packages/telemetry"
@@ -22,6 +23,17 @@ type API struct {
 	Logger *slog.Logger
 	Store  *store.Store
 	Hasher *auth.Hasher
+	// Signer verifies X-Nebula-Auth-Context from the gateway. Nil when no internal
+	// secret is configured, in which case only direct API-key authentication works
+	// and the internal surface is not mounted.
+	Signer *auth.ContextSigner
+	// Artifacts is the model artifact store, nil when none is configured. With a
+	// store, versions get presigned uploads and finalize verifies the bytes.
+	Artifacts artifact.Store
+	// Verifier completes finalize asynchronously; nil without a store.
+	Verifier *Verifier
+	// Metrics receives capacity admission decisions; nil records nothing.
+	Metrics *telemetry.Metrics
 
 	keys *keyCache
 }
@@ -39,13 +51,26 @@ func New(cfg *config.Config, logger *slog.Logger, st *store.Store) (*API, error)
 	if err != nil {
 		return nil, err
 	}
-	return &API{
+	a := &API{
 		Config: cfg,
 		Logger: logger,
 		Store:  st,
 		Hasher: hasher,
 		keys:   newKeyCache(cfg.Auth.KeyCacheSize, nil),
-	}, nil
+	}
+	if a.Artifacts, err = NewArtifactStore(cfg.Artifact); err != nil {
+		return nil, err
+	}
+	if a.Artifacts != nil {
+		a.Verifier = NewVerifier(a)
+	}
+	if !cfg.Internal.AuthSecret.IsZero() {
+		a.Signer, err = auth.NewContextSigner(cfg.Internal.AuthSecret.Reveal(), cfg.Internal.AuthMaxAge.Duration(), nil)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return a, nil
 }
 
 // logger returns the request-correlated logger.
@@ -124,9 +149,12 @@ func (a *API) routes() []Route {
 		modelsWrite = auth.ScopeModelsWrite
 		depsRead    = auth.ScopeDeploymentsRead
 		depsWrite   = auth.ScopeDeploymentsWrite
-		adminScope  = auth.ScopeAdmin
-		auditRead   = auth.ScopeAuditRead
-		noScope     = auth.Scope("")
+		// rollouts:write moves live traffic, so it is its own grant (docs/api.md §1).
+		rolloutsWrite = auth.ScopeRolloutsWrite
+		adminScope    = auth.ScopeAdmin
+		auditRead     = auth.ScopeAuditRead
+		usageRead     = auth.ScopeUsageRead
+		noScope       = auth.Scope("")
 	)
 
 	return build([]Route{
@@ -174,6 +202,7 @@ func (a *API) routes() []Route {
 		{Pattern: "GET /v1/deployments/{deployment_id}/status", Scope: depsRead, handler: a.deploymentStatus},
 		{Pattern: "GET /v1/deployments/{deployment_id}/revisions", Scope: depsRead, handler: a.listRevisions},
 		{Pattern: "GET /v1/deployments/{deployment_id}/transitions", Scope: depsRead, handler: a.listTransitions},
+		{Pattern: "GET /v1/deployments/{deployment_id}/autoscaling-events", Scope: depsRead, handler: a.listAutoscalingEvents},
 		{Pattern: "POST /v1/deployments/{deployment_id}/scale", Scope: depsWrite, handler: a.scaleDeployment},
 		{Pattern: "POST /v1/deployments/{deployment_id}/rollback", Scope: depsWrite, handler: a.rollbackDeployment},
 		{Pattern: "POST /v1/deployments/{deployment_id}/stop", Scope: depsWrite, handler: a.stopDeployment},
@@ -184,6 +213,33 @@ func (a *API) routes() []Route {
 		// desired state must be correctable during an incident, and because until the
 		// Phase 5 controller runs, nothing else advances an in-flight state.
 		{Pattern: "POST /v1/deployments/{deployment_id}/transition", Scope: adminScope, handler: a.transitionDeployment},
+
+		// Routes: the public model names and their weighted targets.
+		{Pattern: "GET /v1/usage", Scope: usageRead, handler: a.getUsage},
+		{Pattern: "GET /v1/costs", Scope: usageRead, handler: a.getCosts},
+		{Pattern: "GET /v1/pricing-profiles", Scope: usageRead, handler: a.listPricingProfiles},
+		{Pattern: "POST /v1/pricing-profiles", Scope: adminScope, handler: a.createPricingProfile},
+
+		{Pattern: "GET /v1/experiments", Scope: depsRead, handler: a.listExperiments},
+		{Pattern: "POST /v1/experiments", Scope: rolloutsWrite, handler: a.createExperiment},
+		{Pattern: "GET /v1/experiments/{experiment_id}", Scope: depsRead, handler: a.getExperiment},
+		{Pattern: "GET /v1/experiments/{experiment_id}/results", Scope: depsRead, handler: a.experimentResults},
+		{Pattern: "POST /v1/experiments/{experiment_id}/stop", Scope: rolloutsWrite, handler: a.stopExperiment},
+
+		{Pattern: "GET /v1/rollouts", Scope: depsRead, handler: a.listRollouts},
+		{Pattern: "POST /v1/rollouts", Scope: rolloutsWrite, handler: a.createRollout},
+		{Pattern: "GET /v1/rollouts/{rollout_id}", Scope: depsRead, handler: a.getRollout},
+		{Pattern: "POST /v1/rollouts/{rollout_id}/pause", Scope: rolloutsWrite, handler: a.pauseRollout},
+		{Pattern: "POST /v1/rollouts/{rollout_id}/resume", Scope: rolloutsWrite, handler: a.resumeRollout},
+		{Pattern: "POST /v1/rollouts/{rollout_id}/promote", Scope: rolloutsWrite, handler: a.promoteRollout},
+		{Pattern: "POST /v1/rollouts/{rollout_id}/abort", Scope: rolloutsWrite, handler: a.abortRollout},
+
+		{Pattern: "GET /v1/routes", Scope: depsRead, handler: a.listRoutes},
+		{Pattern: "POST /v1/routes", Scope: depsWrite, handler: a.createRoute},
+		{Pattern: "GET /v1/routes/{route_id}", Scope: depsRead, handler: a.getRoute},
+		{Pattern: "PATCH /v1/routes/{route_id}", Scope: depsWrite, handler: a.updateRoute},
+		{Pattern: "DELETE /v1/routes/{route_id}", Scope: depsWrite, handler: a.deleteRoute},
+		{Pattern: "GET /v1/policies/routing", Scope: depsRead, handler: a.listRoutingPolicies},
 
 		{Pattern: "GET /v1/audit-logs", Scope: auditRead, handler: a.listAuditLogs},
 	})
@@ -216,6 +272,7 @@ func (a *API) Mount(mux *http.ServeMux) {
 		}
 		mux.Handle(route.Pattern, a.authenticate(h))
 	}
+	a.mountInternal(mux)
 }
 
 // whoAmI describes the calling credential. It is the endpoint a caller hits when

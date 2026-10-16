@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +28,9 @@ import (
 	"github.com/adityasatwar321/nebula/packages/db/migrate"
 	"github.com/adityasatwar321/nebula/packages/telemetry"
 )
+
+// dbSeq numbers the databases this process creates.
+var dbSeq atomic.Int64
 
 // EnvDatabaseURL names the environment variable holding the test database URL.
 //
@@ -64,7 +68,10 @@ func New(t *testing.T) (pool *pgxpool.Pool, url string) {
 	}
 	defer admin.Close()
 
-	name := fmt.Sprintf("nebula_it_%d_%d", os.Getpid(), time.Now().UnixNano()%1_000_000_000)
+	// A per-process counter, not the clock, makes the name unique: parallel tests
+	// on a platform with a coarse timer (Windows) read the same nanosecond value
+	// and collided on CREATE DATABASE. The pid keeps concurrent test binaries apart.
+	name := fmt.Sprintf("nebula_it_%d_%d", os.Getpid(), dbSeq.Add(1))
 	if _, err := admin.Exec(ctx, fmt.Sprintf(`CREATE DATABASE %q`, name)); err != nil {
 		t.Fatalf("creating test database %s: %v", name, err)
 	}

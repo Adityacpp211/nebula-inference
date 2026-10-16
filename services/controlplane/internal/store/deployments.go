@@ -380,6 +380,34 @@ func (r *DeploymentRepo) ListStateTransitions(ctx context.Context, q Querier, or
 	return out, classify(rows.Err())
 }
 
+// ListAutoscalingEvents returns a deployment's autoscaling decisions, newest
+// first. Ids are time-ordered, so the cursor is an id.
+func (r *DeploymentRepo) ListAutoscalingEvents(ctx context.Context, q Querier, orgID, deploymentID uuid.UUID,
+	p Page) ([]*models.AutoscalingEvent, error) {
+	rows, err := q.Query(ctx, `
+		SELECT id, org_id, deployment_id, from_replicas, to_replicas, direction, signals,
+		       decision, reason, created_at
+		  FROM autoscaling_events
+		 WHERE deployment_id = $1 AND org_id = $2
+		   AND ($3::uuid IS NULL OR id < $3)
+		 ORDER BY id DESC LIMIT $4`, deploymentID, orgID, p.Cursor, p.Limit)
+	if err != nil {
+		return nil, classify(err)
+	}
+	defer rows.Close()
+
+	var out []*models.AutoscalingEvent
+	for rows.Next() {
+		var e models.AutoscalingEvent
+		if err := rows.Scan(&e.ID, &e.OrgID, &e.DeploymentID, &e.FromReplicas, &e.ToReplicas,
+			&e.Direction, &e.Signals, &e.Decision, &e.Reason, &e.CreatedAt); err != nil {
+			return nil, classify(err)
+		}
+		out = append(out, &e)
+	}
+	return out, classify(rows.Err())
+}
+
 // ---------------------------------------------------------------------------
 // spec changes
 // ---------------------------------------------------------------------------

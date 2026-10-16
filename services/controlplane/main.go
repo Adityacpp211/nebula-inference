@@ -14,10 +14,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"log/slog"
 
 	"github.com/adityasatwar321/nebula/migrations"
+	"github.com/adityasatwar321/nebula/packages/artifact"
 	"github.com/adityasatwar321/nebula/packages/config"
 	"github.com/adityasatwar321/nebula/packages/db"
 	"github.com/adityasatwar321/nebula/packages/db/migrate"
@@ -115,6 +117,60 @@ func run() error {
 	cpAPI, err := api.New(cfg, logger, st)
 	if err != nil {
 		return err
+	}
+	stopTracing, err := telemetry.SetupTracing(ctx, telemetry.TracingOptions{
+		Endpoint: cfg.Telemetry.OTLPEndpoint, SampleRatio: cfg.Telemetry.TraceSampleRatio,
+		Service: serviceName, Version: info.Version, Instance: instance,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = stopTracing(sctx)
+	}()
+	metrics := telemetry.NewMetrics()
+	metrics.Gauge("nebula_schema_version").WithLabelValues(serviceName).Set(float64(expectedSchema))
+	cpAPI.Metrics = metrics
+	if cfg.Telemetry.MetricsAddr != "" {
+		go telemetry.ServeMetrics(ctx, cfg.Telemetry.MetricsAddr, metrics, logger)
+	}
+
+	if cpAPI.Verifier != nil {
+		// The verifier completes finalize for store-backed versions. It resumes any
+		// verification a previous process was interrupted in.
+		go cpAPI.Verifier.Run(ctx)
+		probes.Register(telemetry.CheckFunc{
+			CheckName: "artifact_store", IsCritical: false, CheckTimeout: 2 * time.Second,
+			Fn: func(ctx context.Context) error {
+				if p, ok := cpAPI.Artifacts.(interface{ Ping(context.Context) error }); ok {
+					return p.Ping(ctx)
+				}
+				return nil
+			},
+		})
+		logger.Info("artifact store configured", slog.String("store", cfg.Artifact.Store))
+		if s3, ok := cpAPI.Artifacts.(*artifact.S3); ok && cfg.Dev.CreateBucket && !cfg.Env.IsProduction() {
+			// Development only. In the background and retried: the store may still be
+			// starting, and the control plane must not wait on it to serve.
+			go func() {
+				for {
+					cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+					err := s3.EnsureBucket(cctx)
+					cancel()
+					if err == nil {
+						logger.Info("development: artifact bucket present", slog.String("bucket", cfg.Artifact.S3Bucket))
+						return
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(3 * time.Second):
+					}
+				}
+			}()
+		}
 	}
 
 	if result, err := seed.Run(ctx, cfg, st, cpAPI.Hasher, logger); err != nil {

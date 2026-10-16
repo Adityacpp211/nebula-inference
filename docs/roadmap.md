@@ -251,9 +251,89 @@ first request. Until that job has gone green, treat the images as written-but-un
 
 ---
 
-## Phase 4 — API gateway and OpenAI-compatible API
+## Phase 4 — API gateway and OpenAI-compatible API ✅
 
-**Deliverables**
+**Status: complete**, with the items below marked as not yet verified here.
+
+**Delivered**
+
+- `services/gateway`: API-key authentication with a three-tier credential lookup (in-process →
+  Redis → the control plane's internal API), verification against the pepper on every request,
+  scope enforcement, tenant-scoped route resolution (another org's model is a 404), validation that
+  refuses unsupported parameters by name, and the OpenAI-compatible `/v1/chat/completions`,
+  `/v1/completions` and `/v1/models`. The gateway imports no database package
+  ([ADR-0030](./architecture-decisions/0030-gateway-credentials-through-the-control-plane.md)).
+- Rate limiting: one atomic Redis Lua script for RPM, TPM (optimistic reservation at admission,
+  settled against the runtime's count at release, overdraft carried forward) and concurrency leases
+  that expire, per key and per org, with OpenAI's `x-ratelimit-*` headers. When Redis fails, an
+  in-process implementation of the same algorithm takes over with limits scaled down, every decision
+  is marked degraded, and Redis is re-probed after a one-second cooldown rather than paying its
+  timeout on every request.
+- Streaming: SSE relayed frame by frame with backpressure through a bounded channel, keep-alive
+  comments, a per-write deadline that cuts off a client that stops reading, terminal error frames
+  with no `finish_reason`, and client-disconnect cancellation that tells the worker to stop and still
+  reads its final frame for the runtime's token count. Routing context moved from a named SSE event
+  to headers plus an SSE comment when the real SDK proved the Phase 0 assumption wrong
+  ([ADR-0029](./architecture-decisions/0029-stream-metadata-is-a-comment.md)).
+- Usage records in the `nebula.usage.record.v1` shape, one per request including partial usage, with
+  `token_source` saying where counts came from. Written as a structured log line until NATS exists
+  (TODO(NEB-140)).
+- The admin proxy: the caller's key is stripped, a signed `X-Nebula-Auth-Context` is attached, the
+  control plane verifies it (`packages/auth/internal.go`), `/internal/` is never proxied, and
+  revocations evict the shared credential cache through a response header the gateway consumes.
+- Static routing from a route file — deterministic weighted bucketing by request id, pinning by
+  deployment name or id (scope `inference:pin`), round-robin endpoints — replaced by dynamic
+  routing in Phase 6.
+- The spec covers the inference surface; operations the gateway serves carry
+  `x-nebula-served-by: gateway`, and a drift test per service checks each side.
+- `scripts/e2e-gateway.sh` (`make e2e-gateway`) and `scripts/load-gateway.sh`
+  (`make load-gateway`), both over `scripts/lib/stack.sh`: a throwaway stack from a clean checkout.
+
+**`packages/api` client: moved to Phase 14.** The roadmap listed a Go client here "for the CLI and
+dashboard later". Nothing in Phase 4 consumes one, the dashboard's client is generated TypeScript,
+and a client written ahead of its first caller is scaffolding; it lands with the CLI.
+
+**Tests.** Go unit tests for parsing (every refusal names its parameter), templates, the route
+table (weighted split within tolerance over 10 000 keys and stable per key), the limiter (every
+behaviour run against both the Lua script and the in-process fallback, plus all-or-nothing
+admission and no overshoot under 200 concurrent admissions), credentials (tiers, negative caching,
+single-flight, revocation, expiry, degraded grace, fail-closed), the worker client, and the handler
+end to end against a scriptable fake worker: frame order, keep-alives, interruption, disconnect with
+partial usage, the error mapping with no worker detail leaking, rate-limit refusal, tenancy, pinning,
+and the proxy's signed identity. Control-plane integration tests against PostgreSQL for signed
+contexts, their refusals, the internal lookup and revocation. The end-to-end suite drives the
+**unmodified OpenAI Python SDK** (3.19.2): list and retrieve, chat, streaming with usage, streaming
+and non-streaming agreeing on counts, text completion, refusal by name, 404, 401, context window, the
+admin API through the gateway, a key created, used and revoked through the gateway, a disconnect
+releasing the worker slot, and the usage record of a cancelled stream. 13/13 green.
+
+**Baseline** (`make load-gateway`, 60 s, mock worker at 400 tokens/s with 32 slots, 16 completion
+tokens per request, everything on one laptop; `tests/load/results/phase4-baseline.json`):
+
+| Scenario | Rate | Errors | p50 | p95 | p99 |
+|----------|------|--------|-----|-----|-----|
+| chat, non-streamed | 40 rps | 0 / 2401 | 130 ms | 155 ms | 162 ms |
+| chat, streamed | 20 rps | 0 / 1200 | 144 ms | 168 ms | 178 ms |
+
+About 40 ms of each request is the mock generating 16 tokens; the rest is the gateway, Redis, the
+Python worker and the loopback network together. Gateway-only latency needs the Phase 8 histograms.
+
+**Exit:** met — `OpenAI(base_url=..., api_key=...).chat.completions.create(stream=True)` streams
+tokens from a worker through the gateway, in `make e2e-gateway`. Against the **mock** runtime: no
+`llama-server` binary was available where this phase was built, so the real-engine path is the
+Phase 3 suite's, not re-run through the gateway here.
+
+**Not verified here, with reasons.** The gateway container image is written and unbuilt — Docker
+Desktop could not start on the development machine, so CI builds it. The race detector did not run
+locally (no C toolchain on Windows); CI runs every Go suite with `-race`. PostgreSQL and Redis for the
+local runs came from a WSL install rather than compose, which is why the e2e script accepts
+`NEBULA_E2E_DEPS=external`.
+
+**Debt recorded:** TODO(NEB-140) usage records to JetStream (Phase 6/13); TODO(NEB-141) gateway
+metrics (Phase 8); TODO(NEB-142) `Idempotency-Key` (Phase 10); TODO(NEB-143) cross-replica
+revocation broadcast (Phase 6); TODO(NEB-144) chat template from GGUF metadata (Phase 5).
+
+**Original plan**
 
 - `services/gateway`: authn/authz, validation, Redis rate limiting (RPM, TPM with optimistic
   reservation, concurrency), request IDs, trace propagation, admin proxy to the control plane,
@@ -274,7 +354,64 @@ tokens from a worker through the gateway.
 
 ---
 
-## Phase 5 — Deployment controller and Kubernetes integration
+## Phase 5 — Deployment controller and Kubernetes integration ✅
+
+**Status: complete**, with the deviations below.
+
+**Delivered**
+
+- `services/controller`: deployments listed from PostgreSQL as the `nebula_controller` role and
+  watched through informers, a rate-limited work queue with exponential backoff, poll + periodic
+  resync, orphan GC, and leader election on a Lease
+  ([ADR-0032](./architecture-decisions/0032-controller-reconciles-from-postgres.md)). The reconciler
+  server-side-applies a root ConfigMap that owns the Deployment, Service and PDB, reverts drift,
+  recreates deleted objects, writes status back (`observed_generation`, conditions, ready replicas),
+  and moves the state machine only with reasons from `packages/lifecycle`.
+- The inventory reconciler writes `nodes` (capacity, allocatable, requested) and `worker_events`.
+- `packages/scheduler`: hardware profile → node selector, tolerations and requests; capacity
+  admission that refuses with `422 insufficient_capacity` naming the resource before any row exists,
+  treats stale inventory as "could not check" rather than as evidence, and returns the placement
+  decision on `202`.
+- `packages/artifact`: S3 (minio-go) and directory stores, presigned upload with expiry and a size
+  limit, streaming SHA-256, GGUF header parsing, and the node-local content-addressed cache. `finalize`
+  on a store-minted URI answers `202 verifying`; a verifier loop reads the stored bytes and moves the
+  version to `ready` or `failed`, retrying transient store errors instead of deciding on them
+  ([ADR-0031](./architecture-decisions/0031-artifacts-verified-asynchronously.md)).
+- `cmd/nebula-artifact-puller`: the initContainer that re-hashes while filling the cache and reports
+  failures through the termination message, which the controller turns into named failures
+  (`ArtifactChecksumMismatch`).
+- `deploy/helm/nebula` (RBAC, NetworkPolicies, migration Job hook, in-cluster PostgreSQL / Redis / S3
+  for development), `deploy/kind/cluster.yaml`, `scripts/dev-up.sh` / `dev-down.sh`, container images
+  for the gateway, controller and puller. Migration 000011 lets a deleted deployment's name be reused.
+
+**Tests.** Controller decisions table-tested and the reconciler run against the fake clientset and a
+real PostgreSQL; scheduler, artifact store (including an S3 integration test), puller and verifier
+unit and integration tests; admission and name reuse through the API. `tests/e2e/kind/phase5_demo.py`
+(`make e2e-kind`) on a fresh kind cluster, 12/12 green: presigned upload verified from the bytes;
+a deployment created through the gateway reaches `ready` 2/2 with its placement; inference through
+the gateway is served by those pods; a killed pod is replaced; **the Deployment deleted out from
+under NEBULA is recreated in under a second**; hand-edited replicas are reverted; scaling through the
+API is followed; an impossible request is a 422 with nothing created; 12 `kubectl auth can-i`
+assertions (7 negative) plus none for the control plane and gateway; a workload pod cannot reach
+PostgreSQL but can reach the store; a tampered artifact fails the deployment with
+`ArtifactChecksumMismatch`; stop and delete remove pods, then objects. The attributed state history
+is printed from the database at the end.
+
+**Exit:** met — `curl` through the gateway creates real pods on kind, `kubectl get deploy -n
+nebula-workloads` shows them, a killed pod is replaced and a deleted Deployment comes back.
+
+**Deviations.**
+
+- `envtest` was not used: decisions and object shapes are tested against the fake clientset, and
+  the real API server, kubelet and garbage collector are exercised by the kind demo instead.
+- The controller reads `pods` cluster-wide (capacity must count everyone's pods); see
+  [deployment-architecture.md §3](./deployment-architecture.md#3-rbac).
+- SeaweedFS replaced MinIO for development (images unavailable); Pod Security `restricted` is
+  `warn` on the workload namespace because the dev cache is a hostPath.
+- `scripts/dev-up.ps1` was not written: the kind path runs in WSL, which `dev-up.sh` covers.
+- Chat templates from GGUF metadata (TODO(NEB-144)) remain open.
+
+**Original plan**
 
 **Deliverables**
 
@@ -310,7 +447,75 @@ brings it back.
 
 ---
 
-## Phase 6 — Router and health-aware routing
+## Phase 6 — Router and health-aware routing ✅
+
+**Status: complete**, with the deviations below.
+
+**Delivered**
+
+- `packages/routing`: the endpoint snapshot, the mandatory `Filter` (readiness, breaker, heartbeat
+  staleness while heartbeats flow, acceptance, loaded model version, context window), the
+  `RoundRobin`, `LeastLoaded` (default), `LatencyAware` and `CapabilityBased` strategies, `Failover`
+  as a policy that wraps a primary strategy and names a fallback route, per-endpoint breakers and
+  EWMAs, and deterministic weighted resolution that gives an unusable target's share to the others
+  in proportion — the same key always lands on the same target, and keys on healthy targets never
+  move. Pure functions over an injected clock.
+- Control plane: `/v1/routes` (create, read, list, atomic replacement of weights and policy,
+  delete; weights must total 100, all targets one task) and `GET /v1/policies/routing`, audited;
+  the internal routing table (`GET /internal/v1/routing-table`, ETag-versioned, 304 when unchanged).
+- Gateway router (`services/gateway/internal/router`): routes polled from the control plane every 2 s,
+  endpoints from an EndpointSlice informer (RBAC: `endpointslices` get/list/watch in the workload
+  namespace only), heartbeats from core NATS, local observation per dispatch, and a Redis snapshot
+  written by every replica and loaded on a cold start when the control plane does not answer
+  ([ADR-0033](./architecture-decisions/0033-router-state-and-before-work-retries.md)). A request
+  whose endpoint fails *before any work started* (unreachable, draining, loading, saturated) is
+  re-placed on another endpoint, at most three attempts; `nebula.attempts` reports it. `/v1/models`
+  shows each target's state and eligible endpoints; `/healthz` shows each source.
+- Worker heartbeat publisher (`nats-py`), once a second and immediately on drain, with an `instance`
+  id so a container restart is not mistaken for a stale sequence; the controller gives every worker
+  its pod name, node, deployment and version ids through the downward API.
+- NATS in the development chart; NetworkPolicies for workers → NATS and gateway → NATS.
+- The revocation broadcast (TODO(NEB-143)): a revocation proxied by one gateway replica evicts the
+  key from every replica's in-process cache over NATS.
+- A static route file remains for running without Kubernetes (`make run-gateway`,
+  `make e2e-gateway`); the chart uses the control plane unless values supply routes.
+
+**Tests.** Strategy and filter tables with an injected clock and no sleeps; the staleness window
+exact to the millisecond (eligible at 3 s, gone at 3.001 s, back on the next heartbeat); weighted
+resolution within ±2 % over 10 000 keys, stable per key, and a dead target's share redistributed
+60/40 by weight with no healthy key moving; breakers (connection failure opens at once, one probe
+after the cooldown, doubling on a failed probe); heartbeat ordering across restarts; EndpointSlice
+merging (a terminating endpoint takes no new work); heartbeats and the revocation broadcast over an
+embedded NATS server; **a cold replica with the control plane down routing from the snapshot
+another replica left in Redis**; the gateway skipping an unreachable replica, answering 503
+`no_healthy_endpoint` with `Retry-After` when nothing is eligible (and charging nothing), and failing
+over to a fallback route with `X-Nebula-Degraded`. Control-plane integration tests for the route API,
+its refusals, auditing, the routed-deployment delete guard, and the internal table with its 304.
+Worker tests for the heartbeat payload, the immediate drain heartbeat and the final one. The OpenAI
+SDK suite (`make e2e-gateway`, SDK 3.22.1) still passes 13/13 against the static-file path.
+
+`tests/e2e/kind/phase6_demo.py` (`make e2e-kind`) on kind: two deployments behind one route created
+through the API; the gateway converges in about 2 s with 2 + 2 endpoints; routing table, endpoint
+discovery and heartbeats all live; 400 requests split 47.8 % / 52.2 %; every pod of one target
+deleted under load from four clients — **0 errors in 488 requests**, the last request placed on the
+old pods 0.25 s after the delete, traffic back on the replacements at 6.1 s; then the control plane
+scaled to zero and the gateway restarted — 20/20 requests served from the Redis snapshot, `/healthz`
+saying so, and back on the live table once the control plane returns.
+
+**Exit:** met — 50/50 over two deployments, observed split matching, and killing every pod of one
+target shifts its traffic within a second with no client errors.
+
+**Deviations.**
+
+- The snapshot is written by gateways, not the controller (ADR-0033).
+- `CostAware` resolves to `LeastLoaded` with a logged note until the cost engine (Phase 13).
+- `LatencyAware` uses the worker's own time-to-first-token as the local sample; gateway-side TTFT
+  arrives with the Phase 8 histograms.
+- The `route` shortcut on `POST /v1/deployments` (docs/api.md) is not implemented.
+- The controller still polls PostgreSQL rather than reacting to `nebula.control.reconcile`; the poll
+  is 2 s and nothing in this phase needed it sooner.
+
+**Original plan**
 
 **Deliverables**
 
@@ -332,7 +537,57 @@ pods of one target shifts traffic within seconds without client errors.
 
 ---
 
-## Phase 7 — Request queue and concurrency control
+## Phase 7 — Request queue and concurrency control ✅
+
+**Status: complete**, with the deviations below.
+
+**Delivered**
+
+- `packages/queue`: a concurrency gate with a bounded waiting room — three priorities with aging
+  (one level per `NEBULA_GATEWAY_QUEUE_AGING`, default 5 s), absolute deadlines enforced by a
+  sweeper and by each waiter, cancellation that removes the entry at once, a newcomer never
+  overtaking a waiter, a `Retry-After` estimate from the queue ahead and observed service time, and
+  per-gate stats (depth by priority, oldest age, wait p50/p95/p99, drops by reason). Injected clock.
+- Gateway admission (`services/gateway/internal/admission`): one gate per deployment, sized on every
+  decision by the router — each eligible endpoint's slots (heartbeat, route, or default) times an
+  overcommit factor ([ADR-0034](./architecture-decisions/0034-admission-queue-per-deployment.md)).
+  The order is resolve → rate limit → queue → place → dispatch; a request that waited is placed
+  again on its deployment, because endpoints may have changed while it waited.
+- Backpressure end to end: a worker's 429 marks the endpoint saturated until its `Retry-After`; it
+  contributes no capacity and strategies avoid it; when every replica refuses, the request returns
+  to its queue (at most twice) instead of failing.
+- `nebula.queue: "reject"` fast-fail (`429 capacity_exhausted`), `429 queue_full` with
+  `Retry-After`, `504 queue_timeout` (not an inference error), and `nebula.gateway_queue_ms`.
+- `/debug/queues` (development only) with queue stats, heap and goroutines; `make load-overload`.
+- CI made green: golangci-lint v2 now actually runs and reports 0 issues (67 findings fixed or
+  annotated with their reason), and the whole Go suite passes under `-race` on Linux.
+
+**Tests.** Deterministic queue tests on a simulated clock: immediate admission and FIFO, a full
+queue shedding with `Retry-After` and never growing, deadline expiry by the sweeper counted as
+`queue_timeout`, cancellation removing the entry, strict priority order, **LOW served despite a
+sustained stream of HIGH** (aging), reject mode never waiting, capacity growth admitting waiters, and
+64 clients hammering a gate of capacity 4 and depth 16 — depth never above 16, heap flat across 4×
+the requests. Gateway tests: a saturated worker waited out and served on the second attempt, error
+mapping under `reject`. The OpenAI SDK suite still passes 13/13.
+
+**Load test** (`make load-overload`, `tests/load/results/phase7-overload.json`): one mock worker with
+4 slots, gateway admitting 4 at a time with a queue of 16, 75 requests/s offered for 60 s — three times
+what the stack serves. 1 052 served (17/s), 3 449 shed, **every shed a 429 with `Retry-After`, 0
+unexpected statuses**, queue depth at most 16, gateway heap 2.5–7.5 MiB with growth after warm-up of
+about 1 MiB, served-request latency p99 1.16 s.
+
+**Exit:** met — at 3× capacity memory is stable, queue depth bounded, and shedding correct with
+`Retry-After`.
+
+**Deviations.**
+
+- Queue metrics are in-process and at `/debug/queues`; the Prometheus export is Phase 8.
+- The per-deployment `queue_config.max_depth` sizes the *worker's* queue; the gateway queue depth is
+  a gateway setting (`NEBULA_GATEWAY_QUEUE_MAX_DEPTH`) for now.
+- Accounting is per gateway replica (ADR-0034); several replicas can overshoot one deployment, which
+  worker 429s and saturation correct.
+
+**Original plan**
 
 **Deliverables**
 
@@ -352,7 +607,64 @@ with `Retry-After`.
 
 ---
 
-## Phase 8 — Metrics, logs, tracing
+## Phase 8 — Metrics, logs, tracing ✅
+
+**Status: complete**, with the deviations below.
+
+**Delivered**
+
+- Metrics: `telemetry.Catalog` declares every Go metric of observability.md §2.1, §2.2 and §2.4 that
+  exists today — request RED, TTFT, tokens, in-flight, attempts, interrupted streams, client
+  cancellations, routing decisions, endpoints by state, heartbeat staleness, queue depth / wait /
+  oldest age / drops, breaker state, rate-limit refusals, reconcile duration / errors / queue depth,
+  generation lag, replicas, deployment state, capacity admission, schema version. An undeclared
+  metric panics at startup; served on a separate port (`NEBULA_METRICS_ADDR`) so the gateway's
+  public listener never exposes them. Histograms carry the trace id as an exemplar.
+- Tracing: OpenTelemetry (API, SDK, OTLP/HTTP) in every Go service and the worker — `gateway.request`
+  → `gateway.authenticate`, `gateway.validate`, `router.resolve`, `router.select`,
+  `gateway.ratelimit`, `queue.wait` (only when the request waited), `dispatch.attempt` →
+  `worker.generate` → `worker.queue`, `runtime.stream`; `controller.reconcile` as its own trace.
+  Logs carry the span's trace id, so the trace and the log lines share one id.
+- The observability stack in the chart (`observability.enabled`, on in development): OpenTelemetry
+  Collector, Tempo, Loki with Promtail, Prometheus with exemplar storage and the alert rules, Grafana
+  with cross-linked datasources (exemplar → trace, trace → logs, log line → trace) and four
+  generated dashboards — Fleet Overview, Deployment Detail, Request Path, Queue & Autoscaling.
+- Alert rules for every §7.2 alert whose metrics exist (11 rules), each with promtool unit tests
+  that it fires and that it stays quiet (`make alerts-test`).
+- CI: every action on its Node 24 major, runners pinned to `ubuntu-24.04`, an observability job
+  (alert tests, dashboards match their generator), the Phase 8 demo in the kind job.
+
+**Tests.** The metrics contract test parses observability.md's tables and compares them with the
+catalogue in both directions; the gateway span-tree test asserts the documented tree for one request
+and that the worker's parent is the `dispatch.attempt` span; the worker's tracing tests do the same
+for `worker.generate` in both modes; the log tests assert request_id and trace_id on every request
+line, in the gateway and the worker, and that prompt text appears in no line, span or attribute,
+including on failure; a gateway test asserts the documented series exist after one request; promtool
+tests every alert rule. `tests/e2e/kind/phase8_demo.py` on a fresh kind cluster: the stack up with
+three linked datasources and four dashboards; Prometheus scraping the gateway, control plane,
+controller and both worker pods; **all 28 dashboard panels returning series**; a histogram exemplar's
+trace opening in Tempo; the known request as **one trace of 13 spans across gateway and worker**; and
+Loki holding its lines from both services, all with that trace id, and the prompt nowhere.
+
+Building it found three real defects, now fixed: the controller's spec-hash annotation replaced the
+pod template's annotations (so workers were never scraped), the worker logged its request line
+after unbinding the request id, and the gateway's usage record was logged without the request's
+correlation fields.
+
+**Exit:** met — one request is followed from a dashboard histogram's exemplar to its trace in Tempo to
+its log lines in Loki, and every dashboard panel is backed by a real series.
+
+**Deviations** ([ADR-0035](./architecture-decisions/0035-observability-wiring.md)).
+
+- Annotation-based scraping instead of `ServiceMonitor`s: kind has no Prometheus Operator.
+- OTLP over HTTP (4318) rather than gRPC.
+- Rollouts & Experiments, Cost, and Nodes & GPU dashboards are not shipped until their metrics exist
+  (Phases 12, 13, and a GPU exporter); their §7.2 alerts likewise.
+- No tail sampling or Alertmanager routing in the development stack (sampling is 100% there).
+- The cardinality test of observability.md §8 is covered by the catalogue's label-budget check
+  rather than a synthetic multi-org workload.
+
+**Original plan**
 
 **Deliverables**
 
@@ -377,7 +689,75 @@ Loki, and every dashboard panel is backed by a real series.
 
 ---
 
-## Phase 9 — Autoscaling
+## Phase 9 — Autoscaling ✅
+
+**Status: complete**, with the deviations below.
+
+**Delivered**
+
+- `packages/autoscale`: the pure decision engine — `desired = ceil(current × max ratio)` over usable
+  signals, a tolerance band, scale-up and scale-down stabilization windows that must be observed
+  before acting, a cooldown, a maximum step (double up; 10% or one replica down), `[min, max]`
+  clamps, the rollout interlock, and "hold" when every signal is missing. Every decision carries
+  the full signal vector and a sentence saying why; a suppression is recorded when it changes, not
+  on every tick.
+- `services/autoscaler`: reads queue wait p95 and in-flight concurrency per replica from Prometheus
+  (four instant queries per tick for all deployments, joined on `deployment_id`), decides every
+  autoscaled deployment, and writes `desired_replicas` plus the `autoscaling_events` row in one
+  transaction with a compare-and-set on the count it decided from. It connects as
+  `nebula_controller`, never calls the Kubernetes API, and elects one active replica with a
+  PostgreSQL advisory lock. Exports `nebula_autoscale_decisions_total` and
+  `nebula_autoscale_signal_ratio`.
+- Migration 000012: a `desired_replicas` change advances `generation`, so the controller reconciles
+  the autoscaler's decision at once (its role cannot write `generation`).
+- Control plane: `autoscaling` is validated with the autoscaler's own parser
+  (`400 invalid_autoscaling`), and `GET /v1/deployments/{id}/autoscaling-events` returns every
+  recorded decision with its signals, newest first.
+- Gateway: `nebula_queue_depth` and `nebula_queue_wait_seconds` carry `deployment_id`, and queue
+  wait is observed for every admitted request, so its p95 is the user-visible one.
+- Chart: the autoscaler Deployment (no ServiceAccount token, PostgreSQL ingress), Prometheus copying
+  the worker pod's deployment id onto its series, an opt-in CPU HPA for the gateway
+  (`gateway.autoscaling.enabled`), and the Queue & Autoscaling dashboard's replica, signal-ratio and
+  decision panels.
+
+**Tests.** Simulated-clock scenarios over a load model where load per replica falls as replicas
+rise: ramp up (converges, never more than doubling, nothing before the window), plateau (no change,
+no row), ramp down (nothing inside the 300 s window, then one replica at a time to the minimum), a
+one-tick spike (no change), flapping input over a synthetic hour (at most four changes, no
+scale-down), every signal missing (holds for 30 minutes, one row), clamping at max and min (one row
+each), a rollout in progress (no change, one row, scaling resumes after), tolerance, cooldown.
+Database tests as `nebula_controller`: the target list (state, opt-in, rollout interlock), the change
+and its row in one transaction with the generation bump, the compare-and-set refusing an unseen
+user scale and out-of-bounds writes, and the role unable to touch the spec. The loop against fakes:
+load raises and idle lowers, Prometheus down holds, a conflict is not fatal, a list failure decides
+nothing, a cancelled tick records nothing, a forgotten deployment observes its windows afresh.
+`tests/e2e/kind/phase9_demo.py` on kind, with a mock runtime slowed to 2 slots at 20 tokens/s
+and 12 clients: **1 → 2 → 4 replicas within 56 s of load** (queue wait p95 at about 9.7 s against
+500 ms), every request served; **still 4 replicas 45 s into idle**, then 4 → 3 → 2 → 1 one replica
+at a time, back at the minimum 158 s after the load stopped; ten rows explaining all of it — the
+initial `suppressed_no_signal` before any traffic, both scale-ups, a cooldown, the clamp at the
+maximum, the scale-down window being observed, and each step down — and the decision counter in
+Prometheus.
+
+Building it found two defects, now fixed: Prometheus kept its old scrape configuration after an
+upgrade (its pod checksum covered only the alert rules), and an autoscaler tick in flight at
+shutdown would have recorded its cancelled queries as a missing signal.
+
+**Exit:** met — queue growth raises replicas and idle lowers them on a live cluster, and every
+change, and every reason not to change, is a row with the signals that caused it.
+
+**Deviations** ([ADR-0036](./architecture-decisions/0036-autoscaler-writes-desired-state.md)).
+
+- Signals: queue wait p95 and concurrency per replica. Request rate and CPU/GPU utilization are not
+  read yet; the engine takes any number of signals.
+- Scale-to-zero (optional, off by default) is not implemented: there is no activation queue, so a
+  deployment at zero replicas would refuse requests rather than hold them.
+- Leader election is a PostgreSQL advisory lock rather than a Kubernetes Lease, so the autoscaler
+  needs no Kubernetes permissions at all.
+- The gateway HPA needs metrics-server, which kind does not ship, so it is rendered and linted but
+  not exercised in the kind demo.
+
+**Original plan**
 
 **Deliverables**
 
@@ -397,7 +777,49 @@ explainable from a database row.
 
 ---
 
-## Phase 10 — Reliability mechanisms
+## Phase 10 — Reliability mechanisms ✅
+
+**Status: complete.**
+
+**Delivered**
+
+- `packages/reliability`: the failure classification table (nine rows, the first match wins, and
+  "output reached the client" overrides every other signal), a retry budget (retries at most a ratio
+  of recent requests plus a floor, over a sliding 10 s window), and exponential backoff with full
+  jitter.
+- The gateway's before-work failover spends from the budget (`NEBULA_GATEWAY_RETRY_BUDGET_RATIO`,
+  default 0.2, and `..._MIN_PER_SECOND`, default 3) on top of the attempt cap of 3, and exports
+  `nebula_retries_total{deployment,reason}` and `nebula_retries_rejected_budget_total{deployment}`.
+  A saturated request pauses `Backoff(n, 50 ms, 1 s)` before rejoining its queue, never past its
+  deadline.
+- The three timeout layers reviewed and documented: a 2 s connect timeout, one absolute deadline set
+  at the gateway and carried as `X-Nebula-Deadline`, and the worker enforcing it.
+- `make test-failure` (`tests/e2e/kind/phase10_failure.py`), also in the CI kind job.
+- [docs/reliability.md](./reliability.md): classification, budget, backoff, timeouts, breakers,
+  shutdown and the failure-mode table.
+
+**Tests.** One case per classification row; the critical negative — a failure after output started
+is never retryable, whatever else is true of it; full-jitter backoff spans its whole range and
+respects its cap; the budget holds amplification to 1.2 under a simulated total outage where the
+attempt cap alone would allow 4; in the gateway, 60 requests against three replicas that all answer
+503 cause exactly 6 failovers (amplification 1.10). The failure suite on kind keeps eight clients
+streaming and not streaming throughout: **9,165 requests, 3 errors** — a rolling update of every
+worker through the API, a rolling restart of the gateway, a force-deleted worker pod, and 30-second
+outages of the control plane, PostgreSQL, Redis and NATS all with zero client errors and throughput
+at the baseline; the 3 errors are requests in flight on a worker process killed with SIGKILL (at
+most its 8 in-flight are allowed), which restarted in place with no errors afterwards.
+
+Building it found a real defect, now fixed: with the control plane down, every request past the
+credential cache's local TTL waited on a failed control-plane lookup before falling back to the
+stale record — zero errors, but throughput fell from 28 to 3.5 requests a second. A stale record is
+now served for one local TTL after a failed lookup, so an outage costs one lookup per TTL rather
+than one per request, inside the same hard grace cap. The suite now fails an outage whose
+throughput drops below half the baseline.
+
+**Exit:** met — `make test-failure` passes: rolling restarts under load with zero client errors, a
+killed pod recovers, and the dependency outages behave as architecture.md §8.4 documents.
+
+**Original plan**
 
 **Deliverables**
 
@@ -417,7 +839,45 @@ recovers; dependency outages behave exactly as documented in architecture.md §8
 
 ---
 
-## Phase 11 — Model versioning and rollback
+## Phase 11 — Model versioning and rollback ✅
+
+**Status: complete.**
+
+**Delivered**
+
+- Version immutability end to end: the database trigger refuses any change to a ready version's
+  frozen fields (control-plane integration test), and the API offers no way to change one —
+  finalizing or failing a ready version is `409 invalid_status`.
+- `deployment_revisions` on every spec change and `POST /v1/deployments/{id}/rollback` (from Phase 2)
+  exercised under load: a rollback is a new revision whose spec is the earlier one's, so history is
+  appended, never rewritten.
+- A model-version change is a rolling update with `maxUnavailable: 0` that the rest of NEBULA now
+  agrees with ([ADR-0037](./architecture-decisions/0037-version-changes-are-rolling-updates.md)):
+  - the gateway routes to a deployment's pods of either version while it rolls, asserting and
+    recording the version each pod reports;
+  - the controller calls a revision ready only when every pod runs it;
+  - a worker that cannot load its model writes the reason to its termination message, and the
+    controller fails the rollout at once with `ModelLoadFailed` and that reason, while the old
+    version keeps serving.
+
+**Tests.** Router: a mid-rollout endpoint reporting the old version stays eligible and reports the
+version it serves; a static endpoint stays pinned. Controller: a rollout is not ready while an old
+pod remains; a load failure fails the rollout with the worker's reason and says the previous version
+keeps serving; a rollback is not failed by the abandoned revision's lingering pods. Worker: a load
+failure is written where the controller reads it, and a failure to write never masks it.
+`tests/e2e/kind/phase11_demo.py` on a fresh kind cluster, with eight clients streaming and not
+streaming throughout: **2,548 requests, 0 errors** across v1 → v2 (both versions serving while it rolled), v2 → v3 whose model cannot load (failed three seconds after the change with `ModelLoadFailed: … insufficient_memory …; the previous version keeps serving`, v2 serving all traffic meanwhile), a rollback to the previous revision and a rollback to revision 1; revisions 1:create, 2:update, 3:update, 4:rollback, 5:rollback, the last with revision 1's spec hash exactly; and the audit trail holding all five changes.
+
+Building it found three defects, now fixed (ADR-0037): the router excluded a deployment's old
+version as soon as the route named the new one, which made every version change an outage until the
+first new pod was ready and a version that cannot load a total one; the controller called a stuck
+rollout ready because Kubernetes counts old pods as ready; and after a rollback the controller failed
+the restored revision with the abandoned one's load-failure report.
+
+**Exit:** met — v1 → v2 → rollback to v1 with no failed client request at any point and a full audit
+trail.
+
+**Original plan**
 
 **Deliverables**
 
@@ -435,7 +895,55 @@ trail.
 
 ---
 
-## Phase 12 — Canary deployments and A/B testing
+## Phase 12 — Canary deployments and A/B testing ✅
+
+**Status: complete**, with the deviations below.
+
+**Delivered** ([ADR-0038](./architecture-decisions/0038-canary-rollouts.md))
+
+- `packages/rollout`: steps (strictly increasing, ending at 100), analysis settings with defaults
+  (hold 120 s, 100 requests, error rate within one point, p95 within ×1.2, `extend` up to three
+  windows), and the per-arm verdict — pass, breach with a reason, or insufficient data. A breach is
+  judged before sufficiency.
+- The controller's rollout reconciler, on the leader: starts pending rollouts, holds each step,
+  analyses both arms from Prometheus by `deployment_id`, advances, promotes (the canary becomes the
+  route's baseline) or rolls back with the reason; `extend` / `pause` / `fail` on insufficient data;
+  metrics it cannot read are never a pass. Every move is a compare-and-set with the route's weights
+  and an audit row in one transaction. Exports `nebula_rollout_step` and `nebula_rollout_state`.
+- Control plane `/v1/rollouts`: start (by route and canary, id or name), list, read, pause, resume,
+  promote, abort; one active rollout per route by the database's unique index (`409 rollout_active`).
+- Gateway: `deployment_id` on the request metrics, and sticky bucketing on the OpenAI `user` field.
+
+**Tests.** Rollout package: steps, analysis defaults and refusals, a healthy pass, error-rate and
+latency breaches, a breach judged before sufficiency, insufficient data, an unknown p95 neither a
+breach nor unserialisable. Reconciler on a fake clock: 10 → 25 → 50 → 100 with each step held,
+error-rate and latency rollbacks, `extend` then pause, `pause`, `fail` restoring the baseline, blind
+never healthy, an operator's change winning, the gauges following the rollout. Controller store as
+`nebula_controller`: weights, state and audit move together; a stale compare-and-set changes
+nothing; promotion swaps the baseline. Control plane: the lifecycle through the API and every
+refusal. Router: a key stays on one arm across two independent routers.
+`tests/e2e/kind/phase12_demo.py` under continuous load: a healthy canary walked 10 → 25 → 50 → 100
+and was promoted in 102 s with **3,766 requests and zero errors**; a second rollout on the route was
+refused while one was active; a canary failing every generation was rolled back 40 s after it
+started (`canary error rate 100.00% exceeds the baseline's 0.00% + 1.00 pp`) having failed 10 of 1,186
+requests at 10%, and no request failed after the rollback; a canary six times slower was rolled back
+on `canary p95 2425 ms exceeds the baseline's 247 ms × 1.20`; the audit trail held all eleven moves.
+
+Building it found a defect, now fixed: promotion swapped the route's baseline flag in one statement,
+which a row-by-row unique index can refuse depending on row order; the swap now clears the old flag
+first.
+
+**Exit:** met — a canary walks 10 → 25 → 50 → 100 on healthy metrics; an injected error rate on the
+canary aborts it and restores baseline weights automatically, with the reason recorded.
+
+**Deviations.**
+
+- Experiments' comparison read model (per-arm metrics with bootstrap intervals) needs per-request
+  records, which arrive with the durable usage stream in Phase 13, and was built there (see Phase
+  13). Fixed-weight A/B splits with sticky bucketing worked from this phase through `/v1/routes`.
+- The CLI and dashboard surfaces arrive with the CLI (Phase 14) and the dashboard (Phase 15).
+
+**Original plan**
 
 **Deliverables**
 
@@ -454,7 +962,71 @@ it and restores baseline weights automatically, with the reason recorded.
 
 ---
 
-## Phase 13 — Cost accounting
+## Phase 13 — Cost accounting ✅
+
+**Status: complete**, with the deviations below.
+
+**Delivered** ([ADR-0039](./architecture-decisions/0039-usage-pipeline-and-costing.md))
+
+- `packages/costing`: exact integer-micro arithmetic (rationals, rounded once, half up), versioned
+  pricing profiles, compute-time attribution (a replica's resources over its parallel slots, for the
+  request's generation time), sampling correction, and the stated assumptions.
+- Gateway: every usage record is also published to the `NEBULA_USAGE` JetStream WorkQueue, with the
+  event id as the message id (2-minute de-duplication), from a bounded buffer that sheds into
+  `nebula_usage_events_dropped_total` rather than block or lose silently.
+- Controller usage ingester, on the leader: the stream's single durable consumer; each batch is
+  priced, stored in `requests` idempotently, its hourly `usage_records` rebuilt from the rows, and
+  acknowledged only after it commits. `nebula_usage_ingest_lag_seconds`,
+  `nebula_estimated_cost_micros_total{org,deployment}`.
+- Control plane: `GET /v1/usage` and `GET /v1/costs` (grouped by deployment, API key, hour or not
+  at all; costs with their assumptions and the profile versions used), `GET`/`POST
+  /v1/pricing-profiles` (each create is the next immutable version).
+- Experiments, carried from Phase 12: `/v1/experiments` (start, list, read, stop) observes a
+  route's split over a window, and `/v1/experiments/{id}/results` compares each arm with the
+  baseline from the stored request rows — requests, error rate, p50/p95, tokens per second, cost per
+  1 000 tokens — with seeded bootstrap intervals (`packages/abtest`) and an explicit refusal to
+  claim significance. One running experiment per route, by the database.
+- Migration 000013 (a request may be `failed`); `nebula-migrate up` keeps three months of
+  `requests` and `audit_logs` partitions ahead, run by every migrate init container and a daily
+  CronJob; JetStream on the development NATS.
+
+**Tests.** Golden costs — known inputs to exact micros, half-up rounding at the boundary, GPUs,
+markup, 1 000 one-second requests summing to exactly 12 000 µ, a historical cost unchanged under a
+new version; sampling correction. Store, as `nebula_controller`: pricing, storage and rollup; a
+redelivered batch changes nothing; a later price change leaves history, and a mid-hour one prices
+only the later requests; a record from before the organization's profile falls back to the default.
+Ingester against embedded JetStream: records stored and acknowledged, an unreadable one removed and
+counted, a failed batch redelivered, only the leader ingests. Gateway sink: one message per record,
+a redelivered record de-duplicated, a full buffer shed and counted, records held through an outage.
+Control plane: pricing versions, usage grouping and totals, costs with assumptions, refusals.
+`tests/e2e/kind/phase13_demo.py`: **1 000 requests reconciled exactly** — the client's 5 000 prompt
+and 8 000 completion tokens equal the new request rows; rows, rollups, `/v1/usage` and `/v1/costs`
+agree on every count and on the cost (1 032 µ); after a price change the first requests still cost
+1 032 µ, the 50 after it cost 199 µ under v2, and the rebuilt rollups hold exactly 1 231 µ. The
+same demo runs an experiment: a sticky 50/50 split by user against a variant five times slower —
+all 40 users stayed on their arm — compared as p50 +316 ms, 95% CI [314, 316], significance not
+claimed. Experiment tests: identical arms span zero, a clear difference excludes it, results are
+reproducible under the experiment's seed, too few samples refuse an interval; through the API, a
+second running experiment on a route is refused and a stopped one's intervals do not move.
+
+Building it found two defects, now fixed: a version effective partway through an hour would have
+priced that hour's later requests inconsistently with the rollup's recorded profile (pricing is now
+per request, by the instant it ran); and a record older than the organization's first version would
+have failed its whole batch forever (it now falls back to the global default).
+
+**Exit:** met — 1 000 requests reconcile from the client's counts to the request rows to the
+rollups to the reported cost, and the cost report explains its assumptions. `nebula costs` arrives
+with the CLI in Phase 14.
+
+**Deviations** (ADR-0039).
+
+- The usage record does not yet carry a denormalised `resource_profile`; the ingester reads the
+  deployment's resources at ingestion.
+- No local-file spool behind the gateway's buffer: its root filesystem is read-only. Loss beyond the
+  buffer is shed and counted.
+- Development NATS keeps JetStream on an emptyDir.
+
+**Original plan**
 
 **Deliverables**
 

@@ -130,6 +130,12 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
+		// The partitioned tables have no default partition (migration 000006), so an
+		// insert past the horizon fails. Every `up` — each migrate init container,
+		// and the partitions CronJob — extends it; the function is idempotent.
+		if err := db.EnsurePartitions(ctx, pool, partitionMonthsAhead); err != nil {
+			return err
+		}
 		if len(applied) == 0 {
 			fmt.Printf("no pending migrations; schema is at version %d\n", runner.Target())
 			return nil
@@ -200,3 +206,6 @@ func run(args []string) error {
 	}
 	return nil
 }
+
+// partitionMonthsAhead is how far ahead `up` keeps monthly partitions.
+const partitionMonthsAhead = 3

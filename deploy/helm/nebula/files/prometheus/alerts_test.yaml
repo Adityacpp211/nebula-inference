@@ -1,0 +1,200 @@
+# promtool unit tests for alerts.yaml: every alert fires on the series that should
+# trigger it and stays silent on a healthy variant. Run: make alerts-test.
+rule_files:
+  - alerts.yaml
+evaluation_interval: 1m
+
+tests:
+  # --- error budget burn -----------------------------------------------------
+  - interval: 1m
+    input_series:
+      # 10 req/s, 5% of them 5xx: 50x the 0.1% budget.
+      - series: 'nebula_requests_total{status_class="2xx"}'
+        values: '0+570x400'
+      - series: 'nebula_requests_total{status_class="5xx"}'
+        values: '0+30x400'
+    alert_rule_test:
+      - eval_time: 6h
+        alertname: NebulaSLOErrorBudgetBurn
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "Error budget burning at more than 14x"
+              action: "Investigate the error class breakdown on the Fleet Overview dashboard."
+  - interval: 1m
+    input_series:
+      # 0.05% errors: within budget.
+      - series: 'nebula_requests_total{status_class="2xx"}'
+        values: '0+1999x400'
+      - series: 'nebula_requests_total{status_class="5xx"}'
+        values: '0+1x400'
+    alert_rule_test:
+      - eval_time: 6h
+        alertname: NebulaSLOErrorBudgetBurn
+        exp_alerts: []
+
+  # --- no healthy endpoints --------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'nebula_endpoints{deployment="qwen",state="stale"}'
+        values: '2x10'
+      - series: 'nebula_endpoints{deployment="ok",state="ready"}'
+        values: '1x10'
+      - series: 'nebula_endpoints{deployment="ok",state="stale"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: NebulaNoHealthyEndpoints
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: NebulaNoHealthyEndpoints
+        exp_alerts:
+          - exp_labels: {severity: page, deployment: qwen}
+            exp_annotations:
+              summary: "qwen has no endpoint that can take traffic"
+              action: "Model load failure or node loss: check the deployment's worker events."
+
+  # --- queue saturated -------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'nebula_queue_depth{deployment="qwen",priority="NORMAL"}'
+        values: '16x20'
+      - series: 'nebula_queue_drops_total{deployment="qwen",reason="queue_full"}'
+        values: '0+50x20'
+      # Deep but not dropping: busy, not saturated.
+      - series: 'nebula_queue_depth{deployment="calm",priority="NORMAL"}'
+        values: '10x20'
+      - series: 'nebula_queue_drops_total{deployment="calm",reason="queue_full"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: NebulaQueueSaturated
+        exp_alerts:
+          - exp_labels: {severity: page, deployment: qwen}
+            exp_annotations:
+              summary: "qwen's admission queue is full and shedding"
+              action: "Capacity: add replicas, or check the autoscaler's decisions."
+
+  # --- TTFT ------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Every request in the 5 s bucket: p95 well over 2 s.
+      - series: 'nebula_ttft_seconds_bucket{deployment="slow",le="1"}'
+        values: '0x40'
+      - series: 'nebula_ttft_seconds_bucket{deployment="slow",le="5"}'
+        values: '0+10x40'
+      - series: 'nebula_ttft_seconds_bucket{deployment="slow",le="+Inf"}'
+        values: '0+10x40'
+      - series: 'nebula_ttft_seconds_bucket{deployment="fast",le="1"}'
+        values: '0+10x40'
+      - series: 'nebula_ttft_seconds_bucket{deployment="fast",le="5"}'
+        values: '0+10x40'
+      - series: 'nebula_ttft_seconds_bucket{deployment="fast",le="+Inf"}'
+        values: '0+10x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: NebulaTTFTHigh
+        exp_alerts:
+          - exp_labels: {severity: ticket, deployment: slow}
+            exp_annotations:
+              summary: "p95 time to first token on slow is over twice the 1 s target"
+              action: "Saturation or a slow endpoint: Request Path dashboard, then the exemplar trace."
+
+  # --- breaker ---------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'nebula_breaker_state{deployment="qwen",endpoint="pod-b",pod="pod-b"}'
+        values: '2x10'
+      - series: 'nebula_breaker_state{deployment="qwen",endpoint="pod-a",pod="pod-a"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: NebulaBreakerOpen
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: NebulaBreakerOpen
+        exp_alerts:
+          - exp_labels: {severity: ticket, deployment: qwen, endpoint: pod-b}
+            exp_annotations:
+              summary: "A breaker on qwen has been open for 5 minutes"
+              action: "An endpoint is persistently bad: check its logs and restart it."
+
+  # --- reconcile -------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'nebula_reconcile_errors_total{reconciler="deployment",error_class="kubernetes"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: NebulaReconcileFailing
+        exp_alerts:
+          - exp_labels: {severity: page, reconciler: deployment}
+            exp_annotations:
+              summary: "The deployment reconciler keeps failing"
+              action: "The control plane cannot converge: controller logs, by error_class."
+  - interval: 1m
+    input_series:
+      - series: 'nebula_reconcile_errors_total{reconciler="deployment",error_class="kubernetes"}'
+        values: '3x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: NebulaReconcileFailing
+        exp_alerts: []
+
+  # --- generation lag --------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'nebula_generation_lag{deployment="stuck"}'
+        values: '1x10'
+      - series: 'nebula_generation_lag{deployment="fine"}'
+        values: '1 0 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: NebulaGenerationLagStuck
+        exp_alerts:
+          - exp_labels: {severity: ticket, deployment: stuck}
+            exp_annotations:
+              summary: "stuck's desired state has not been observed for 5 minutes"
+              action: "The reconciler is wedged on one item: controller logs for this deployment."
+
+  # --- capacity rejections ---------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'nebula_capacity_admission_total{result="rejected",reason="memory"}'
+        values: '0 0 1 1 1'
+      - series: 'nebula_capacity_admission_total{result="admitted",reason="fits"}'
+        values: '0+1x5'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: NebulaCapacityRejections
+        exp_alerts:
+          - exp_labels: {severity: ticket}
+            exp_annotations:
+              summary: "Deployments are being refused for lack of capacity"
+              action: "The cluster needs nodes, or requests are mis-sized."
+
+  # --- schema skew -----------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'nebula_schema_version{service="nebula-controlplane"}'
+        values: '11x5'
+      - series: 'nebula_schema_version{service="nebula-controller"}'
+        values: '10x5'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: NebulaSchemaVersionSkew
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "Services disagree on the database schema version"
+              action: "A partial upgrade: finish or roll back the release."
+  - interval: 1m
+    input_series:
+      - series: 'nebula_schema_version{service="nebula-controlplane"}'
+        values: '11x5'
+      - series: 'nebula_schema_version{service="nebula-controller"}'
+        values: '11x5'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: NebulaSchemaVersionSkew
+        exp_alerts: []

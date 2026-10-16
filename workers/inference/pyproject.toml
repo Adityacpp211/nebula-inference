@@ -16,6 +16,13 @@ dependencies = [
     "httpx>=0.27",
     "prometheus-client>=0.20",
     "pydantic>=2.6",
+    # Heartbeats to the gateway's router. Imported only when NEBULA_NATS_URL is set.
+    "nats-py>=2.6",
+    # Tracing: the API always (its no-op tracer makes spans free), the SDK and
+    # the OTLP/HTTP exporter for when NEBULA_OTLP_ENDPOINT is set.
+    "opentelemetry-api>=1.25",
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-exporter-otlp-proto-http>=1.25",
 ]
 
 [project.optional-dependencies]

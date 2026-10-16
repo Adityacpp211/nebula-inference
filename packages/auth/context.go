@@ -20,6 +20,9 @@ import (
 type Identity struct {
 	// OrgID is the tenant. Always set.
 	OrgID uuid.UUID
+	// OrgSlug is the tenant's stable short name. Populated by the gateway, which
+	// matches it against the static route table; empty where nothing needs it.
+	OrgSlug string
 	// ActorType is how the caller authenticated.
 	ActorType models.ActorType
 	// ActorID is the api_keys.id or users.id, for the audit trail.

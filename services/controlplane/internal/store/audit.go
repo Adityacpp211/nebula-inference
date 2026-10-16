@@ -55,6 +55,7 @@ const (
 	ActionModelVersionFinalize = "model_version.finalize"
 	ActionModelVersionFail     = "model_version.fail"
 	ActionModelVersionArchive  = "model_version.archive"
+	ActionModelVersionVerify   = "model_version.verify"
 
 	ActionDeploymentCreate     = "deployment.create"
 	ActionDeploymentUpdate     = "deployment.update"
@@ -64,6 +65,21 @@ const (
 	ActionDeploymentStart      = "deployment.start"
 	ActionDeploymentTransition = "deployment.transition"
 	ActionDeploymentDelete     = "deployment.delete"
+
+	ActionRouteCreate = "route.create"
+	ActionRouteUpdate = "route.update"
+	ActionRouteDelete = "route.delete"
+
+	ActionRolloutCreate  = "rollout.create"
+	ActionRolloutPause   = "rollout.pause"
+	ActionRolloutResume  = "rollout.resume"
+	ActionRolloutPromote = "rollout.promote"
+	ActionRolloutAbort   = "rollout.abort"
+
+	ActionPricingCreate = "pricing_profile.create"
+
+	ActionExperimentCreate = "experiment.create"
+	ActionExperimentStop   = "experiment.stop"
 )
 
 // Audit resource types.
@@ -74,6 +90,11 @@ const (
 	ResourceModel        = "model"
 	ResourceModelVersion = "model_version"
 	ResourceDeployment   = "deployment"
+	ResourceRoute        = "route"
+	ResourceRollout      = "rollout"
+	// ResourcePricingProfile is a pricing profile version.
+	ResourcePricingProfile = "pricing_profile"
+	ResourceExperiment     = "experiment"
 )
 
 // Entry is one audit record.

@@ -12,6 +12,9 @@ import (
 
 	"github.com/adityasatwar321/nebula/packages/telemetry"
 	"github.com/adityasatwar321/nebula/packages/version"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // Middleware wraps a handler.
@@ -68,9 +71,11 @@ func validRequestID(s string) bool {
 	return true
 }
 
-// Trace continues an incoming W3C trace or starts a new one, and puts it on the
-// context so every log line carries trace_id and span_id.
-func Trace() Middleware {
+// Trace continues an incoming W3C trace or starts a new one, opens the service's
+// root span (spanName, e.g. "gateway.request"), and puts the trace context on the
+// request so every log line carries trace_id and span_id. The span is closed on
+// every path, with the response status, and marked as an error for a 5xx.
+func Trace(spanName string) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tc, err := telemetry.ParseTraceparent(r.Header.Get(telemetry.HeaderTraceparent))
@@ -85,7 +90,19 @@ func Trace() Middleware {
 			} else {
 				tc.TraceState = r.Header.Get(telemetry.HeaderTracestate)
 			}
-			next.ServeHTTP(w, r.WithContext(telemetry.WithTrace(r.Context(), tc)))
+			ctx, span, tc := telemetry.StartRequestSpan(r.Context(), spanName, tc)
+			defer span.End()
+			span.SetAttributes(attribute.String("http.request.method", r.Method),
+				attribute.String("url.path", r.URL.Path))
+			if id := telemetry.RequestID(ctx); id != "" {
+				span.SetAttributes(attribute.String("request_id", id))
+			}
+			rec := &statusRecorder{ResponseWriter: w}
+			next.ServeHTTP(rec, r.WithContext(telemetry.WithTrace(ctx, tc)))
+			span.SetAttributes(attribute.Int("http.response.status_code", rec.status))
+			if rec.status >= 500 {
+				span.SetStatus(codes.Error, http.StatusText(rec.status))
+			}
 		})
 	}
 }
@@ -197,6 +214,11 @@ func (s *statusRecorder) Flush() {
 		f.Flush()
 	}
 }
+
+// Unwrap exposes the underlying writer to http.ResponseController, so a streaming
+// handler can set per-write deadlines through the middleware chain. Without it the
+// controller stops at this wrapper and SetWriteDeadline reports "not supported".
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
 // AccessLog logs one structured line per request after it completes.
 //

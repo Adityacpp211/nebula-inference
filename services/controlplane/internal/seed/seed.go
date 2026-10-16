@@ -106,9 +106,17 @@ func Run(ctx context.Context, cfg *config.Config, st *store.Store, hasher *auth.
 			return nil
 		}
 
-		generated, err := hasher.Generate()
-		if err != nil {
-			return fmt.Errorf("generating the seed API key: %w", err)
+		var generated auth.GeneratedKey
+		if fixed := cfg.Dev.SeedKey.Reveal(); fixed != "" {
+			generated, err = hasher.FromPlaintext(fixed)
+			if err != nil {
+				return fmt.Errorf("NEBULA_DEV_SEED_KEY is not shaped like an API key (nbk_ + 50 base62 characters): %w", err)
+			}
+		} else {
+			generated, err = hasher.Generate()
+			if err != nil {
+				return fmt.Errorf("generating the seed API key: %w", err)
+			}
 		}
 		id, err := db.NewID()
 		if err != nil {

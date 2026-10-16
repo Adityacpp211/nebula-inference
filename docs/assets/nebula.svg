@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="NEBULA">
+  <circle cx="32" cy="32" r="30" fill="#12161d"/>
+  <circle cx="32" cy="32" r="6" fill="#e6e9ef"/>
+  <circle cx="16" cy="22" r="3.5" fill="#9aa4b2"/>
+  <circle cx="48" cy="20" r="3.5" fill="#9aa4b2"/>
+  <circle cx="44" cy="46" r="3.5" fill="#9aa4b2"/>
+  <circle cx="18" cy="44" r="3.5" fill="#9aa4b2"/>
+  <path d="M32 32L16 22M32 32L48 20M32 32L44 46M32 32L18 44" stroke="#3d4757" stroke-width="2"/>
+</svg>

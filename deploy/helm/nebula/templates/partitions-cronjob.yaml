@@ -1,0 +1,35 @@
+# The monthly partitions of requests and audit_logs have no default partition: an
+# insert past the horizon fails (migration 000006). `nebula-migrate up` keeps the
+# next three months ready and is idempotent, so running it daily keeps the horizon
+# moving on a cluster whose pods never restart (packages/db.EnsurePartitions).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nebula-partitions
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "nebula.labels" . | nindent 4 }}
+spec:
+  schedule: "17 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels: {app.kubernetes.io/name: nebula-migrate}
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext: {{- include "nebula.podSecurity" . | nindent 12 }}
+          containers:
+            - name: migrate
+              image: {{ include "nebula.image" (dict "root" . "name" "migrate") }}
+              imagePullPolicy: {{ .Values.images.pullPolicy }}
+              args: ["up"]
+              env:
+                - name: NEBULA_DATABASE_URL
+                  valueFrom: {secretKeyRef: {name: nebula-secrets, key: NEBULA_DATABASE_URL}}
+              securityContext: {{- include "nebula.containerSecurity" . | nindent 16 }}

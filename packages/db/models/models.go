@@ -335,6 +335,7 @@ type Node struct {
 	Taints         json.RawMessage `json:"taints"`
 	Capacity       json.RawMessage `json:"capacity"`
 	Allocatable    json.RawMessage `json:"allocatable"`
+	Requested      json.RawMessage `json:"requested"`
 	Conditions     json.RawMessage `json:"conditions"`
 	Schedulable    bool            `json:"schedulable"`
 	KubeletVersion *string         `json:"kubelet_version,omitempty"`

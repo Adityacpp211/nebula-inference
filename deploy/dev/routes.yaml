@@ -1,0 +1,27 @@
+# Development route table for nebula-gateway (Phase 4: static routing).
+#
+# One route for the development organization that `make run-controlplane` seeds
+# (slug "dev"), pointing at the mock worker `make run-worker-mock` starts on :8090.
+# Dynamic routing from the control plane replaces this file in Phase 6.
+#
+# The mock runtime is a declared stub: it generates deterministic placeholder
+# tokens, not language. Responses say so in nebula.runtime ("mock").
+routes:
+  - model: nebula-mock
+    org: dev
+    task: chat
+    context_window: 4096
+    # The mock has no chat training and no special tokens; plain concatenation is
+    # the honest template for it.
+    chat_template: plain
+    default_max_tokens: 64
+    timeout: 60s
+    capabilities:
+      streaming: true
+      json_mode: false
+    targets:
+      - deployment: mock-dev
+        model_version: "dev:mock"
+        weight: 100
+        label: baseline
+        endpoints: ["http://127.0.0.1:8090"]
