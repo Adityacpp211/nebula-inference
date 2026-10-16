@@ -19,26 +19,27 @@ for chunk in client.chat.completions.create(
 
 ---
 
-> ## Project status — Phase 9 complete
+> ## Project status — Phase 10 complete
 >
-> **Load raises replicas, idle lowers them, and every decision is a database row.** A deployment that
-> opts in to autoscaling is scaled by `nebula-autoscaler` from Prometheus signals — queue wait p95
-> and in-flight concurrency per replica — with stabilization windows, a cooldown, a maximum step,
-> its replica bounds and a rollout interlock. When it cannot see, it holds rather than guessing.
-> Every change, and every reason not to change, is an `autoscaling_events` row with the signals
-> behind it, readable through `GET /v1/deployments/{id}/autoscaling-events`.
+> **Rolling updates, crashes and dependency outages under live load cost no requests.**
+> `make test-failure` keeps clients streaming while every worker is replaced, the gateway restarts,
+> a worker is killed, and the control plane, PostgreSQL, Redis and NATS each go down: 9,165
+> requests, 3 errors — the in-flight requests of the process that was SIGKILLed. Retries follow a
+> classification table (a request that has emitted output is never retried) and spend from a retry
+> budget, so a total outage multiplies load by 1.1, not by the attempt cap.
 >
-> What works now: everything from Phases 1–8 — the schema and row-level security, API-key auth, the
+> What works now: everything from Phases 1–9 — the schema and row-level security, API-key auth, the
 > registry and lifecycle, the worker with llama.cpp and mock runtimes, the OpenAI-compatible gateway,
 > the deployment controller with verified artifacts, health-aware routing with heartbeats, the
-> bounded admission queue, metrics, traces, correlated logs and dashboards — plus autoscaling.
+> bounded admission queue, metrics, traces, correlated logs and dashboards, and autoscaling — plus
+> the reliability mechanisms in [docs/reliability.md](docs/reliability.md).
 >
-> What this deliberately does NOT do yet: no scale-to-zero, retries only before a worker starts work
-> (Phase 10), no canaries (Phase 12) or cost accounting (Phase 13). Usage records are log lines until
+> What this deliberately does NOT do yet: no scale-to-zero, no canaries (Phase 12) or cost
+> accounting (Phase 13). Usage records are log lines until
 > the durable event stream.
 >
-> In progress: [Phase 10](docs/roadmap.md#phase-10--reliability-mechanisms-) — reliability mechanisms
-> ([docs/reliability.md](docs/reliability.md)). See
+> Next: [Phase 11](docs/roadmap.md#phase-11--model-versioning-and-rollback) — model versioning and
+> rollback. Reliability rules: [docs/reliability.md](docs/reliability.md). See
 > [Capability status](#capability-status).
 
 ## Running it today
@@ -332,7 +333,7 @@ checkout.
 | Bounded queues, concurrency control, backpressure | ✅ **working** — 3× capacity load test: queue at its bound, heap flat, every refusal a 429 with Retry-After | 7 |
 | Metrics, logs, traces, Grafana dashboards | ✅ **working** — kind demo: exemplar → trace → logs for one request; all 28 panels backed by series | 8 |
 | Autoscaling | ✅ **working** — kind demo: 1 → 4 replicas under load, back to 1 after the idle window, every decision a row; gateway CPU HPA opt-in | 9 |
-| Retries, breakers, timeouts, graceful shutdown | 🚧 **in progress** — failure classification and a retry budget (outage amplification 1.10); breakers and drain from earlier phases; rolling-restart test pending | 10 |
+| Retries, breakers, timeouts, graceful shutdown | ✅ **working** — `make test-failure`: 9,165 requests through rolling updates, a killed pod and four dependency outages, 3 errors (the crashed process's in-flight) | 10 |
 | Model versioning, rollback | ⬜ not started | 11 |
 | Canary rollouts, A/B testing | ⬜ not started | 12 |
 | Token accounting, cost estimation, usage analytics | ⬜ not started | 13 |

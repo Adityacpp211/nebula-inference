@@ -92,6 +92,11 @@ type entry struct {
 	cred     *controlplane.Credential // nil for a negative entry
 	fetched  time.Time
 	negative bool
+	// staleUntil is set while the record is being served past its TTL because the
+	// control plane could not answer: until then it is served without asking
+	// again, so an outage costs one failed lookup per LocalTTL rather than one per
+	// request. The grace cap on fetched still applies.
+	staleUntil time.Time
 }
 
 // New builds a resolver.
@@ -159,6 +164,9 @@ func (r *Resolver) record(ctx context.Context, prefix string) (cred *controlplan
 		if now.Sub(e.fetched) < ttl {
 			return e.cred, e.negative, false, nil
 		}
+		if !e.negative && now.Before(e.staleUntil) && now.Sub(e.fetched) < r.o.LocalTTL+r.o.StaleGrace {
+			return e.cred, false, true, nil
+		}
 	}
 
 	// The shared tier keeps a record for its TTL plus the stale grace. Within the
@@ -197,6 +205,7 @@ func (r *Resolver) record(ctx context.Context, prefix string) (cred *controlplan
 				slog.String("key_prefix", prefix),
 				slog.Duration("age", now.Sub(e.fetched)),
 				slog.String("cause", err.Error()))
+			r.store(prefix, &entry{cred: e.cred, fetched: e.fetched, staleUntil: now.Add(r.o.LocalTTL)})
 			return e.cred, false, true, nil
 		}
 		if shared != nil && now.Sub(sharedAt) < r.o.RedisTTL+r.o.StaleGrace {
@@ -205,7 +214,8 @@ func (r *Resolver) record(ctx context.Context, prefix string) (cred *controlplan
 				slog.Duration("age", now.Sub(sharedAt)),
 				slog.String("cause", err.Error()))
 			// Kept locally with its original age, so the grace stays bounded.
-			r.store(prefix, &entry{cred: shared, fetched: sharedAt.Add(r.o.RedisTTL - r.o.LocalTTL)})
+			r.store(prefix, &entry{cred: shared, fetched: sharedAt.Add(r.o.RedisTTL - r.o.LocalTTL),
+				staleUntil: now.Add(r.o.LocalTTL)})
 			return shared, false, true, nil
 		}
 		r.o.Logger.ErrorContext(ctx, "cannot verify a credential: the control plane is unreachable",

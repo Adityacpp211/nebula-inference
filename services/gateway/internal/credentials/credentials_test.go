@@ -228,6 +228,37 @@ func TestControlPlaneOutage(t *testing.T) {
 	}
 }
 
+// During an outage a stale record is served without asking the control plane on
+// every request: one failed lookup per LocalTTL, not one per request, so an outage
+// does not add a lookup timeout to every request's latency.
+func TestOutageCostsOneLookupPerLocalTTL(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, false)
+	if _, err := f.r.Authenticate(context.Background(), f.key); err != nil {
+		t.Fatal(err)
+	}
+	f.cp.set(true)
+	f.clk.advance(30 * time.Second) // past the local TTL, inside the grace
+	before := f.cp.calls.Load()
+	for range 50 {
+		if p, err := f.r.Authenticate(context.Background(), f.key); err != nil || !p.Degraded {
+			t.Fatalf("degraded=%v err=%v", p.Degraded, err)
+		}
+	}
+	if n := f.cp.calls.Load() - before; n != 1 {
+		t.Fatalf("50 requests during an outage made %d lookups; want 1", n)
+	}
+	// After LocalTTL it asks again, and recovers as soon as the control plane does.
+	f.clk.advance(6 * time.Second)
+	f.cp.set(false)
+	if p, err := f.r.Authenticate(context.Background(), f.key); err != nil || p.Degraded {
+		t.Fatalf("after recovery: degraded=%v err=%v", p.Degraded, err)
+	}
+	if n := f.cp.calls.Load() - before; n != 2 {
+		t.Fatalf("lookups %d, want 2", n)
+	}
+}
+
 // A cold cache under load is one lookup per prefix, not one per request.
 func TestConcurrentMissesShareOneLookup(t *testing.T) {
 	t.Parallel()

@@ -351,7 +351,7 @@ func (r *Router) Select(route *routes.Route, req Request) (*Selection, error) {
 			continue
 		}
 		o := fo
-		o.ModelVersion = t.ModelVersion
+		o.ModelVersion = pinnedVersion(d, t)
 		ok, excluded := routing.Filter(eps, rq, o)
 		for _, why := range excluded {
 			reasons[why]++
@@ -375,7 +375,10 @@ func (r *Router) Select(route *routes.Route, req Request) (*Selection, error) {
 	key := target.Key(route)
 	strategy := r.strategy(route, key)
 	o := fo
-	o.ModelVersion = target.ModelVersion
+	r.mu.RLock()
+	o.ModelVersion = pinnedVersion(r.deps[key], target)
+	static := r.deps[key] != nil && r.deps[key].static
+	r.mu.RUnlock()
 
 	cands := eligible[idx]
 	for len(cands) > 0 {
@@ -391,16 +394,37 @@ func (r *Router) Select(route *routes.Route, req Request) (*Selection, error) {
 		if ep != nil && ep.breaker.Acquire(now) {
 			ep.inflight.Add(1)
 			age := time.Duration(-1)
+			served := ""
 			if c := cands[j]; c.Heartbeat != nil {
 				age = now.Sub(c.HeardAt)
+				if routing.Fresh(&c, o) {
+					served = c.Heartbeat.ModelVersion
+				}
 			}
 			return &Selection{Route: route, Target: target, URL: ep.url, EndpointID: ep.id,
-				Strategy: strategy.Name(), HeartbeatAge: age, ep: ep, r: r}, nil
+				Strategy: strategy.Name(), HeartbeatAge: age, ServedVersion: served,
+				Static: static, ep: ep, r: r}, nil
 		}
 		cands = append(cands[:j:j], cands[j+1:]...)
 	}
 	reasons[routing.ExcludedBreakerOpen]++
 	return nil, &NoEndpointError{Route: route.Model, Reasons: reasons}
+}
+
+// pinnedVersion is the version a target's endpoints must report to be eligible.
+//
+// Only a static target is pinned. A discovered endpoint is this deployment's pod by
+// construction (its EndpointSlice is selected by the deployment's id), and during a
+// rolling update a deployment legitimately serves its old version until the new
+// pods are ready. Excluding the old version there would turn every version change
+// into an outage until the first new pod is up, and a version that cannot load
+// into a total one; Kubernetes keeps the old pods precisely so they keep serving
+// (maxUnavailable 0). The gateway asserts the endpoint's own version instead.
+func pinnedVersion(d *deployment, t *routes.Target) string {
+	if d != nil && d.static {
+		return t.ModelVersion
+	}
+	return ""
 }
 
 // strategy returns the (route, deployment) pair's strategy instance.
@@ -456,6 +480,13 @@ type Selection struct {
 	// HeartbeatAge is how old the chosen endpoint's last heartbeat was; negative
 	// when it has none.
 	HeartbeatAge time.Duration
+	// ServedVersion is the model version the endpoint's fresh heartbeat reports,
+	// or empty when it has none. During a rolling update a deployment serves two
+	// versions, and this is the one this request will get.
+	ServedVersion string
+	// Static is true for an endpoint written into a static route, which is pinned
+	// to the target's version because nothing else vouches for what it serves.
+	Static bool
 
 	ep   *endpoint
 	r    *Router

@@ -430,3 +430,60 @@ func TestHeartbeatsOverNATS(t *testing.T) {
 		t.Fatal("the broadcast did not arrive")
 	}
 }
+
+// During a rolling update a deployment serves its old version until the new pods
+// are ready. A discovered endpoint still reporting the old version stays eligible
+// — excluding it would turn every version change into an outage, and a version
+// that cannot load into a total one — and the selection says which version it
+// serves, which is what the gateway asserts and records.
+func TestMidRolloutEndpointsServeTheirOwnVersion(t *testing.T) {
+	t.Parallel()
+	c := &clock{t: time.Unix(1_800_000_000, 0)}
+	r, rt := newRouter(t, c, true)
+	// Target a pins m:v1; its pods still run m:v0 and one has moved on to m:v1.
+	r.SetEndpoints(depA, pods("a", 2, true))
+	for i, v := range []string{"m:v0", "m:v1"} {
+		r.ObserveHeartbeat(routing.Heartbeat{Pod: fmt.Sprintf("a-%d", i), DeploymentID: depA, ModelVersion: v,
+			State: "ready", Accepting: true, Instance: "i", Sequence: 1, ParallelSlots: 4})
+	}
+	seen := map[string]bool{}
+	for range 40 {
+		sel, err := r.Select(rt, router.Request{Key: fmt.Sprint(len(seen)), Pin: "a"})
+		if err != nil {
+			t.Fatalf("an old-version replica mid-rollout must stay eligible: %v", err)
+		}
+		if sel.Static || sel.ServedVersion == "" {
+			t.Fatalf("selection: static=%v served=%q", sel.Static, sel.ServedVersion)
+		}
+		seen[sel.ServedVersion] = true
+		sel.Done(router.Succeeded)
+	}
+	if !seen["m:v0"] || !seen["m:v1"] {
+		t.Errorf("both versions should serve mid-rollout, saw %v", seen)
+	}
+}
+
+// A static endpoint is pinned: nothing but its heartbeat says what it serves, so a
+// mismatch is a misconfiguration, excluded rather than answered with a 409.
+func TestStaticEndpointsArePinnedToTheirVersion(t *testing.T) {
+	t.Parallel()
+	c := &clock{t: time.Unix(1_800_000_000, 0)}
+	r := router.New(router.Options{Now: c.Now, StaleAfter: 3 * time.Second, HeartbeatsLive: func() bool { return true }})
+	tbl, err := routes.FromPayload(&routes.Payload{Version: "s", Routes: []*routes.Route{{
+		ID: "r-s", Model: "chat", Org: "acme", ContextWindow: 4096,
+		Targets: []*routes.Target{{Deployment: "s", DeploymentID: depA, ModelVersion: "m:v2", Weight: 100,
+			Endpoints: []string{"http://s-0:8090"}}},
+	}}}, c.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.SetTable(tbl)
+	rt, _ := tbl.Lookup("acme", "chat")
+	r.ObserveHeartbeat(routing.Heartbeat{Pod: "http://s-0:8090", DeploymentID: depA, ModelVersion: "m:v1",
+		State: "ready", Accepting: true, Instance: "i", Sequence: 1})
+	_, err = r.Select(rt, router.Request{Key: "k"})
+	var none *router.NoEndpointError
+	if !errors.As(err, &none) || none.Reasons[routing.ExcludedVersion] != 1 {
+		t.Fatalf("a static endpoint serving another version must be excluded: %v", err)
+	}
+}

@@ -5,8 +5,8 @@ can afford, and what each failure mode looks like from the outside. The dependen
 [architecture.md §8.4](./architecture.md#84-dependency-failure-expectations) are the contract this
 document refines.
 
-Status: Phase 10 in progress. Sections marked *(Phase 10, pending)* describe behaviour that is
-designed and not yet verified by a test.
+Every row of the failure-mode table in §8 is exercised under live load by `make test-failure`
+(`tests/e2e/kind/phase10_failure.py`), which CI runs on kind.
 
 ## 1. The rule that matters most
 
@@ -60,17 +60,39 @@ does not consume it.
 A failover to a *different* replica happens at once: the failure was that replica's, and waiting
 helps no one. A wait before retrying the *same* target uses exponential backoff with full jitter,
 uniform in `[0, min(cap, base·2^(n-1))]` (`reliability.Backoff`). Full jitter rather than equal
-jitter because it spreads synchronized clients furthest for the same mean wait. Its first user is
-the admission queue's requeue path *(Phase 10, pending)*.
+jitter because it spreads synchronized clients furthest for the same mean wait. Its user is the
+admission queue's requeue path: when every replica refuses with the same `Retry-After`, the
+requeued requests would otherwise all be granted at the same instant and refused together again,
+so each pauses `Backoff(n, 50 ms, 1 s)` — never past its deadline — before rejoining.
 
-## 5. Circuit breakers
+## 5. Timeouts
+
+Three layers, each bounding a different thing, and one absolute deadline that all of them agree on.
+
+| Layer | Where | Bound | What it protects |
+|-------|-------|-------|------------------|
+| Connect | gateway → worker dial | 2 s | a dead or partitioned replica costs 2 s, then the request fails over as `connect` |
+| Request deadline | set once at the gateway, sent as `X-Nebula-Deadline` (absolute Unix ms) | `nebula.timeout_ms`, else `NEBULA_GATEWAY_DEFAULT_TIMEOUT` (60 s), capped at `NEBULA_GATEWAY_MAX_TIMEOUT` (10 m) | the caller's whole budget: admission-queue waits, every attempt, and generation all spend from it |
+| Worker enforcement | worker admission and generation | the same deadline | the worker refuses work it cannot start in time and stops generating when the deadline passes |
+
+The deadline is **absolute** rather than a duration on purpose: a duration is re-derived at every
+hop, and each re-derivation quietly grants a fresh budget, so a "5 second" request could take
+fifteen. With an instant, the queue, the gateway and the worker stop at the same moment without
+talking to each other. There is no per-attempt response timeout: a queued request legitimately
+waits, and the deadline governs.
+
+Two further bounds protect the gateway from slow clients rather than slow workers:
+`NEBULA_GATEWAY_STREAM_WRITE_TIMEOUT` (10 s per write to a streaming client) and the SSE keep-alive
+comment every `NEBULA_GATEWAY_KEEPALIVE_INTERVAL` (15 s), so an idle stream is not cut by a proxy.
+
+## 6. Circuit breakers
 
 Per endpoint, per gateway replica (ADR-0014), in `packages/routing`: consecutive failures of the
 classes marked "counts against the breaker" open it; an open breaker rejects at once and the router
 avoids the endpoint; after its cool-off one probe request half-opens it, and a success closes it.
 Saturation never opens a breaker — a full replica is healthy. Exported as `nebula_breaker_state`.
 
-## 6. Shutdown and drain
+## 7. Shutdown and drain
 
 | Component | On SIGTERM | Bound |
 |-----------|------------|-------|
@@ -79,10 +101,10 @@ Saturation never opens a breaker — a full replica is healthy. Exported as `neb
 | control plane | `preStop` sleep 5 s, then drains | — |
 | autoscaler | stops deciding at once; a tick cut short records nothing; releases its advisory lock | — |
 
-The drain-under-rolling-restart test (zero client errors while every worker pod is replaced under
-live load) is *(Phase 10, pending)*.
+`make test-failure` replaces every worker pod (a rolling update through the API) and restarts the
+gateway under eight concurrent streaming and non-streaming clients, with zero client errors.
 
-## 7. Failure modes
+## 8. Failure modes
 
 | Failure | What a client sees | What an operator sees |
 |---------|--------------------|-----------------------|
@@ -91,5 +113,7 @@ live load) is *(Phase 10, pending)*.
 | A replica dies mid-stream | the stream ends with an error event; never a duplicated token | `nebula_streams_interrupted_total` |
 | Every replica of a route down | 503 `no_healthy_endpoint` with `Retry-After` | retries bounded by the budget; `nebula_retries_rejected_budget_total` rising |
 | Every replica full | waits in the admission queue within its deadline, then 429 or 504 `queue_timeout` | `nebula_queue_depth`, `nebula_queue_drops_total`, and the autoscaler scaling up |
+| A worker process crashes (SIGKILL, OOM) | its in-flight requests fail; nothing after | the container restarts in place |
 | Prometheus down | nothing | every autoscaler decision `suppressed_no_signal`: replicas hold |
+| Control plane down | nothing: credentials come from cache, served stale for at most the grace period with one lookup per local TTL | `X-Nebula-Degraded`, the stale-credential warning |
 | PostgreSQL, Redis, NATS, Kubernetes API down | as [architecture.md §8.4](./architecture.md#84-dependency-failure-expectations) | as §8.4 |

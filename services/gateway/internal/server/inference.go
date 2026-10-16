@@ -328,7 +328,7 @@ func (g *Gateway) prepare(w http.ResponseWriter, r *http.Request, kind openai.Ki
 
 			Deadline:     deadline,
 			Priority:     priority,
-			ModelVersion: target.ModelVersion,
+			ModelVersion: assertedVersion(sel),
 			Body:         workerBody(req, prompt, stops),
 		},
 	}
@@ -347,7 +347,7 @@ func (g *Gateway) prepare(w http.ResponseWriter, r *http.Request, kind openai.Ki
 		Route:        route.Model,
 		Deployment:   target.Deployment,
 		DeploymentID: target.DeploymentID,
-		ModelVersion: target.ModelVersion,
+		ModelVersion: servedVersion(sel),
 		Variant:      target.Label,
 		Endpoint:     kind.String(),
 		Priority:     priority,
@@ -564,7 +564,7 @@ func (ex *exchange) meta(now time.Time) *openai.Meta {
 		RequestID:      ex.call.RequestID,
 		Route:          ex.route.Model,
 		Deployment:     ex.target.Deployment,
-		ModelVersion:   ex.target.ModelVersion,
+		ModelVersion:   ex.record.ModelVersion,
 		Variant:        ex.target.Label,
 		DurationMS:     &d,
 		Attempts:       ex.attempts,
@@ -598,7 +598,7 @@ const (
 func setRoutingHeaders(h http.Header, ex *exchange) {
 	h.Set(HeaderRoute, ex.route.Model)
 	h.Set(HeaderDeployment, ex.target.Deployment)
-	h.Set(HeaderModelVersion, ex.target.ModelVersion)
+	h.Set(HeaderModelVersion, ex.record.ModelVersion)
 	if ex.target.Label != "" {
 		h.Set(HeaderVariant, ex.target.Label)
 	}
@@ -723,11 +723,11 @@ func (g *Gateway) replace(ctx context.Context, ex *exchange, cause error) bool {
 	ex.sel.Done(verdictOf(cause))
 	g.m.selected(sel)
 	ex.sel, ex.target = sel, sel.Target
-	ex.call.Endpoint, ex.call.ModelVersion = sel.URL, sel.Target.ModelVersion
+	ex.call.Endpoint, ex.call.ModelVersion = sel.URL, assertedVersion(sel)
 	ex.attempts++
 	g.startAttempt(ctx, ex)
 	ex.record.Deployment, ex.record.DeploymentID = sel.Target.Deployment, sel.Target.DeploymentID
-	ex.record.ModelVersion, ex.record.Variant = sel.Target.ModelVersion, sel.Target.Label
+	ex.record.ModelVersion, ex.record.Variant = servedVersion(sel), sel.Target.Label
 	return true
 }
 
@@ -745,6 +745,13 @@ func (g *Gateway) requeue(ctx context.Context, ex *exchange, cause error) bool {
 	ex.ticket.Release()
 	ex.ticket = nil
 	ex.requeues++
+	// Every replica refused with the same Retry-After, so every requeued request
+	// would be granted at the same instant and refused together again. A jittered
+	// pause before rejoining spreads them (docs/reliability.md §4).
+	if !pause(ctx, reliability.Backoff(ex.requeues, requeueBackoffBase, requeueBackoffCap, nil), ex.call.Deadline) {
+		ex.sel = nil
+		return false
+	}
 	ticket, err := g.d.Queues.Gate(key).Acquire(ctx, ex.prio, ex.call.Deadline, false)
 	if err != nil {
 		g.m.dropped(ex.target.Deployment, err)
@@ -763,10 +770,37 @@ func (g *Gateway) requeue(ctx context.Context, ex *exchange, cause error) bool {
 	}
 	g.m.selected(sel)
 	ex.sel, ex.target = sel, sel.Target
-	ex.call.Endpoint = sel.URL
+	ex.call.Endpoint, ex.call.ModelVersion = sel.URL, assertedVersion(sel)
+	ex.record.ModelVersion = servedVersion(sel)
 	ex.attempts++
 	g.startAttempt(ctx, ex)
 	return true
+}
+
+// The jittered pause before a saturated request rejoins its queue.
+const (
+	requeueBackoffBase = 50 * time.Millisecond
+	requeueBackoffCap  = time.Second
+)
+
+// pause waits d, never past the deadline. False means the request ended first.
+func pause(ctx context.Context, d time.Duration, deadline time.Time) bool {
+	if !deadline.IsZero() {
+		if left := time.Until(deadline); left < d {
+			d = left
+		}
+	}
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // tracer is the gateway's tracer; spans are no-ops unless tracing is configured.
@@ -850,6 +884,26 @@ func (g *Gateway) queueError(w http.ResponseWriter, r *http.Request, err error) 
 			Code: "client_cancelled", Message: "the client closed the request"}
 	}
 	return httpx.ErrInternal(err)
+}
+
+// assertedVersion is the model version the gateway asserts to the worker, which
+// refuses a mismatch with 409. A static endpoint is held to its target's version;
+// a discovered one to the version its own heartbeat reports, because during a
+// rolling update the deployment serves both. With no heartbeat yet, nothing is
+// asserted rather than a guess that would fail an old replica mid-rollout.
+func assertedVersion(sel *router.Selection) string {
+	if sel.Static {
+		return sel.Target.ModelVersion
+	}
+	return sel.ServedVersion
+}
+
+// servedVersion is the version a request is recorded and reported as served by.
+func servedVersion(sel *router.Selection) string {
+	if !sel.Static && sel.ServedVersion != "" {
+		return sel.ServedVersion
+	}
+	return sel.Target.ModelVersion
 }
 
 // failureOf describes a dispatch failure in the reliability package's terms.

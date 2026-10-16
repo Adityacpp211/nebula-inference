@@ -313,12 +313,18 @@ dev-up:
 dev-down:
 	@./scripts/dev-down.sh
 
-## e2e-kind: the Phase 5, 6 and 8 demos against the kind cluster dev-up created
+## e2e-kind: the Phase 5, 6, 8 and 9 demos against the kind cluster dev-up created
 .PHONY: e2e-kind
 e2e-kind:
 	@$(PY) tests/e2e/kind/phase5_demo.py
 	@$(PY) tests/e2e/kind/phase6_demo.py
 	@$(PY) tests/e2e/kind/phase8_demo.py
+	@$(PY) tests/e2e/kind/phase9_demo.py
+
+## test-failure: rolling updates, a killed pod and dependency outages under live load (kind)
+.PHONY: test-failure
+test-failure:
+	@$(PY) tests/e2e/kind/phase10_failure.py
 
 ## dashboards: regenerate the Grafana dashboards from deploy/grafana/generate.py
 .PHONY: dashboards
