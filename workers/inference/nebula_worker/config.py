@@ -108,6 +108,10 @@ class WorkerConfig:
     advertise_url: str = ""
     #: The OpenTelemetry Collector's OTLP/HTTP host:port; empty exports no spans.
     otlp_endpoint: str = ""
+    #: Where a failed load is reported before the process exits: Kubernetes'
+    #: termination-message file, which the controller reads to name the real cause.
+    #: Empty reports nowhere (outside a pod).
+    termination_log: str = ""
 
     @classmethod
     def from_env(cls, getenv: Mapping[str, str] | None = None) -> WorkerConfig:
@@ -142,6 +146,7 @@ class WorkerConfig:
             model_version_id=_env(source, "NEBULA_WORKER_MODEL_VERSION_ID"),
             advertise_url=_env(source, "NEBULA_WORKER_ADVERTISE_URL").rstrip("/"),
             otlp_endpoint=_env(source, "NEBULA_OTLP_ENDPOINT"),
+            termination_log=_env(source, "NEBULA_WORKER_TERMINATION_LOG"),
         )
 
         if cfg.env not in {"dev", "staging", "production"}:

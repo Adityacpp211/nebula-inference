@@ -243,6 +243,8 @@ func podSpec(d *store.Deployment, s Settings, c scheduler.Constraints, selector 
 		// always sends the full header set; a request without one is refused.
 		{Name: "NEBULA_WORKER_STRICT_HEADERS", Value: "true"},
 		{Name: "NEBULA_WORKER_DRAIN_DELAY_S", Value: "5"},
+		// Where a failed load is reported, for the controller to read back.
+		{Name: "NEBULA_WORKER_TERMINATION_LOG", Value: corev1.TerminationMessagePathDefault},
 		// Heartbeat identity: the router matches a heartbeat to the EndpointSlice
 		// entry by pod name (docs/events.md §3.1).
 		{Name: "NEBULA_WORKER_POD_NAME", ValueFrom: &corev1.EnvVarSource{

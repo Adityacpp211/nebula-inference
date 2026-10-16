@@ -26,6 +26,9 @@ type Observed struct {
 	// ArtifactFailure is the artifact puller's reported failure, when any pod's
 	// init container terminated with one.
 	ArtifactFailure *ArtifactFailure
+	// LoadFailure is a worker's own report that its model did not load, read from
+	// the termination message of a worker container that is not ready.
+	LoadFailure *ArtifactFailure
 	// Problems are pod-level explanations: image pull errors, crash loops,
 	// unschedulable pods. Used for the condition message and the failure reason.
 	Problems []string
@@ -97,13 +100,31 @@ func Decide(d *store.Deployment, obs Observed, now time.Time, startingTimeout ti
 			return Decision{To: lifecycle.Failed, Reason: artifactReason(obs.ArtifactFailure.Code),
 				Message: obs.ArtifactFailure.Message}
 		}
+		if obs.LoadFailure != nil {
+			// The worker said why its model did not load. Like a bad artifact, waiting
+			// will not change it.
+			msg := fmt.Sprintf("the model did not load: %s (%s)", obs.LoadFailure.Message, obs.LoadFailure.Code)
+			if obs.Replicas > obs.Updated {
+				msg += "; the previous version keeps serving"
+			}
+			return Decision{To: lifecycle.Failed, Reason: artifactReason(obs.LoadFailure.Code), Message: msg}
+		}
 		if !obs.Current {
 			return Decision{}
 		}
 		switch {
-		case obs.Ready >= want:
+		case rolledOut(obs, want) && obs.Ready >= want:
 			return Decision{To: lifecycle.Ready, Reason: ReasonReplicasReady,
 				Message: fmt.Sprintf("%d/%d replicas ready", obs.Ready, want)}
+		case !rolledOut(obs, want):
+			// Mid-rollout the old version's pods count as ready, but they are not the
+			// revision being started: it is ready when every pod runs it.
+			if age > startingTimeout {
+				return Decision{To: lifecycle.Failed, Reason: ReasonStartTimeout,
+					Message: fmt.Sprintf("the new revision did not become ready within %s (%d/%d updated)%s",
+						startingTimeout, obs.Updated, want, problems(obs))}
+			}
+			return Decision{}
 		case obs.Ready > 0:
 			return Decision{To: lifecycle.Degraded, Reason: ReasonPartiallyReady,
 				Message: fmt.Sprintf("%d/%d replicas ready%s", obs.Ready, want, problems(obs))}
@@ -125,7 +146,7 @@ func Decide(d *store.Deployment, obs Observed, now time.Time, startingTimeout ti
 			return Decision{}
 		}
 		switch {
-		case obs.Ready >= want:
+		case obs.Ready >= want && rolledOut(obs, want):
 			return Decision{To: lifecycle.Ready, Reason: ReasonRecovered,
 				Message: fmt.Sprintf("%d/%d replicas ready", obs.Ready, want)}
 		case obs.Ready == 0 && age > startingTimeout:
@@ -143,6 +164,14 @@ func Decide(d *store.Deployment, obs Observed, now time.Time, startingTimeout ti
 		return Decision{}
 	}
 	return Decision{}
+}
+
+// rolledOut reports whether every pod runs the current template: as many updated
+// replicas as wanted, and none of an older revision left. Kubernetes counts an old
+// pod as ready, so readiness alone would call a rollout finished — or a version
+// that cannot load healthy — while only the old version serves.
+func rolledOut(obs Observed, want int32) bool {
+	return obs.Updated >= want && obs.Replicas <= want
 }
 
 // Conditions summarizes the observation in the Kubernetes condition style.

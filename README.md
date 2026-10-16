@@ -19,7 +19,7 @@ for chunk in client.chat.completions.create(
 
 ---
 
-> ## Project status — Phase 10 complete
+> ## Project status — Phase 11 complete
 >
 > **Rolling updates, crashes and dependency outages under live load cost no requests.**
 > `make test-failure` keeps clients streaming while every worker is replaced, the gateway restarts,
@@ -38,8 +38,12 @@ for chunk in client.chat.completions.create(
 > accounting (Phase 13). Usage records are log lines until
 > the durable event stream.
 >
-> Next: [Phase 11](docs/roadmap.md#phase-11--model-versioning-and-rollback) — model versioning and
-> rollback. Reliability rules: [docs/reliability.md](docs/reliability.md). See
+> Model versions change as rolling updates with zero client errors, a version that cannot load fails
+> its rollout with the worker's own reason while the old version keeps serving, and rollback is a new
+> revision ([ADR-0037](docs/architecture-decisions/0037-version-changes-are-rolling-updates.md)).
+>
+> Next: [Phase 12](docs/roadmap.md#phase-12--canary-deployments-and-ab-testing) — canary deployments
+> and A/B testing. Reliability rules: [docs/reliability.md](docs/reliability.md). See
 > [Capability status](#capability-status).
 
 ## Running it today
@@ -334,7 +338,7 @@ checkout.
 | Metrics, logs, traces, Grafana dashboards | ✅ **working** — kind demo: exemplar → trace → logs for one request; all 28 panels backed by series | 8 |
 | Autoscaling | ✅ **working** — kind demo: 1 → 4 replicas under load, back to 1 after the idle window, every decision a row; gateway CPU HPA opt-in | 9 |
 | Retries, breakers, timeouts, graceful shutdown | ✅ **working** — `make test-failure`: 9,165 requests through rolling updates, a killed pod and four dependency outages, 3 errors (the crashed process's in-flight) | 10 |
-| Model versioning, rollback | ⬜ not started | 11 |
+| Model versioning, rollback | ✅ **working** — kind demo: v1 → v2 → an unloadable v3 → rollback → v1 under load, zero client errors; the failed rollout names the worker's reason | 11 |
 | Canary rollouts, A/B testing | ⬜ not started | 12 |
 | Token accounting, cost estimation, usage analytics | ⬜ not started | 13 |
 | CLI | ⬜ not started | 14 |

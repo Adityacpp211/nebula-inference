@@ -623,3 +623,39 @@ class TestState:
         body = (await client.get("/metrics")).text
         assert 'nebula_worker_requests_total{endpoint="generate",outcome="ok"}' in body
         assert "nebula_worker_tokens_generated_total" in body
+
+
+async def test_load_failure_is_reported_where_the_controller_reads_it(tmp_path: object) -> None:
+    """A model that cannot load names its cause in the termination message.
+
+    Kubernetes copies the file into the pod's status; the controller fails the
+    rollout with that code instead of reporting a crash loop with no reason.
+    """
+    from pathlib import Path
+
+    from nebula_worker.runtimes.base import InsufficientMemory
+
+    log = Path(str(tmp_path)) / "termination-log"
+    app = create_app(
+        worker_config(termination_log=str(log)),
+        MockRuntime(MockConfig(load_error="insufficient_memory")),
+    )
+    with pytest.raises(InsufficientMemory):
+        async with app.router.lifespan_context(app):
+            pass
+    report = json.loads(log.read_text(encoding="utf-8"))
+    assert report["status"] == "load_failed"
+    assert report["error_code"] == "insufficient_memory"
+    assert report["error"]
+
+
+async def test_load_failure_report_never_masks_the_failure() -> None:
+    app = create_app(
+        worker_config(termination_log="/nonexistent/dir/termination-log"),
+        MockRuntime(MockConfig(load_error="insufficient_memory")),
+    )
+    from nebula_worker.runtimes.base import InsufficientMemory
+
+    with pytest.raises(InsufficientMemory):
+        async with app.router.lifespan_context(app):
+            pass

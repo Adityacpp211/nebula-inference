@@ -67,17 +67,20 @@ class Result:
     stream: bool
     ok: bool
     detail: str = ""
+    # The model version that served the request, as the gateway reported it.
+    version: str = ""
 
 
 @dataclass
 class Load:
     key: str
+    route: str = ROUTE
     results: list[Result] = field(default_factory=list)
     stop: threading.Event = field(default_factory=threading.Event)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def one(self, stream: bool) -> Result:
-        body = {"model": ROUTE, "messages": [{"role": "user", "content": "hello"}], "max_tokens": 16,
+        body = {"model": self.route, "messages": [{"role": "user", "content": "hello"}], "max_tokens": 16,
                 "stream": stream}
         req = urllib.request.Request(GATEWAY + "/v1/chat/completions", method="POST",
                                      data=json.dumps(body).encode())
@@ -86,10 +89,12 @@ class Load:
         started = time.time()
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
+                version = r.headers.get("X-Nebula-Model-Version", "")
                 if not stream:
                     out = json.load(r)
                     good = bool(out.get("choices"))
-                    return Result(started, stream, good, "" if good else json.dumps(out)[:200])
+                    version = (out.get("nebula") or {}).get("model_version") or version
+                    return Result(started, stream, good, "" if good else json.dumps(out)[:200], version)
                 done = False
                 for raw in r:
                     line = raw.decode().strip()
@@ -101,7 +106,7 @@ class Load:
                         break
                     if '"error"' in data:
                         return Result(started, stream, False, "error event: " + data[:200])
-                return Result(started, stream, done, "" if done else "stream ended without [DONE]")
+                return Result(started, stream, done, "" if done else "stream ended without [DONE]", version)
         except urllib.error.HTTPError as e:
             return Result(started, stream, False, f"HTTP {e.code}: {e.read()[:200]!r}")
         except Exception as e:  # noqa: BLE001 - every client-visible failure is a result

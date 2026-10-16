@@ -3,6 +3,7 @@ package deploymentctrl_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -31,6 +32,7 @@ type memStore struct {
 	mu          sync.Mutex
 	rows        map[uuid.UUID]*store.Deployment
 	transitions []string
+	messages    []string
 	statuses    []store.Status
 }
 
@@ -45,7 +47,7 @@ func (m *memStore) Get(_ context.Context, id uuid.UUID) (*store.Deployment, erro
 	return &cp, nil
 }
 
-func (m *memStore) Transition(_ context.Context, id uuid.UUID, from, to models.DeploymentState, reason, _ string) (bool, error) {
+func (m *memStore) Transition(_ context.Context, id uuid.UUID, from, to models.DeploymentState, reason, message string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	d := m.rows[id]
@@ -58,7 +60,18 @@ func (m *memStore) Transition(_ context.Context, id uuid.UUID, from, to models.D
 	d.State = to
 	d.StateEnteredAt = time.Now()
 	m.transitions = append(m.transitions, string(from)+">"+string(to)+":"+reason)
+	m.messages = append(m.messages, message)
 	return true, nil
+}
+
+// lastMessage is the message of the most recent transition.
+func (m *memStore) lastMessage(uuid.UUID) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.messages) == 0 {
+		return ""
+	}
+	return m.messages[len(m.messages)-1]
 }
 
 func (m *memStore) WriteStatus(_ context.Context, id uuid.UUID, st store.Status) error {
@@ -146,10 +159,144 @@ func (e *env) dep(t *testing.T) *appsv1.Deployment {
 func (e *env) setReady(t *testing.T, ready int32) {
 	t.Helper()
 	d := e.dep(t)
+	// Every pod runs the current template; some are not ready yet.
 	d.Status = appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: *d.Spec.Replicas,
-		ReadyReplicas: ready, UpdatedReplicas: ready, AvailableReplicas: ready}
+		ReadyReplicas: ready, UpdatedReplicas: *d.Spec.Replicas, AvailableReplicas: ready}
 	if _, err := e.kube.AppsV1().Deployments(ns).UpdateStatus(context.Background(), d, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// setRollout simulates a rolling update in progress: total pods across both
+// revisions, how many run the new template, and how many (of either) are ready.
+func (e *env) setRollout(t *testing.T, total, updated, ready int32) {
+	t.Helper()
+	d := e.dep(t)
+	d.Status = appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: total,
+		ReadyReplicas: ready, UpdatedReplicas: updated, AvailableReplicas: ready}
+	if _, err := e.kube.AppsV1().Deployments(ns).UpdateStatus(context.Background(), d, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// changeVersion is a spec change that rolls the pods.
+func (e *env) changeVersion(t *testing.T, id uuid.UUID, generation int64) {
+	t.Helper()
+	e.st.mu.Lock()
+	row := e.st.rows[id]
+	row.Generation = generation
+	row.Version.ID, row.Version.Version = uuid.New(), fmt.Sprintf("v%d", generation)
+	e.st.mu.Unlock()
+}
+
+// Mid-rollout the old version's pods are ready, and Kubernetes counts them: the
+// new revision is ready only when every pod runs it.
+func TestRolloutIsReadyOnlyWhenEveryPodRunsTheNewRevision(t *testing.T) {
+	t.Parallel()
+	d := deployment(models.RuntimeLlamaCPP, 2)
+	e := newEnv(d)
+	e.reconcile(t, d.ID)
+	e.setReady(t, 2)
+	e.reconcile(t, d.ID)
+	e.changeVersion(t, d.ID, 2)
+	e.reconcile(t, d.ID)
+	e.setRollout(t, 3, 1, 2) // two old pods serving, one new pod starting
+	e.reconcile(t, d.ID)
+	if got := e.st.state(d.ID); got != lifecycle.Starting {
+		t.Fatalf("mid-rollout with only old pods ready: %s", got)
+	}
+	e.setRollout(t, 3, 2, 3)
+	e.reconcile(t, d.ID)
+	if got := e.st.state(d.ID); got != lifecycle.Starting {
+		t.Fatalf("one old pod still running: %s", got)
+	}
+	e.setRollout(t, 2, 2, 2)
+	e.reconcile(t, d.ID)
+	if got := e.st.state(d.ID); got != lifecycle.Ready {
+		t.Fatalf("rolled out: %s (%v)", got, e.st.transitions)
+	}
+}
+
+// A version that cannot load fails the rollout with the worker's own reason, at
+// once, while the old version keeps serving.
+func TestLoadFailureFailsTheRolloutWithTheReason(t *testing.T) {
+	t.Parallel()
+	d := deployment(models.RuntimeLlamaCPP, 2)
+	e := newEnv(d)
+	e.reconcile(t, d.ID)
+	e.setReady(t, 2)
+	e.reconcile(t, d.ID)
+	e.changeVersion(t, d.ID, 2)
+	e.reconcile(t, d.ID)
+	e.setRollout(t, 3, 1, 2)
+	report := `{"status":"load_failed","error_code":"insufficient_memory","error":"needs 9 GiB, the pod has 4"}`
+	e.crashingPod(t, d.ID, "new-0", e.dep(t).Spec.Template.Annotations[k8s.AnnotationSpecHash], report)
+	e.reconcile(t, d.ID)
+	if got := e.st.state(d.ID); got != lifecycle.Failed {
+		t.Fatalf("state %s (%v)", got, e.st.transitions)
+	}
+	joined := strings.Join(e.st.transitions, ",")
+	if !strings.Contains(joined, "starting>failed:ModelLoadFailed") {
+		t.Errorf("transitions: %s", joined)
+	}
+	if msg := e.st.lastMessage(d.ID); !strings.Contains(msg, "needs 9 GiB") || !strings.Contains(msg, "previous version keeps serving") {
+		t.Errorf("message: %q", msg)
+	}
+	if *e.dep(t).Spec.Replicas != 2 {
+		t.Error("a failed rollout must not scale the deployment")
+	}
+}
+
+// crashingPod is a worker pod of the given template whose model did not load.
+func (e *env) crashingPod(t *testing.T, id uuid.UUID, name, specHash, report string) {
+	t.Helper()
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns,
+			Labels:      map[string]string{k8s.LabelDeploymentID: id.String()},
+			Annotations: map[string]string{k8s.AnnotationSpecHash: specHash}},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+			Name: "worker", Ready: false,
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+			LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				ExitCode: 3, Reason: "Error", Message: report}},
+		}}},
+	}
+	if _, err := e.kube.CoreV1().Pods(ns).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// After a rollback the abandoned revision's crashing pods linger while they
+// terminate; their reports must not fail the revision that replaced them. Found by
+// the Phase 11 demo: a rollback from a version that cannot load failed at once
+// with that version's reason.
+func TestRollbackIsNotFailedByTheAbandonedRevisionsPods(t *testing.T) {
+	t.Parallel()
+	d := deployment(models.RuntimeLlamaCPP, 2)
+	e := newEnv(d)
+	e.reconcile(t, d.ID)
+	e.setReady(t, 2)
+	e.reconcile(t, d.ID)
+	e.changeVersion(t, d.ID, 2)
+	e.reconcile(t, d.ID)
+	broken := e.dep(t).Spec.Template.Annotations[k8s.AnnotationSpecHash]
+	e.crashingPod(t, d.ID, "broken-0", broken,
+		`{"status":"load_failed","error_code":"insufficient_memory","error":"no room"}`)
+	e.reconcile(t, d.ID)
+	if got := e.st.state(d.ID); got != lifecycle.Failed {
+		t.Fatalf("the broken revision must fail: %s", got)
+	}
+
+	// Roll back: a new generation whose template is not the broken one.
+	e.changeVersion(t, d.ID, 3)
+	e.reconcile(t, d.ID)
+	if e.dep(t).Spec.Template.Annotations[k8s.AnnotationSpecHash] == broken {
+		t.Fatal("the rollback did not change the template")
+	}
+	e.setRollout(t, 2, 2, 2)
+	e.reconcile(t, d.ID)
+	if got := e.st.state(d.ID); got != lifecycle.Ready {
+		t.Fatalf("the rollback was failed by the abandoned revision's pod: %s (%v)", got, e.st.transitions)
 	}
 }
 

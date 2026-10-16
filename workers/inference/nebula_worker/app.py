@@ -451,6 +451,23 @@ def _chunk_payload(chunk: TokenChunk) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def report_load_failure(path: str, exc: InferenceRuntimeError) -> None:
+    """Write why the model did not load where Kubernetes keeps a termination message.
+
+    The controller reads it from the pod's status and fails the rollout with this
+    code and sentence (ModelLoadFailed) instead of a crash loop whose cause is in a
+    log nobody is reading. Best effort: a failure to report must not mask the
+    failure being reported.
+    """
+    if not path:
+        return
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"status": "load_failed", "error_code": exc.code, "error": str(exc)}, f)
+    except OSError:
+        pass
+
+
 def create_app(config: WorkerConfig, runtime: InferenceRuntime | None = None) -> FastAPI:
     worker = Worker(config, runtime)
     router = APIRouter()
@@ -462,7 +479,11 @@ def create_app(config: WorkerConfig, runtime: InferenceRuntime | None = None) ->
         worker.tracing = tracing.setup(
             config.otlp_endpoint, "nebula-worker", config.pod_name, WORKER_PROTOCOL_VERSION
         )
-        await worker.load()
+        try:
+            await worker.load()
+        except InferenceRuntimeError as exc:
+            report_load_failure(config.termination_log, exc)
+            raise
         worker.start_heartbeats()
         try:
             yield

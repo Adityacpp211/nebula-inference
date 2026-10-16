@@ -260,14 +260,20 @@ func (r *Reconciler) observe(ctx context.Context, dep *appsv1.Deployment, o *Obj
 		}
 	}
 	for i := range pods.Items {
-		inspectPod(&pods.Items[i], &obs, add)
+		inspectPod(&pods.Items[i], &obs, add, o.SpecHash)
 	}
 	return obs, nil
 }
 
 // inspectPod extracts the explanations a human would otherwise dig out of
 // `kubectl describe`.
-func inspectPod(p *corev1.Pod, obs *Observed, add func(string)) {
+//
+// A load failure counts only from a live pod of the current template: after a
+// rollback, the abandoned revision's pods linger while they terminate, still
+// carrying the report that failed them, and must not fail the revision that
+// replaced them.
+func inspectPod(p *corev1.Pod, obs *Observed, add func(string), currentHash string) {
+	current := p.DeletionTimestamp == nil && p.Annotations[k8s.AnnotationSpecHash] == currentHash
 	for _, c := range p.Status.Conditions {
 		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse && c.Reason == corev1.PodReasonUnschedulable {
 			add("unschedulable: " + c.Message)
@@ -295,6 +301,21 @@ func inspectPod(p *corev1.Pod, obs *Observed, add func(string)) {
 		}
 	}
 	for _, cs := range p.Status.ContainerStatuses {
+		if cs.Name == containerWorker && !cs.Ready && current && obs.LoadFailure == nil {
+			// The worker writes why its model did not load into its termination
+			// message before exiting (nebula_worker.app.report_load_failure).
+			for _, t := range []*corev1.ContainerStateTerminated{cs.State.Terminated, cs.LastTerminationState.Terminated} {
+				var rep struct {
+					Status    string `json:"status"`
+					ErrorCode string `json:"error_code"`
+					Error     string `json:"error"`
+				}
+				if t != nil && json.Unmarshal([]byte(t.Message), &rep) == nil && rep.Status == "load_failed" {
+					obs.LoadFailure = &ArtifactFailure{Code: rep.ErrorCode, Message: rep.Error}
+					break
+				}
+			}
+		}
 		if w := cs.State.Waiting; w != nil && w.Reason != "" && w.Reason != "ContainerCreating" {
 			msg := w.Reason
 			if w.Message != "" {

@@ -839,7 +839,45 @@ recovers; dependency outages behave exactly as documented in architecture.md §8
 
 ---
 
-## Phase 11 — Model versioning and rollback
+## Phase 11 — Model versioning and rollback ✅
+
+**Status: complete.**
+
+**Delivered**
+
+- Version immutability end to end: the database trigger refuses any change to a ready version's
+  frozen fields (control-plane integration test), and the API offers no way to change one —
+  finalizing or failing a ready version is `409 invalid_status`.
+- `deployment_revisions` on every spec change and `POST /v1/deployments/{id}/rollback` (from Phase 2)
+  exercised under load: a rollback is a new revision whose spec is the earlier one's, so history is
+  appended, never rewritten.
+- A model-version change is a rolling update with `maxUnavailable: 0` that the rest of NEBULA now
+  agrees with ([ADR-0037](./architecture-decisions/0037-version-changes-are-rolling-updates.md)):
+  - the gateway routes to a deployment's pods of either version while it rolls, asserting and
+    recording the version each pod reports;
+  - the controller calls a revision ready only when every pod runs it;
+  - a worker that cannot load its model writes the reason to its termination message, and the
+    controller fails the rollout at once with `ModelLoadFailed` and that reason, while the old
+    version keeps serving.
+
+**Tests.** Router: a mid-rollout endpoint reporting the old version stays eligible and reports the
+version it serves; a static endpoint stays pinned. Controller: a rollout is not ready while an old
+pod remains; a load failure fails the rollout with the worker's reason and says the previous version
+keeps serving; a rollback is not failed by the abandoned revision's lingering pods. Worker: a load
+failure is written where the controller reads it, and a failure to write never masks it.
+`tests/e2e/kind/phase11_demo.py` on a fresh kind cluster, with eight clients streaming and not
+streaming throughout: **2,548 requests, 0 errors** across v1 → v2 (both versions serving while it rolled), v2 → v3 whose model cannot load (failed three seconds after the change with `ModelLoadFailed: … insufficient_memory …; the previous version keeps serving`, v2 serving all traffic meanwhile), a rollback to the previous revision and a rollback to revision 1; revisions 1:create, 2:update, 3:update, 4:rollback, 5:rollback, the last with revision 1's spec hash exactly; and the audit trail holding all five changes.
+
+Building it found three defects, now fixed (ADR-0037): the router excluded a deployment's old
+version as soon as the route named the new one, which made every version change an outage until the
+first new pod was ready and a version that cannot load a total one; the controller called a stuck
+rollout ready because Kubernetes counts old pods as ready; and after a rollback the controller failed
+the restored revision with the abandoned one's load-failure report.
+
+**Exit:** met — v1 → v2 → rollback to v1 with no failed client request at any point and a full audit
+trail.
+
+**Original plan**
 
 **Deliverables**
 
