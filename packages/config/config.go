@@ -204,6 +204,10 @@ type GatewayConfig struct {
 	BreakerThreshold int      `json:"breaker_threshold" yaml:"breaker_threshold" env:"NEBULA_GATEWAY_BREAKER_THRESHOLD" default:"3"`
 	BreakerCooldown  Duration `json:"breaker_cooldown" yaml:"breaker_cooldown" env:"NEBULA_GATEWAY_BREAKER_COOLDOWN" default:"2s"`
 
+	// RetryBudgetRatio is failovers allowed per request, over a 10 s window; with
+	// RetryBudgetMinPerSecond as a floor for quiet gateways (docs/reliability.md §3).
+	RetryBudgetRatio        float64 `json:"retry_budget_ratio" yaml:"retry_budget_ratio" env:"NEBULA_GATEWAY_RETRY_BUDGET_RATIO" default:"0.2"`
+	RetryBudgetMinPerSecond float64 `json:"retry_budget_min_per_second" yaml:"retry_budget_min_per_second" env:"NEBULA_GATEWAY_RETRY_BUDGET_MIN_PER_SECOND" default:"3"`
 	// QueueMaxDepth bounds each deployment's admission queue; a full queue answers
 	// 429 with Retry-After at once (docs/architecture.md §6.3).
 	QueueMaxDepth int `json:"queue_max_depth" yaml:"queue_max_depth" env:"NEBULA_GATEWAY_QUEUE_MAX_DEPTH" default:"128"`

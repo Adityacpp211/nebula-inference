@@ -37,7 +37,8 @@ for chunk in client.chat.completions.create(
 > (Phase 10), no canaries (Phase 12) or cost accounting (Phase 13). Usage records are log lines until
 > the durable event stream.
 >
-> Next: [Phase 10](docs/roadmap.md#phase-10--reliability-mechanisms) — reliability mechanisms. See
+> In progress: [Phase 10](docs/roadmap.md#phase-10--reliability-mechanisms-) — reliability mechanisms
+> ([docs/reliability.md](docs/reliability.md)). See
 > [Capability status](#capability-status).
 
 ## Running it today
@@ -331,7 +332,7 @@ checkout.
 | Bounded queues, concurrency control, backpressure | ✅ **working** — 3× capacity load test: queue at its bound, heap flat, every refusal a 429 with Retry-After | 7 |
 | Metrics, logs, traces, Grafana dashboards | ✅ **working** — kind demo: exemplar → trace → logs for one request; all 28 panels backed by series | 8 |
 | Autoscaling | ✅ **working** — kind demo: 1 → 4 replicas under load, back to 1 after the idle window, every decision a row; gateway CPU HPA opt-in | 9 |
-| Retries, breakers, timeouts, graceful shutdown | ⬜ not started | 10 |
+| Retries, breakers, timeouts, graceful shutdown | 🚧 **in progress** — failure classification and a retry budget (outage amplification 1.10); breakers and drain from earlier phases; rolling-restart test pending | 10 |
 | Model versioning, rollback | ⬜ not started | 11 |
 | Canary rollouts, A/B testing | ⬜ not started | 12 |
 | Token accounting, cost estimation, usage analytics | ⬜ not started | 13 |

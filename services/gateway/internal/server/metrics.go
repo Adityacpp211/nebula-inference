@@ -34,6 +34,8 @@ type gwMetrics struct {
 	queueWait     *prometheus.HistogramVec
 	queueDrops    *prometheus.CounterVec
 	rateLimited   *prometheus.CounterVec
+	retries       *prometheus.CounterVec
+	retryBudget   *prometheus.CounterVec
 }
 
 func newGatewayMetrics(m *telemetry.Metrics, rt *router.Router, q *admission.Queues) *gwMetrics {
@@ -52,6 +54,8 @@ func newGatewayMetrics(m *telemetry.Metrics, rt *router.Router, q *admission.Que
 		queueWait:     m.Histogram("nebula_queue_wait_seconds"),
 		queueDrops:    m.Counter("nebula_queue_drops_total"),
 		rateLimited:   m.Counter("nebula_ratelimit_rejections_total"),
+		retries:       m.Counter("nebula_retries_total"),
+		retryBudget:   m.Counter("nebula_retries_rejected_budget_total"),
 	}
 
 	// Computed at scrape time from state the router and the queues already hold.
@@ -161,6 +165,16 @@ func outcomeName(o router.Outcome) string {
 		return "abandoned"
 	}
 	return "succeeded"
+}
+
+// retried counts a failover to another replica, by the failure's class.
+func (m *gwMetrics) retried(deployment, reason string) {
+	m.retries.WithLabelValues(deployment, reason).Inc()
+}
+
+// retryRefused counts a failover the retry budget did not allow.
+func (m *gwMetrics) retryRefused(deployment string) {
+	m.retryBudget.WithLabelValues(deployment).Inc()
 }
 
 func (m *gwMetrics) selected(sel *router.Selection) {

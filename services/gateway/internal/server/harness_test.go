@@ -20,6 +20,7 @@ import (
 	"github.com/adityasatwar321/nebula/packages/config"
 	"github.com/adityasatwar321/nebula/packages/db/models"
 	"github.com/adityasatwar321/nebula/packages/httpx"
+	"github.com/adityasatwar321/nebula/packages/reliability"
 	"github.com/adityasatwar321/nebula/packages/routing"
 	"github.com/adityasatwar321/nebula/packages/telemetry"
 	"github.com/adityasatwar321/nebula/packages/testsupport/netx"
@@ -310,6 +311,8 @@ func newHarness(t *testing.T, opts ...option) *harness {
 		Config: cfg, Logger: logger, Probes: probes, Auth: h.auth,
 		Limiter: ratelimit.New(ratelimit.Options{FallbackFraction: 1}),
 		Router:  h.router, Metrics: h.metrics, Workers: dispatch.New(dispatch.Options{}), Proxy: proxy, Usage: h.usage,
+		RetryBudget: &reliability.Budget{Ratio: cfg.Gateway.RetryBudgetRatio,
+			MinPerSecond: cfg.Gateway.RetryBudgetMinPerSecond, Window: 10 * time.Second},
 	})
 	h.gw = netx.NewServer(t, handler)
 	return h

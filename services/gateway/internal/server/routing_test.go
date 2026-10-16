@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/adityasatwar321/nebula/packages/config"
 	"github.com/adityasatwar321/nebula/packages/routing"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/routes"
 )
@@ -199,4 +202,55 @@ func TestRequestRecordsMetrics(t *testing.T) {
 	if t.Failed() {
 		t.Log(text)
 	}
+}
+
+// Under a total outage — every replica answers 503 before doing any work — the
+// retry budget, not the attempt cap, bounds the extra load: failovers stay at
+// the budget's ratio of requests, and the refusals are counted.
+func TestRetryBudgetCapsAmplificationUnderOutage(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, func(c *config.Config) {
+		c.Gateway.RetryBudgetRatio, c.Gateway.RetryBudgetMinPerSecond = 0.1, 0
+	})
+	var calls atomic.Int64
+	var urls []string
+	for range 3 {
+		down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			calls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Nebula-Reason", "model_not_ready")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":{"type":"service_unavailable","code":"model_not_ready","message":"loading"}}`)
+		}))
+		t.Cleanup(down.Close)
+		urls = append(urls, down.URL)
+	}
+	h.setRoutes(&routes.Route{ID: "r-out", Model: "tiny", Org: "acme", ContextWindow: 512,
+		Capabilities: routes.Capabilities{Streaming: true},
+		Targets: []*routes.Target{{Deployment: "tiny-out", DeploymentID: "dep-out", ModelVersion: "tiny:v1",
+			Weight: 100, Endpoints: urls}}})
+
+	const n = 60
+	for range n {
+		resp := h.do("POST", "/v1/chat/completions", keyAcme, chatBody)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode < 500 {
+			t.Fatalf("status %d during a total outage", resp.StatusCode)
+		}
+	}
+	retries := testutil.ToFloat64(h.metrics.Counter("nebula_retries_total").WithLabelValues("tiny-out", "unavailable"))
+	refused := testutil.ToFloat64(h.metrics.Counter("nebula_retries_rejected_budget_total").WithLabelValues("tiny-out"))
+	// Requests that reached a replica earn 0.1 retries each.
+	dispatched := float64(calls.Load()) - retries
+	if retries > 0.1*dispatched+1 {
+		t.Errorf("%v failovers for %v dispatched requests: the budget allows %v", retries, dispatched, 0.1*dispatched)
+	}
+	if refused == 0 {
+		t.Error("no failover was refused: the budget was never exercised")
+	}
+	if amp := float64(calls.Load()) / dispatched; amp > 1.15 {
+		t.Errorf("amplification %.2f under a total outage, want <= 1.15", amp)
+	}
+	t.Logf("%d requests: %v dispatched, %v failovers, %v refused by the budget", n, dispatched, retries, refused)
 }

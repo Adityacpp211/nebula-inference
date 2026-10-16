@@ -134,8 +134,8 @@ nobody notices until an incident.
 | `nebula_queue_wait_seconds` | histogram | `deployment`, `deployment_id`, `priority` | user-visible queueing pain; observed for every admitted request, including a wait of zero, so its p95 is the autoscaler's |
 | `nebula_queue_oldest_age_seconds` | gauge | `deployment` | starvation detection |
 | `nebula_queue_drops_total` | counter | `deployment`, `reason` (queue_full\|queue_timeout\|client_cancelled\|rejected) | shedding behaviour |
-| `nebula_retries_total` *(Phase 10)* | counter | `deployment`, `reason` | retry volume |
-| `nebula_retries_rejected_budget_total` *(Phase 10)* | counter | `deployment` | the budget doing its job |
+| `nebula_retries_total` | counter | `deployment`, `reason` | retry volume, `reason` a row of docs/reliability.md §2 |
+| `nebula_retries_rejected_budget_total` | counter | `deployment` | the budget doing its job |
 | `nebula_breaker_state` | gauge | `deployment`, `endpoint`, `pod` | 0 closed, 1 half-open, 2 open — labelled by gateway pod because breakers are per-replica ([ADR-0014](./architecture-decisions/README.md#adr-0014)) |
 | `nebula_ratelimit_rejections_total` | counter | `scope` (key\|org), `limit` (rpm\|tpm\|concurrency) | quota pressure |
 

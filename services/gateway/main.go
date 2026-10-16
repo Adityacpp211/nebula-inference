@@ -30,6 +30,7 @@ import (
 	"github.com/adityasatwar321/nebula/packages/config"
 	"github.com/adityasatwar321/nebula/packages/httpx"
 	"github.com/adityasatwar321/nebula/packages/k8s"
+	"github.com/adityasatwar321/nebula/packages/reliability"
 	"github.com/adityasatwar321/nebula/packages/routing"
 	"github.com/adityasatwar321/nebula/packages/telemetry"
 	"github.com/adityasatwar321/nebula/packages/version"
@@ -324,6 +325,10 @@ func run() error {
 		Workers:     dispatch.New(dispatch.Options{}),
 		Proxy:       proxy,
 		Usage:       usage.LogSink{Logger: logger},
+		RetryBudget: &reliability.Budget{
+			Ratio: cfg.Gateway.RetryBudgetRatio, MinPerSecond: cfg.Gateway.RetryBudgetMinPerSecond,
+			Window: 10 * time.Second,
+		},
 	})
 
 	// Streams outlive the server's WriteTimeout by design; the gateway sets a

@@ -38,6 +38,7 @@ import (
 	"github.com/adityasatwar321/nebula/packages/auth"
 	"github.com/adityasatwar321/nebula/packages/config"
 	"github.com/adityasatwar321/nebula/packages/httpx"
+	"github.com/adityasatwar321/nebula/packages/reliability"
 	"github.com/adityasatwar321/nebula/packages/telemetry"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/admission"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/credentials"
@@ -73,6 +74,9 @@ type Deps struct {
 	Proxy http.Handler
 	Usage usage.Sink
 	Now   func() time.Time
+	// RetryBudget caps failovers at a fraction of traffic (docs/reliability.md).
+	// Nil means no budget: only the attempt cap bounds retries.
+	RetryBudget *reliability.Budget
 }
 
 // Gateway holds the handlers.

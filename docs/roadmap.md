@@ -777,7 +777,33 @@ explainable from a database row.
 
 ---
 
-## Phase 10 — Reliability mechanisms
+## Phase 10 — Reliability mechanisms 🚧
+
+**Status: in progress.**
+
+**Delivered so far**
+
+- `packages/reliability`: the failure classification table (nine rows, the first match wins, and
+  "output reached the client" overrides every other signal), a retry budget (retries at most a ratio
+  of recent requests plus a floor, over a sliding 10 s window), and exponential backoff with full
+  jitter.
+- The gateway's before-work failover spends from the budget (`NEBULA_GATEWAY_RETRY_BUDGET_RATIO`,
+  default 0.2, and `..._MIN_PER_SECOND`, default 3) on top of the attempt cap of 3, and exports
+  `nebula_retries_total{deployment,reason}` and `nebula_retries_rejected_budget_total{deployment}`.
+- [docs/reliability.md](./reliability.md): the classification table, the budget, backoff, breakers,
+  shutdown and the failure-mode table.
+
+**Tests so far.** One case per classification row; the critical negative — a failure after output
+started is never retryable, whatever else is true of it; full-jitter backoff spans its whole range
+and respects its cap; the budget holds amplification to 1.2 under a simulated total outage while
+the attempt cap alone would allow 4; and in the gateway, 60 requests against three replicas that
+all answer 503 cause exactly 6 failovers (amplification 1.10), with the refusals counted.
+
+**Still to do:** the three-layer timeout review, backoff on the requeue path, the drain test (a
+rolling restart of every worker under live load with zero client errors), killed-pod recovery, and
+`make test-failure` running the dependency outages of architecture.md §8.4.
+
+**Original plan**
 
 **Deliverables**
 

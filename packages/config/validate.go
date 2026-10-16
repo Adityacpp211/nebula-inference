@@ -276,6 +276,9 @@ func (c *Config) validateGateway(v *ValidationErrors) {
 	}
 	v.AddIf(g.ControlPlaneTimeout.Duration() <= 0, "NEBULA_GATEWAY_CONTROLPLANE_TIMEOUT", "must be positive")
 	v.AddIf(g.DefaultTimeout.Duration() <= 0, "NEBULA_GATEWAY_DEFAULT_TIMEOUT", "must be positive")
+	v.AddIf(g.RetryBudgetRatio < 0 || g.RetryBudgetRatio > 1, "NEBULA_GATEWAY_RETRY_BUDGET_RATIO",
+		"must be between 0 and 1: above 1, an outage multiplies load by more than the traffic itself")
+	v.AddIf(g.RetryBudgetMinPerSecond < 0, "NEBULA_GATEWAY_RETRY_BUDGET_MIN_PER_SECOND", "must not be negative")
 	v.AddIf(g.MaxTimeout.Duration() < g.DefaultTimeout.Duration(), "NEBULA_GATEWAY_MAX_TIMEOUT",
 		"must not be shorter than NEBULA_GATEWAY_DEFAULT_TIMEOUT (%s)", g.DefaultTimeout)
 	v.AddIf(g.KeepAliveInterval.Duration() < time.Second, "NEBULA_GATEWAY_KEEPALIVE_INTERVAL", "must be at least 1s")

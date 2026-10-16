@@ -18,6 +18,7 @@ import (
 	"github.com/adityasatwar321/nebula/packages/db/models"
 	"github.com/adityasatwar321/nebula/packages/httpx"
 	"github.com/adityasatwar321/nebula/packages/queue"
+	"github.com/adityasatwar321/nebula/packages/reliability"
 	"github.com/adityasatwar321/nebula/packages/routing"
 	"github.com/adityasatwar321/nebula/packages/telemetry"
 	"github.com/adityasatwar321/nebula/services/gateway/internal/dispatch"
@@ -296,6 +297,10 @@ func (g *Gateway) prepare(w http.ResponseWriter, r *http.Request, kind openai.Ki
 		g.m.selected(sel)
 	}
 	g.m.inflight.WithLabelValues(target.Deployment).Inc()
+	if g.d.RetryBudget != nil {
+		// Every dispatched request earns its share of the retry budget.
+		g.d.RetryBudget.Request()
+	}
 
 	ex := &exchange{
 		kind:    kind,
@@ -701,6 +706,18 @@ func (g *Gateway) replace(ctx context.Context, ex *exchange, cause error) bool {
 		// reports it against the endpoint that failed.
 		return false
 	}
+	// The budget is spent only when there is somewhere to go. Refused, the
+	// original failure stands: under a total outage that is what keeps retries
+	// from multiplying the load (docs/reliability.md §3).
+	if g.d.RetryBudget != nil && !g.d.RetryBudget.Retry() {
+		sel.Done(router.Abandoned)
+		g.m.retryRefused(ex.target.Deployment)
+		if we.Status == http.StatusTooManyRequests {
+			return g.requeue(ctx, ex, cause)
+		}
+		return false
+	}
+	g.m.retried(ex.target.Deployment, reliability.Classify(failureOf(we)).Name)
 	g.m.attempt(ex.target.Deployment, verdictOf(cause))
 	g.endAttempt(ex, verdictOf(cause))
 	ex.sel.Done(verdictOf(cause))
@@ -833,6 +850,11 @@ func (g *Gateway) queueError(w http.ResponseWriter, r *http.Request, err error) 
 			Code: "client_cancelled", Message: "the client closed the request"}
 	}
 	return httpx.ErrInternal(err)
+}
+
+// failureOf describes a dispatch failure in the reliability package's terms.
+func failureOf(we *dispatch.Error) reliability.Failure {
+	return reliability.Failure{Status: we.Status, Connect: we.Unreachable(), Started: we.MidStream, Reason: we.Reason}
 }
 
 // verdictOf classifies a dispatch failure for the endpoint's breaker.
