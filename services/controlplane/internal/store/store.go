@@ -54,6 +54,7 @@ type Store struct {
 	Routes        *RouteRepo
 	Rollouts      *RolloutRepo
 	Usage         *UsageRepo
+	Experiments   *ExperimentRepo
 	Policies      *RoutingPolicyRepo
 	Audit         *AuditRepo
 }
@@ -73,6 +74,7 @@ func New(pool *db.Pool) *Store {
 		Routes:        &RouteRepo{},
 		Rollouts:      &RolloutRepo{},
 		Usage:         &UsageRepo{},
+		Experiments:   &ExperimentRepo{},
 		Policies:      &RoutingPolicyRepo{},
 		Audit:         &AuditRepo{},
 	}
@@ -222,6 +224,10 @@ func constraintDescription(name string) string {
 		return "a route with that model name already exists in this organization"
 	case "uq_route_targets__route_dep":
 		return "a deployment may appear only once in a route"
+	case "uq_experiments__one_running_per_route":
+		return "the route already has a running experiment: stop it first"
+	case "uq_experiments__org_name":
+		return "an experiment with that name already exists in this organization"
 	case "uq_canary_rollouts__one_active_per_route":
 		return "the route already has a rollout in progress: finish, abort or promote it first"
 	case "uq_route_targets__one_baseline":

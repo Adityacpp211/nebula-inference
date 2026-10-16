@@ -220,6 +220,12 @@ func (a *API) routes() []Route {
 		{Pattern: "GET /v1/pricing-profiles", Scope: usageRead, handler: a.listPricingProfiles},
 		{Pattern: "POST /v1/pricing-profiles", Scope: adminScope, handler: a.createPricingProfile},
 
+		{Pattern: "GET /v1/experiments", Scope: depsRead, handler: a.listExperiments},
+		{Pattern: "POST /v1/experiments", Scope: rolloutsWrite, handler: a.createExperiment},
+		{Pattern: "GET /v1/experiments/{experiment_id}", Scope: depsRead, handler: a.getExperiment},
+		{Pattern: "GET /v1/experiments/{experiment_id}/results", Scope: depsRead, handler: a.experimentResults},
+		{Pattern: "POST /v1/experiments/{experiment_id}/stop", Scope: rolloutsWrite, handler: a.stopExperiment},
+
 		{Pattern: "GET /v1/rollouts", Scope: depsRead, handler: a.listRollouts},
 		{Pattern: "POST /v1/rollouts", Scope: rolloutsWrite, handler: a.createRollout},
 		{Pattern: "GET /v1/rollouts/{rollout_id}", Scope: depsRead, handler: a.getRollout},

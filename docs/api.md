@@ -259,7 +259,10 @@ paths are org-scoped by the caller's credential; `org_id` is never a client-supp
 > Since Phase 13: `/v1/usage`, `/v1/costs` (with the assumptions behind every figure) and
 > `/v1/pricing-profiles` (immutable versions).
 >
-> Not yet implemented: embeddings (§2), experiments, nodes, rate-limit
+> Experiments (`/v1/experiments`, with `/results` comparing arms from the stored requests) since
+> Phase 13.
+>
+> Not yet implemented: embeddings (§2), nodes, rate-limit
 > policies, pricing, and the `/replicas`, `/events`, `/metrics` and `/logs` sub-resources of a
 > deployment. Session tokens are refused with `unsupported_credential`; API keys are the only
 > accepted credential until the dashboard.

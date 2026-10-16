@@ -63,6 +63,8 @@ tags:
     description: Routes (public model names), their weighted targets, and routing policies.
   - name: usage
     description: Usage and estimated cost from the hourly rollups, and the pricing profiles they are priced by.
+  - name: experiments
+    description: A/B experiments over a route's split, compared per arm with bootstrap intervals.
   - name: rollouts
     description: Canary rollouts. The control plane starts them and applies an operator's verbs; the controller moves the weights.
   - name: audit
@@ -1134,6 +1136,127 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/PricingProfile" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/experiments:
+    get:
+      tags: [experiments]
+      operationId: listExperiments
+      summary: "Experiments, newest first."
+      description: |
+        All of the organization's experiments.
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: 
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Experiment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    post:
+      tags: [experiments]
+      operationId: createExperiment
+      summary: "Start observing a route's split as an experiment."
+      description: |
+        The split is the route's targets; the experiment runs from now. One running experiment per route.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateExperiment" }
+      responses:
+        "201":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Experiment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/experiments/{experiment_id}:
+    parameters:
+      - name: experiment_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [experiments]
+      operationId: getExperiment
+      summary: "One experiment."
+      description: |
+        Its state and window.
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Experiment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/experiments/{experiment_id}/results:
+    parameters:
+      - name: experiment_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [experiments]
+      operationId: getExperimentResults
+      summary: "Per-arm comparison with bootstrap intervals."
+      description: |
+        Read from the per-request rows; intervals are seeded by the experiment, so a stopped experiment's results are stable. Significance is never claimed.
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExperimentResults" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/experiments/{experiment_id}/stop:
+    parameters:
+      - name: experiment_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [experiments]
+      operationId: stopExperiment
+      summary: "End the observation window."
+      description: |
+        Optionally records a conclusion.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                conclusion: { type: string }
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Experiment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
 
   /v1/rollouts:
@@ -2561,6 +2684,84 @@ components:
         markup_basis_points: { type: integer, format: int32, minimum: 0 }
         effective_from: { type: string, format: date-time }
         use: { type: boolean, default: true }
+
+    Experiment:
+      type: object
+      required: [id, org_id, route_id, name, bucketing, state, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        org_id: { type: string, format: uuid }
+        route_id: { type: string, format: uuid }
+        name: { type: string }
+        hypothesis: { type: [string, "null"] }
+        bucketing: { type: string, enum: [request, sticky_user, sticky_org] }
+        state: { type: string, enum: [draft, running, stopped, concluded] }
+        started_at: { type: [string, "null"], format: date-time }
+        stopped_at: { type: [string, "null"], format: date-time }
+        conclusion: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+
+    CreateExperiment:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        route_id: { type: string, format: uuid }
+        route: { type: string }
+        hypothesis: { type: string }
+        bucketing:
+          type: string
+          enum: [request, sticky_user]
+          default: sticky_user
+          description: sticky_user keeps a request's OpenAI "user" on one arm across gateway replicas and restarts.
+
+    ExperimentArm:
+      type: object
+      properties:
+        label: { type: string }
+        deployment_id: { type: string, format: uuid }
+        deployment: { type: string }
+        requests: { type: integer, format: int64 }
+        errors: { type: integer, format: int64 }
+        error_rate: { type: number }
+        p50_ms: { type: number }
+        p95_ms: { type: number }
+        tokens_per_second: { type: number }
+        cost_per_1k_tokens_micros: { type: number }
+        completion_tokens: { type: integer, format: int64 }
+
+    ExperimentInterval:
+      type: object
+      properties:
+        delta: { type: number }
+        relative: { type: number }
+        ci95: { type: array, items: { type: number }, minItems: 2, maxItems: 2 }
+        method: { type: string }
+        note: { type: string }
+
+    ExperimentResults:
+      type: object
+      required: [experiment_id, from, to, arms, comparison, significance]
+      properties:
+        experiment_id: { type: string, format: uuid }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        arms: { type: array, items: { $ref: "#/components/schemas/ExperimentArm" } }
+        comparison:
+          type: array
+          items:
+            type: object
+            properties:
+              baseline: { type: string }
+              variant: { type: string }
+              p50_ms: { $ref: "#/components/schemas/ExperimentInterval" }
+              error_rate: { $ref: "#/components/schemas/ExperimentInterval" }
+              note: { type: string }
+        significance:
+          type: object
+          properties:
+            claimed: { type: boolean }
+            reason: { type: string }
 
     RolloutState:
       type: string

@@ -77,6 +77,9 @@ const (
 	ActionRolloutAbort   = "rollout.abort"
 
 	ActionPricingCreate = "pricing_profile.create"
+
+	ActionExperimentCreate = "experiment.create"
+	ActionExperimentStop   = "experiment.stop"
 )
 
 // Audit resource types.
@@ -91,6 +94,7 @@ const (
 	ResourceRollout      = "rollout"
 	// ResourcePricingProfile is a pricing profile version.
 	ResourcePricingProfile = "pricing_profile"
+	ResourceExperiment     = "experiment"
 )
 
 // Entry is one audit record.

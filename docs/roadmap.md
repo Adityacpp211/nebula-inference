@@ -939,8 +939,8 @@ canary aborts it and restores baseline weights automatically, with the reason re
 **Deviations.**
 
 - Experiments' comparison read model (per-arm metrics with bootstrap intervals) needs per-request
-  records, which arrive with the durable usage stream in Phase 13; it is built there. Fixed-weight
-  A/B splits with sticky bucketing work now through `/v1/routes`.
+  records, which arrive with the durable usage stream in Phase 13, and was built there (see Phase
+  13). Fixed-weight A/B splits with sticky bucketing worked from this phase through `/v1/routes`.
 - The CLI and dashboard surfaces arrive with the CLI (Phase 14) and the dashboard (Phase 15).
 
 **Original plan**
@@ -981,6 +981,11 @@ it and restores baseline weights automatically, with the reason recorded.
 - Control plane: `GET /v1/usage` and `GET /v1/costs` (grouped by deployment, API key, hour or not
   at all; costs with their assumptions and the profile versions used), `GET`/`POST
   /v1/pricing-profiles` (each create is the next immutable version).
+- Experiments, carried from Phase 12: `/v1/experiments` (start, list, read, stop) observes a
+  route's split over a window, and `/v1/experiments/{id}/results` compares each arm with the
+  baseline from the stored request rows — requests, error rate, p50/p95, tokens per second, cost per
+  1 000 tokens — with seeded bootstrap intervals (`packages/abtest`) and an explicit refusal to
+  claim significance. One running experiment per route, by the database.
 - Migration 000013 (a request may be `failed`); `nebula-migrate up` keeps three months of
   `requests` and `audit_logs` partitions ahead, run by every migrate init container and a daily
   CronJob; JetStream on the development NATS.
@@ -997,7 +1002,12 @@ Control plane: pricing versions, usage grouping and totals, costs with assumptio
 `tests/e2e/kind/phase13_demo.py`: **1 000 requests reconciled exactly** — the client's 5 000 prompt
 and 8 000 completion tokens equal the new request rows; rows, rollups, `/v1/usage` and `/v1/costs`
 agree on every count and on the cost (1 032 µ); after a price change the first requests still cost
-1 032 µ, the 50 after it cost 199 µ under v2, and the rebuilt rollups hold exactly 1 231 µ.
+1 032 µ, the 50 after it cost 199 µ under v2, and the rebuilt rollups hold exactly 1 231 µ. The
+same demo runs an experiment: a sticky 50/50 split by user against a variant five times slower —
+all 40 users stayed on their arm — compared as p50 +316 ms, 95% CI [314, 316], significance not
+claimed. Experiment tests: identical arms span zero, a clear difference excludes it, results are
+reproducible under the experiment's seed, too few samples refuse an interval; through the API, a
+second running experiment on a route is refused and a stopped one's intervals do not move.
 
 Building it found two defects, now fixed: a version effective partway through an hour would have
 priced that hour's later requests inconsistently with the rollup's recorded profile (pricing is now

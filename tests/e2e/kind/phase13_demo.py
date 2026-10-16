@@ -15,7 +15,10 @@ criterion, walked:
      which states its assumptions and the profile version it priced under;
   5. a price change is a new version: later requests are priced under it, and the
      cost of the first 1 000 is unchanged after their rollup is recomputed;
-  6. cleanup.
+  6. an A/B experiment on the stored rows: a sticky 50/50 split by user against a
+     slower variant, every user staying on one arm, compared per arm with bootstrap
+     intervals and no claim of significance;
+  7. cleanup.
 """
 
 from __future__ import annotations
@@ -46,6 +49,7 @@ from phase5_demo import (  # noqa: E402
 )
 
 ROUTE = DEP = "cost-demo"
+DEP_B = "cost-demo-b"
 N = 1000
 
 
@@ -83,6 +87,7 @@ def main() -> None:
     key = seeded_key()
     remove_route(key, ROUTE)
     remove_deployment(key, DEP)
+    remove_deployment(key, DEP_B)
     since = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:00:00Z")
 
     # Right after an upgrade the gateway may not yet verify keys; wait until it does.
@@ -187,9 +192,58 @@ def main() -> None:
     ok(f"the first {req_count} requests still cost {before} µ; the 50 after v{v2['version']} cost {after} µ; "
        f"the recomputed rollups hold {total} µ = {before} + {after}")
 
+    step("an A/B experiment: a sticky 50/50 split against a slower variant, compared per arm")
+    code, dep_b = deploy(key, DEP_B, version["id"], 2, runtime_overrides={"tokens_per_second": 40, "parallel_slots": 4})
+    if code != 202:
+        fail(f"{code} {dep_b}")
+    wait("variant ready", lambda: status(key, dep_b["id"])["status"]["state"] == "ready", timeout=300)
+    put_route(key, ROUTE, [{"deployment": DEP, "weight": 50, "label": "baseline", "is_baseline": True},
+                           {"deployment": DEP_B, "weight": 50, "label": "slower"}])
+    time.sleep(8)  # gateways pick up the split
+    code, exp = api("POST", "/v1/experiments", {"name": f"speed-{int(time.time())}", "route": ROUTE,
+                                                "hypothesis": "the slower variant is slower"}, key)
+    if code != 201:
+        fail(f"experiment: {code} {exp}")
+    users = [f"user-{i}" for i in range(40)]
+    seen: dict[str, set[str]] = {u: set() for u in users}
+
+    def as_user(u: str) -> None:
+        c, out = api("POST", "/v1/chat/completions", {"model": ROUTE, "user": u, "max_tokens": 8,
+                                                      "messages": [{"role": "user", "content": "hi"}]}, key)
+        if c == 200:
+            seen[u].add(out["nebula"]["deployment"])
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        list(pool.map(as_user, [u for u in users for _ in range(10)]))
+    moved = [u for u, deps in seen.items() if len(deps) != 1]
+    if moved:
+        fail(f"users moved between arms: {moved[:3]}")
+    arms_used = {next(iter(d)) for d in seen.values()}
+    if arms_used != {DEP, DEP_B}:
+        fail(f"40 users all landed on {arms_used}")
+    ok(f"400 requests from 40 users: every user stayed on one arm; both arms used")
+    wait("the experiment's requests ingested", lambda: sum(
+        a["requests"] for a in api("GET", f"/v1/experiments/{exp['id']}/results", key=key)[1].get("arms", [])) >= 400,
+        timeout=180, every=2)
+    code, stopped = api("POST", f"/v1/experiments/{exp['id']}/stop", {"conclusion": "the variant is slower"}, key)
+    if code != 200:
+        fail(f"stop: {code} {stopped}")
+    _, res = api("GET", f"/v1/experiments/{exp['id']}/results", key=key)
+    for arm in res["arms"]:
+        ok(f"arm {arm['label']}: {arm['requests']} requests, p50 {arm['p50_ms']:.0f} ms, "
+           f"{arm['tokens_per_second']} tokens/s, error rate {arm['error_rate']}")
+    cmp = res["comparison"][0]
+    p50 = cmp.get("p50_ms") or {}
+    if not p50 or p50["ci95"][0] <= 0:
+        fail(f"the slower variant's p50 interval should exclude zero: {cmp}")
+    if res["significance"]["claimed"]:
+        fail("significance must never be claimed")
+    ok(f"{cmp['variant']} vs {cmp['baseline']}: p50 +{p50['delta']:.0f} ms, 95% CI {p50['ci95']} ({p50['method']}); "
+       f"significance claimed: {res['significance']['claimed']}")
+
     step("cleanup")
     remove_route(key, ROUTE)
     remove_deployment(key, DEP)
+    remove_deployment(key, DEP_B)
     ok("removed")
     print("\nPHASE 13 DEMO PASSED")
 

@@ -346,7 +346,7 @@ checkout.
 | Autoscaling | ✅ **working** — kind demo: 1 → 4 replicas under load, back to 1 after the idle window, every decision a row; gateway CPU HPA opt-in | 9 |
 | Retries, breakers, timeouts, graceful shutdown | ✅ **working** — `make test-failure`: 9,165 requests through rolling updates, a killed pod and four dependency outages, 3 errors (the crashed process's in-flight) | 10 |
 | Model versioning, rollback | ✅ **working** — kind demo: v1 → v2 → an unloadable v3 → rollback → v1 under load, zero client errors; the failed rollout names the worker's reason | 11 |
-| Canary rollouts, A/B testing | ✅ **working** — kind demo: a healthy canary promoted 10 → 100 with zero errors; failing and slow canaries rolled back automatically with the reason; sticky A/B by `user`; experiment comparisons with Phase 13 | 12 |
+| Canary rollouts, A/B testing | ✅ **working** — kind demo: a healthy canary promoted 10 → 100 with zero errors; failing and slow canaries rolled back automatically with the reason; sticky A/B by `user`, compared per arm with bootstrap intervals | 12, 13 |
 | Token accounting, cost estimation, usage analytics | ✅ **working** — kind demo: 1 000 requests reconciled exactly from client tokens to request rows to rollups to `/v1/costs`, with stated assumptions; history unchanged by a price change | 13 |
 | CLI | ⬜ not started | 14 |
 | Dashboard | ⬜ not started | 15 |

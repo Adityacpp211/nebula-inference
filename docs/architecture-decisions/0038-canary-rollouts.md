@@ -46,7 +46,7 @@ once, and how a step with too little data or no data at all is judged.
   failing every generation is rolled back 40 s after it starts, having cost ten requests at 10%; a
   canary six times slower is rolled back on its p95. Each reason is on the rollout row.
 - The experiments read model of docs/api.md (per-arm comparison with bootstrap intervals) needs
-  per-request records, which arrive with the durable usage stream in Phase 13; fixed-weight splits
-  with sticky bucketing work now through `/v1/routes`.
+  per-request records, which arrived with the durable usage stream in Phase 13, where it was built
+  (`packages/abtest`, `/v1/experiments`).
 - Analysis compares arms only while the baseline still serves traffic: reaching 100 is promotion,
   with nothing left to compare against.
